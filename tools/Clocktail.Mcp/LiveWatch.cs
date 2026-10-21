@@ -5,6 +5,7 @@ using Clocktail.Core.Gpu;
 using Clocktail.Domain;
 using Clocktail.Domain.Broker;
 using Clocktail.Domain.Power;
+using Clocktail.Domain.Profiles;
 using Clocktail.Domain.Rails;
 using Clocktail.Domain.Vf;
 using Rail = Clocktail.Domain.Rails.Rail;
@@ -189,6 +190,7 @@ public sealed class LiveWatch(Card card) : IDisposable
         var cap = run.Started.AddHours(MaxHours);
         VfCurveSnapshot? curve = null;
         uint? maxUv = null;
+        IReadOnlyDictionary<int, int> edge = new Dictionary<int, int>();
         var shapeAt = DateTimeOffset.MinValue;
         bool inLoad = false, hot = false, hangReported = false;
         DateTimeOffset? notLoadedSince = null, hangSince = null;
@@ -207,6 +209,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                     // The curve's effective clocks move with temperature, and a trial may change it mid-watch: read it once a window.
                     try { curve = card.WithDriver(VfReader.Read); maxUv = card.WithDriver(RailsReader.Read).Get(Rail.Nvvdd)?.Limits.MaxUv; }
                     catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
+                    if (curve != null) edge = Edge(curve);
                     shapeAt = now;
                 }
                 Card.Sample? s = null;
@@ -273,7 +276,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                         notLoadedSince ??= now;
                         if (now - notLoadedSince >= LoadGap)
                         {
-                            if (window.Count > 0) Emit(run, WindowLine(window, curve) + Fps(run));
+                            if (window.Count > 0) Emit(run, WindowLine(window, curve, edge) + Fps(run));
                             window.Clear();
                             inLoad = false;
                             Emit(run, $"⏸️ load stopped after {Duration(notLoadedSince.Value - loadSince)}");
@@ -281,7 +284,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                     }
                     if (inLoad && now - windowStart >= every)
                     {
-                        if (window.Count > 0) Emit(run, WindowLine(window, curve) + Fps(run));
+                        if (window.Count > 0) Emit(run, WindowLine(window, curve, edge) + Fps(run));
                         window.Clear();
                         windowStart = now;
                     }
@@ -298,7 +301,7 @@ public sealed class LiveWatch(Card card) : IDisposable
         }
         finally
         {
-            if (inLoad && window.Count > 0) Emit(run, WindowLine(window, curve) + Fps(run));
+            if (inLoad && window.Count > 0) Emit(run, WindowLine(window, curve, edge) + Fps(run));
             Finish(run);
         }
     }
@@ -350,7 +353,20 @@ public sealed class LiveWatch(Card card) : IDisposable
 
     /// <summary>One window under load, the way the reference card's runs were read: clock range and median, the voltage and
     /// the curve point it sat on, MSVDD and XBAR, power against the wall, temperature, fans, and what held the clock.</summary>
-    private static string WindowLine(List<Point> w, VfCurveSnapshot? curve)
+    /// <summary>The crash edge per curve point from this GPU's data points (<see cref="CrashEdge"/>); empty when there are none.</summary>
+    private IReadOnlyDictionary<int, int> Edge(VfCurveSnapshot curve)
+    {
+        try
+        {
+            var show = card.Broker(Clocktail.Domain.Broker.BrokerRequest.OpExperiment, "show");
+            if (show.Result is { } r && r.TryGetProperty("data", out var d) && d.GetString() is { } data)
+                return CrashEdge.From(Experiment.ReadLast(data, 1000), curve.Points);
+        }
+        catch (Exception e) when (e is IOException or InvalidOperationException or UnauthorizedAccessException) { }
+        return new Dictionary<int, int>();
+    }
+
+    private static string WindowLine(List<Point> w, VfCurveSnapshot? curve, IReadOnlyDictionary<int, int>? edge = null)
     {
         var clocks = w.Where(p => p.ClockMhz != null).Select(p => (double)p.ClockMhz!.Value).ToList();
         int? point = Mode(w.Select(p => p.CurvePoint));
@@ -364,6 +380,8 @@ public sealed class LiveWatch(Card card) : IDisposable
             $" · {Avg(w.Select(p => p.BoardW)):0} W avg, {w.Max(p => p.BoardW):0} max of {limit:0} ({100.0 * w.Count(p => p.OnWall) / w.Count:0} % on the wall)"));
         sb.Append(string.Create(CultureInfo.InvariantCulture, $" · {w.Max(p => p.TempC):0} °C · fans {Avg(w.Select(p => p.FanPct)):0} %"));
         sb.Append(" · ").Append(Words(Mode(w.Select(p => p.HeldBy)) ?? "idle"));
+        if (edge != null && point is { } pi && curve?.Points.FirstOrDefault(x => x.Index == pi) is { } ep && CrashEdge.Describe(edge, pi, ep.OffsetKhz) is { } e)
+            sb.Append(" · ").Append(e);
         return sb.ToString();
     }
 
