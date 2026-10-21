@@ -19,7 +19,8 @@ public sealed record ClockRatioReading(uint Relations, uint Raw, IReadOnlyDictio
 /// load. The block holds 14 relations 0x108 apart (others 0.8, 2.0, 1.2, 1.5: not identified), past the 0x75c its version
 /// word names, so it is read in the original's call form (<see cref="Slots"/>: 0x5798 r1 in a 0x8000 buffer, 0x75c r1 in a
 /// 0x2000 buffer); control +4 is the info's +8, the relation mask (0x3fff). A write is the block as read with +0x68
-/// changed, gateway kind 9 [observed]; the readback must be the block with that one change.
+/// changed, gateway kind 9 [observed]; the readback must be the block with that one change. Drilled 2026-10-21: 0.92
+/// read back exactly and ran XBAR 2595 MHz against a 2850 MHz core (0.911) at the 600 W wall, 2535 / 2865 at stock.
 /// </summary>
 public static class ClockRatio
 {

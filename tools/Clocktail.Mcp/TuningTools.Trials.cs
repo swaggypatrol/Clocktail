@@ -321,16 +321,17 @@ public sealed partial class TuningTools
             new() { ["writes"] = items.Select(i => TrialWrite(ClockLimitWrites.Kind, i.Key, i.Value)).ToList() });
     });
 
-    /// <summary>set_clock_ratio: the largest change per call.</summary>
-    public const double RatioStep = 0.02;
+    /// <summary>set_clock_ratio: the largest change per call, enough to go from the stock 0.8999 to 0.92 in one.</summary>
+    public const double RatioStep = 0.025;
 
     [McpServerTool(Name = "set_clock_ratio", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set XBAR's clock ratio to the core (the driver's NVVDD/MSVDD clock propagation ratio, the original's --xbar-ratio) " +
         "as a new trial. 0.8999 on a 5090 (58976/65536): under load XBAR is held to about 0.9 x the core clock, which is " +
         "why adjust_xbar stops paying past +250 MHz. A higher ratio lets XBAR follow the core closer (about +29 MHz of XBAR " +
         "per +0.01 at a 2900 MHz core) and asks MSVDD for the voltage that clock needs, so adjust_xbar's demand rules apply " +
-        "to the clock it reaches. Not written on the reference card before its drill: watch XBAR's clock in gpu_status and " +
-        "judge by a benchmark that uses memory. 0.5..1.0, at most 0.02 per call. keep_as_daily keeps it; back_to_daily, " +
+        "to the clock it reaches. On the reference card 0.92 ran XBAR 2595 MHz against a 2850 MHz core at the 600 W wall " +
+        "(2535 / 2865 at stock), MSVDD 980 → 1005 mV; its gain in frames is unmeasured: judge by a benchmark that uses " +
+        "memory. 0.5..1.0, at most 0.025 per call. keep_as_daily keeps it; back_to_daily, " +
         "end_session and a crash put the daily profile's back.")]
     public string SetClockRatio(
         [Description("The ratio to try, 0.5..1.0 (absolute).")] double ratio,
@@ -349,9 +350,10 @@ public sealed partial class TuningTools
         "Set the additional board power request (F8, the CLI's --power-cap) as a new trial, beside the ordinary one " +
         "set_power_limit moves (FE). On a 5090 FE it does not exist until the first call creates it, and the driver offers " +
         "no way to delete one: from then on it can only go back to the board's maximum (600 W), which is where back_to_daily, " +
-        "end_session, a crash and the agent disconnecting put it, until the next boot. It was never created on the reference " +
-        "card, so how it combines with FE is unmeasured: read gpu_status's power limit and, under load, its power to see " +
-        "which one holds. The board's range (400-600 W on a 5090). Never kept. Ask the person before calling this.")]
+        "end_session, a crash and the agent disconnecting put it, until the next boot. The lower of FE and F8 holds (on the " +
+        "reference card F8 500 W under FE 600 W held the board at 500 W), so at the board's maximum it limits nothing; " +
+        "gpu_status's power limit shows a change a few seconds late. The board's range (400-600 W on a 5090). Never kept. " +
+        "Ask the person before calling this.")]
     public string SetPowerCap(
         [Description("The F8 request, W.")] double watts,
         [Description("Why (what it is meant to show).")] string? reason = null) => Guard(() =>

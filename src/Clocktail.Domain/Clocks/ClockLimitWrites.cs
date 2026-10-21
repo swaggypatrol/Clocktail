@@ -11,8 +11,9 @@ namespace Clocktail.Domain.Clocks;
 /// nvidia-smi -lgc), and the voltage lock (entry 6, mode 3, µV: a V/F point lock, or <see cref="ClientLimitsLayout.BoostLockUv"/>
 /// for Boost Lock). 0 releases an entry. A write is the original's request form [observed]: the record cleared, +8 = 1,
 /// one entry at +0xc {domain, 0, mode, 0, value, 0}, gateway kind 8; the readback must be the record before with that
-/// entry changed and nothing else. Entry 0 and 1's direction was measured with -lgc (2026-10-21); a write through slot 27
-/// was not, until its drill.
+/// entry changed and nothing else. Entry 0 and 1's direction was measured with -lgc (2026-10-21), and the writes in their
+/// drill the same day (617.42): Boost Lock held 3052 MHz in P0 at idle, a 2000 MHz cap held 1980 MHz at full load, a
+/// 900 mV point lock held 2775 MHz at 890 mV at load 50, and 0 released each.
 /// </summary>
 public static class ClockLimitWrites
 {

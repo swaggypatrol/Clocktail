@@ -13,7 +13,8 @@ namespace Clocktail.Domain.Clocks;
 /// entry, NVVDD's then MSVDD's; a domain uses the one its topology entry names. The core's (graphics, NVVDD's slot of
 /// entry 0) moves every Core V/F point's voltage by the same µV: the reader shows it as the curve's demand shift
 /// (VfPoint.VoltageUv less its firmware voltage), so the same curve runs at a higher or lower voltage. XBAR's was written
-/// live on 2026-10-20 (+20 mV moved MSVDD 825 → 845 mV); the core's slot has the same layout and read 0 live.
+/// live on 2026-10-20 (+20 mV moved MSVDD 825 → 845 mV); the core's on 2026-10-21 (+5 mV read back as the curve's +5 mV
+/// demand shift, 0 put it back).
 /// </summary>
 public static class ClockVdemand
 {
