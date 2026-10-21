@@ -22,6 +22,7 @@ public sealed class InvariantTimeTests : IDisposable
     [Fact]
     public void The_System_log_query_is_in_the_event_logs_own_format()
     {
+        if (!OperatingSystem.IsWindows()) return;
         var q = SystemLog.Query(SystemLog.DriverResetFilter, new DateTime(2026, 10, 19, 21, 48, 3, 250, DateTimeKind.Utc));
         Assert.Contains("@SystemTime>='2026-10-19T21:48:03.250Z'", q);
     }
