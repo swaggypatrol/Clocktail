@@ -88,7 +88,7 @@ public static class Nvgwls
 
     /// <summary>Runs it hidden and calls <paramref name="sample"/> every 500 ms until it exits or overruns. A sample that
     /// answers true stops the run (its process tree is ended) and sets <paramref name="stopped"/>; the code is then null.</summary>
-    public static int? Run(string exe, int load, int seconds, Func<bool> sample, out bool stopped)
+    public static int? Run(string exe, int load, int seconds, Func<bool> sample, out bool stopped, int graceS = 30)
     {
         stopped = false;
         var dir = Path.Combine(Path.GetTempPath(), "clocktail-stress");
@@ -102,7 +102,7 @@ public static class Nvgwls
         foreach (var a in new[] { "-b", "500", "-r", (seconds * 1000).ToString(System.Globalization.CultureInfo.InvariantCulture), "-l", load.ToString(System.Globalization.CultureInfo.InvariantCulture) })
             psi.ArgumentList.Add(a);
         using var p = Process.Start(psi) ?? throw new InvalidOperationException("nvgwls did not start");
-        var deadline = DateTime.UtcNow.AddSeconds(seconds + 30);
+        var deadline = DateTime.UtcNow.AddSeconds(seconds + graceS);
         while (!p.WaitForExit(500))
         {
             if (sample())

@@ -481,7 +481,9 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             catch (DriverBusyException) { }
             return false;
         }
-        try { code = Nvgwls.Run(exe, load, seconds, Sample, out tooHot); }
+        // A hang must be called only after the driver has had its TdrDelay to reset (30 s on the reference machine).
+        int grace = (OperatingSystem.IsWindows() ? Clocktail.Domain.Platform.TdrSettings.Read() : null)?.StressGraceS ?? 30;
+        try { code = Nvgwls.Run(exe, load, seconds, Sample, out tooHot, grace); }
         finally { residency.StressUntil(DateTimeOffset.MinValue); }
         int? resets = tooHot ? Nvgwls.DriverResets(started, 0) : Nvgwls.DriverResets(started, code);
         double ranS = Math.Round((DateTime.UtcNow - started).TotalSeconds);

@@ -259,6 +259,10 @@ public sealed partial class SettingsTools
             rows.Add(new("🔌", "16-pin input", "", Num(input, "input_a") is { } ia ? $"{F(cw)} W, {F(ia)} A" : $"{F(cw)} W", "",
                 Str(input, "concern") != null ? Look : Safe,
                 Str(input, "concern") ?? Join(Num(input, "input_limit_a") is { } il ? $"input limit {F(il)} A" : null, "rated 600 W")));
+        if (Obj(s, "tdr") is { } tdr && Str(tdr, "what") is { } what)
+            rows.Add(new("⏱️", "Driver timeout (TDR)", "", Num(tdr, "delay_s") is { } d ? $"{F(d)} s, level {F(Num(tdr, "level"))}" : "?", "",
+                Bool(tdr, "safe_to_map") == false ? Act : Info,
+                Bool(tdr, "safe_to_map") == false ? $"{what}: do not map the curve's edge with stress_test until TdrLevel is 3 (the default)" : what));
         if (Obj(s, "last_crash") is { } crash)
             rows.Add(new("💥", "Last crash", "", Str(crash, "found_at") is { } fa && DateTimeOffset.TryParse(fa, CultureInfo.InvariantCulture, out var when) ? when.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture) : "?", "", Look,
                 Join(Str(crash, "what"), Num(crash, "held") is { } n && n > 0 ? $"{F(n)} setting(s) were held; they were given back" : null, "data_points and read_log have the trial it happened in")));

@@ -38,3 +38,6 @@ Light load (40 % duty, ~65 C): 930 mV 2947 / 2970; 940 mV 2970 / 3000; 955 mV 30
 
 ## Durations
 A 60 s `stress_test` at load 100 catches a bad curve fast; 120-300 s before keeping something. Games: at least 5-10 minutes in the heaviest scene they know, per change.
+
+## Windows' timeout (TDR)
+card_report's "Driver timeout (TDR)" row reads Windows' own settings, never writes them. With TdrLevel 3 (the default) a hung GPU is reset after TdrDelay seconds (2 by default, 30 on the reference machine); until then the readings freeze at the curve's top, which is why a crash's frozen tail lasts that long. stress_test waits TdrDelay + 15 s (at least 30) past its run time before it calls a run hung. With TdrLevel 0 or 1 a hang does not recover by itself (the PC freezes, or bug-checks): do not map the curve's edge until it is 3.

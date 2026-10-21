@@ -77,6 +77,9 @@ public sealed partial class SettingsTools(Card card)
             // Locks in the driver's client clock-limit record: NVML's locked clocks, a V/F point lock, Boost Lock. Clocktail
             // sets none, so any one here was set by another tool and outlives it.
             clock_locks = Section(() => card.WithDriver(ClientLimitsLayout.Read).Select(h => new { entry = h.Domain, mode = h.Mode, value = h.Value, what = h.Describe() }).ToList()),
+            tdr = Section(() => (OperatingSystem.IsWindows() ? Clocktail.Domain.Platform.TdrSettings.Read() : null) is { } tdr
+                ? new { delay_s = tdr.Delay, level = tdr.LevelOrDefault, set_delay = tdr.DelayS != null, what = tdr.Describe(), safe_to_map = !tdr.Unsafe }
+                : throw new InvalidOperationException("the GraphicsDrivers key could not be read")),
             perf_decrease = Section(() => card.PerfDecrease() is { } bits
                 ? new { bits = $"0x{bits:x}", reasons = Card.PerfDecreaseReasons(bits) }
                 : throw new InvalidOperationException("GetPerfDecreaseInfo did not answer")),
