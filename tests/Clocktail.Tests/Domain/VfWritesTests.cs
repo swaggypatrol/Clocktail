@@ -255,6 +255,27 @@ public class VfWritesTests : IDisposable
         Assert.Equal(shape.NewKhz, r.CurveAfter!.Points.Select(p => (long)p.EffectiveKhz));
     }
 
+    /// <summary>W14: shift_curve moves the curve on the card, not the stock one. With no offsets it is the stock undervolt;
+    /// with the daily profile's +60 MHz on every point, every point up to the ceiling keeps at least its own offset (the
+    /// stock shift would not: it starts from the bases), and nothing passes the current curve's clock at the ceiling.</summary>
+    [Fact]
+    public void Shifting_the_current_curve_starts_from_its_offsets_not_from_stock()
+    {
+        var f = Live5090.Curve();
+        var s = VfParser.Parse(f.Info(), f.Status(f.Control()), f.Control());
+        var limits = new VfLimits(-1_000_000, 1_000_000, 0);
+        Assert.Equal(VfShapes.Undervolt(s, limits, 25_000, Live5090.CeilingUv).Offsets, VfShapes.ShiftCurrent(s, limits, 25_000, Live5090.CeilingUv).Offsets);
+
+        var raised = s with { Points = s.Points.Select(p => p with { OffsetKhz = 60_000 }).ToList() };
+        var shifted = VfShapes.ShiftCurrent(raised, limits, 25_000, Live5090.CeilingUv);
+        var fromStock = VfShapes.Undervolt(raised, limits, 25_000, Live5090.CeilingUv);
+        var under = raised.Points.Where(p => p.ReferenceVoltageUv <= Live5090.CeilingUv).Select(p => p.Index).ToList();
+        Assert.All(under, i => Assert.True(shifted.Offsets[i] >= 60_000, $"point {i}: {shifted.Offsets[i]}"));
+        Assert.Contains(under, i => fromStock.Offsets[i] < 60_000);
+        Assert.All(shifted.NewKhz, k => Assert.True(k <= shifted.CapKhz, $"{k} above the cap {shifted.CapKhz}"));
+        Assert.Contains(under, i => shifted.Offsets[i] > 60_000);   // it does move
+    }
+
     [Fact]
     public void A_driver_that_carries_half_steps_is_reported()
     {

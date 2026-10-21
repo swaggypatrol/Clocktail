@@ -66,7 +66,7 @@ public class CapabilitiesTests
 
         var curve = Assert.Single(map, c => c.Name == "V/F curve");
         Assert.True(curve.Can, curve.Why);
-        Assert.Equal("adjust_curve", curve.Tool);
+        Assert.Equal("adjust_curve, flatten_curve, set_curve, shift_curve", curve.Tool);
         Assert.Contains("for each write the tool makes", curve.Why);
         Assert.True(Assert.Single(map, c => c.Name == "MSVDD voltage").Can);
 

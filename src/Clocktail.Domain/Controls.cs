@@ -18,7 +18,7 @@ public static class Controls
 
     private static readonly Entry[] Table =
     [
-        new("V/F curve", "adjust_curve", c => c.VfPoints, Slot.ClockClientClkVfPointsSetControl, PerWrite: true),
+        new("V/F curve", "adjust_curve, flatten_curve, set_curve, shift_curve", c => c.VfPoints, Slot.ClockClientClkVfPointsSetControl, PerWrite: true),
         new("power limit", "set_power_limit, set_daily_power_limit", c => c.PwrPolicies, Slot.ClientPwrPoliciesSetControl),
         new("additional power request (F8)", "set_power_cap", c => c.PwrPolicies, Slot.ClientPwrPoliciesSetControl),
         new("current limits", "set_current_limit", c => c.PowerPolicy, Slot.PowerPolicySetControl, PerWrite: true),

@@ -300,6 +300,83 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         });
     });
 
+    /// <summary>shift_curve: the largest shift per call (CLOCKTAIL_MCP_SHIFT_STEP_MV). A 250 mV shift at 600 W bugchecked
+    /// the reference card (0x133, re/robustness.md).</summary>
+    public static readonly int ShiftStepMv = Env("CLOCKTAIL_MCP_SHIFT_STEP_MV", 25);
+
+    /// <summary>The first point a new curve would put more than the cap above the daily profile, or null.</summary>
+    public static int? OverDaily(int[] next, int[] daily, int capMhz) =>
+        Enumerable.Range(0, next.Length).Cast<int?>().FirstOrDefault(i => next[i!.Value] - daily.ElementAtOrDefault(i.Value) > capMhz * 1000);
+
+    [McpServerTool(Name = "set_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Write a whole V/F curve as a new trial: every editable point's offset in kHz, in card_settings' encoding (runs as " +
+        "offset*count, e.g. '0*60,30000*67'; '0*127' is the stock curve), as the CLI's --vf-offsets does. For loading a " +
+        "curve worked out elsewhere, or putting back one a data point recorded; a band is adjust_curve's. No point more than " +
+        "200 MHz above the daily profile's (CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ); the write path holds the firmware's offset " +
+        "range and budget. Refused while the GPU is busy (over 15 % utilization): write it at idle. back_to_daily undoes it; " +
+        "keep_as_daily keeps it.")]
+    public string SetCurve(
+        [Description("Every editable point's offset, kHz, as runs offset*count.")] string curve,
+        [Description("Why this curve (where it came from).")] string? reason = null) => Guard(() =>
+    {
+        int[] next;
+        try { next = VfOffsets.Decode(curve); } catch (FormatException e) { throw new ArgumentException($"'{curve}' is not a curve: {e.Message}"); }
+        var look = card.Read();
+        if (next.Length != look.Curve.Points.Count) throw new ArgumentException($"the curve has {next.Length} points; this card's has {look.Curve.Points.Count}");
+        return CurveTrial(look, next, "whole curve written", reason);
+    });
+
+    [McpServerTool(Name = "shift_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Move the curve on the card left by mv as a new trial: from the knee up each point runs the clock the current curve " +
+        "runs mv above it, never past what it runs at NVVDD's MAX; below the knee nothing moves. The same clocks at less " +
+        "voltage, so on a power-limited load more clock under the same wall. This is not the CLI's --vf-undervolt, which " +
+        "moves the stock curve (on the reference card that put 895 mV at 2407 MHz where the daily curve ran 2797). It is a " +
+        "raise at every voltage, so test it as a raise: stress_test across the loads, then games. At most 25 mV per call " +
+        "(CLOCKTAIL_MCP_SHIFT_STEP_MV; a 250 mV shift at 600 W bugchecked the reference card), no point more than 200 MHz " +
+        "above the daily profile's. Refused while the GPU is busy: write it at idle. back_to_daily undoes it; keep_as_daily keeps it.")]
+    public string ShiftCurve(
+        [Description("mV to move the curve left by.")] double mv,
+        [Description("Why (what the last pass showed).")] string? reason = null) => Guard(() =>
+    {
+        if (mv <= 0) throw new ArgumentException("mv moves the curve left: give it as a positive number (adjust_curve lowers)");
+        if (mv > ShiftStepMv) throw new ArgumentException($"a shift is at most {ShiftStepMv} mV per call (CLOCKTAIL_MCP_SHIFT_STEP_MV); split it into several trials");
+        var look = card.Read();
+        var limits = VfLimits.From(card.WithDriver(Clocktail.Domain.Clocks.Pstates20Reader.Read));
+        var shape = VfShapes.ShiftCurrent(look.Curve, limits, (int)Math.Round(mv * 1000), look.NvvddMaxUv);
+        if (shape.AppliedUv == 0) throw new ArgumentException($"{mv} mV is less than one regulator step ({VfShapes.VidStepUv / 1000.0} mV): it moves no point");
+        return CurveTrial(look, shape.Offsets, string.Create(CultureInfo.InvariantCulture, $"curve shifted left {shape.AppliedUv / 1000.0} mV from {shape.FloorUv / 1000.0} mV"), reason);
+    });
+
+    /// <summary>A whole new curve as a trial, at idle and under the daily-profile cap; the answer lists the points that moved.</summary>
+    private string CurveTrial(Card.Look look, int[] next, string change, string? reason)
+    {
+        if (look.Telemetry?.GpuUtilPercent is { } u && u > FlattenMaxUtilPct)
+            throw new InvalidOperationException($"the GPU is {u} % busy: a curve written under load began 2 of 3 hangs on the reference card. Write it at idle");
+        var daily = DailyOffsets(out _);
+        if (OverDaily(next, daily, MaxAboveDailyMhz) is { } bad)
+            throw new ArgumentException(string.Create(CultureInfo.InvariantCulture,
+                $"point {bad} ({look.Curve.Points[bad].VoltageUv / 1000.0} mV) would be {(next[bad] - daily.ElementAtOrDefault(bad)) / 1000.0} MHz above the daily profile; the cap is {MaxAboveDailyMhz} MHz (CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ)"));
+        var before = look.Curve.Offsets();
+        var moved = look.Curve.Points.Where(p => p.Index < next.Length && next[p.Index] != before[p.Index]).ToList();
+        if (moved.Count == 0) throw new ArgumentException("that is the curve on the card already: nothing to try");
+        var context = new List<string> { Readings(look) };
+        if (reason != null) context.Add($"Purpose: {reason}");
+        foreach (var p in moved)
+            context.Add(string.Create(CultureInfo.InvariantCulture,
+                $"point {p.Index} ({p.VoltageUv / 1000.0} mV): offset {p.OffsetKhz / 1000.0} → {next[p.Index] / 1000.0} MHz, effective {p.EffectiveKhz / 1000.0} → about {(p.EffectiveKhz + next[p.Index] - p.OffsetKhz) / 1000.0} MHz"));
+        change += $": points {moved[0].Index}-{moved[^1].Index}";
+        var r = card.Broker(BrokerRequest.OpExperiment, "try",
+            JsonSerializer.Serialize(new { curve = VfOffsets.Encode(next), change, at_uv = look.NvvddUv, at_mhz = look.Telemetry?.GraphicsClockMhz, context }));
+        if (!r.Ok) return Reply(r);
+        var after = ReadAfter(out var unread);
+        return Out(new
+        {
+            success = true, change, written = r.Written,
+            landed = after?.Curve.Points.Where(p => p.Index >= moved[0].Index && p.Index <= moved[^1].Index).Select(p => Row(p, daily)),
+            warning = unread,
+        });
+    }
+
     [McpServerTool(Name = "set_power_limit", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set the board power limit for the session, as a new trial with the curve left as it is. A lower wall makes the card " +
         "run lower down the curve, so adjust_curve can then sample points it never reaches at the full wall (and find where " +

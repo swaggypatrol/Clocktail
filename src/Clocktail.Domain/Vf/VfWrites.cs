@@ -378,6 +378,21 @@ public static class VfShapes
     }
 
     /// <summary>
+    /// The curve on the card moved left by ΔV, not the stock curve (W14: on the reference card the stock shift would have
+    /// put 895 mV at 2407 MHz under a daily curve that ran it at 2797, every point 300-450 MHz lower). It is
+    /// <see cref="Undervolt"/> run on the curve as it runs now, each point's base plus its offset taken as if it were stock,
+    /// so the knee, the regulator and clock steps and the cap at the ceiling hold as they do there, and each point's own
+    /// offset is added back: from the knee up each point runs what the current curve ran ΔV above it, never past what it
+    /// runs at the ceiling. Below the knee the curve stays as it is.
+    /// </summary>
+    public static VfShape ShiftCurrent(VfCurveSnapshot s, VfLimits limits, int shiftUv, uint? capUv)
+    {
+        var asStock = s with { Points = [.. s.Points.Select(p => p with { BaseKhz = (uint)Math.Max(0, (long)p.BaseKhz + p.OffsetKhz), OffsetKhz = 0 })] };
+        var shape = Undervolt(asStock, limits, shiftUv, capUv);
+        return shape with { Offsets = [.. shape.Offsets.Select((o, i) => o + s.Points[i].OffsetKhz)] };
+    }
+
+    /// <summary>
     /// What the driver reports for a point after its offset, kHz, as measured live (drill 19: 64 of 64 points). A base is
     /// k × 7.5 MHz, so with k odd it sits on a half step of the 15 MHz grid. A raise adds its whole 15 MHz units and ORs
     /// the half steps: a half step on both the base and the raise does not carry, and the point lands one 7.5 MHz step
