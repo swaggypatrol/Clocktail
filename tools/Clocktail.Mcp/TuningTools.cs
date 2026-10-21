@@ -656,8 +656,19 @@ public sealed partial class TuningTools(Card card, Residency residency)
             int[] offsets;
             try { offsets = VfOffsets.Decode(d.Curve); } catch (FormatException) { continue; }
             // A crash belongs to where the card was when it fell over, not to the whole trial.
-            var counted = d.Outcome == Experiment.Crash ? during.Where(t => t.At >= during[^1].At - TimeSpan.FromSeconds(30)).ToList() : during;
-            foreach (var s in Stays(counted, look.Curve).Where(s => s.Share >= 0.1))
+            if (d.Outcome == Experiment.Crash)
+            {
+                foreach (var (index, clock) in CrashAt(during, d.CrashUv, look.Curve))
+                {
+                    int off = offsets.ElementAtOrDefault(index);
+                    if (!records.TryGetValue(index, out var rec)) records[index] = rec = new PointRecord();
+                    rec.Crashes++;
+                    if (rec.CrashKhz is not { } kc || off < kc) rec.CrashKhz = off;
+                    if (clock is { } c && (rec.CrashMhz is not { } cm || c < cm)) rec.CrashMhz = c;
+                }
+                continue;
+            }
+            foreach (var s in Stays(during, look.Curve).Where(s => s.Share >= 0.1))
             {
                 int off = offsets.ElementAtOrDefault(s.Index);
                 if (!records.TryGetValue(s.Index, out var rec)) records[s.Index] = rec = new PointRecord();
@@ -673,11 +684,6 @@ public sealed partial class TuningTools(Card card, Residency residency)
                         break;
                     case Experiment.Survived when rec.SurvivedKhz is not { } ks || off > ks:
                         rec.SurvivedKhz = off;
-                        break;
-                    case Experiment.Crash:
-                        rec.Crashes++;
-                        if (rec.CrashKhz is not { } kc || off < kc) rec.CrashKhz = off;
-                        if (rec.CrashMhz is not { } cm || s.ClockMhz < cm) rec.CrashMhz = s.ClockMhz;
                         break;
                 }
             }
@@ -702,6 +708,26 @@ public sealed partial class TuningTools(Card card, Residency residency)
                 crashes = v.Crashes,
             };
         }).ToList();
+    }
+
+    /// <summary>
+    /// The curve points a crash data point fell over at, with the clock the card ran there (null when no sample sat on it).
+    /// A hung GPU keeps answering with frozen readings until the reset (for the whole TdrDelay, 30 s on the reference
+    /// machine: 3105 MHz at 1030 mV, util 100 %, ~140 W), so the trial's samples are cut at the frozen tail first, by the
+    /// flight recorder's rule, and the last 30 s before it are what counts. When the flight recorder found the crash
+    /// voltage, the crash is the point nearest it alone.
+    /// </summary>
+    public static IReadOnlyList<(int Index, uint? ClockMhz)> CrashAt(IReadOnlyList<Residency.Tick> during, uint? crashUv, VfCurveSnapshot curve)
+    {
+        if (curve.Points.Count == 0 || during.Count == 0) return [];
+        // A tail that is the whole trial is a load pinned at the curve's cap, not a hang: only one power fell into is cut.
+        var frozen = FlightRecorder.FrozenFrom([.. during.Select(t => new FlightSample(t.At, 0, t.Mhz, t.Uv / 1000, t.W, null, t.Util, null))]);
+        IReadOnlyList<Residency.Tick> live = frozen == null || frozen.At == during[0].At ? during : [.. during.Where(t => t.At < frozen.At)];
+        List<Residency.Tick> last = live.Count == 0 ? [] : [.. live.Where(t => t.At >= live[^1].At - TimeSpan.FromSeconds(30))];
+        var stays = Stays(last, curve);
+        if (crashUv is { } uv && Nearest(curve, uv) is { } p)
+            return [(p.Index, stays.FirstOrDefault(s => s.Index == p.Index)?.ClockMhz)];
+        return [.. stays.Where(s => s.Share >= 0.1).Select(s => (s.Index, (uint?)s.ClockMhz))];
     }
 
     /// <summary>A curve point a run of samples sat on, with the clock it ran there (P90 of those samples).</summary>
