@@ -492,8 +492,23 @@ public sealed class BrokerDispatcher
                 // voltage demand that keeps MSVDD off its floor under it.
                 string? fanCurve = Text(a, "fan_curve");
                 int? memoryKhz = Int(a, "memory_khz"), xbarKhz = Int(a, "xbar_khz"), xbarVdemand = Int(a, "xbar_vdemand_uv");
+                // writes: any other registry write for the trial, {kind, key, value}, each through its own path and rules (the
+                // core P0 offset, NVVDD's offsets, SYS/Video, the boost, a clock lock). The board wall stays power_mw (a
+                // trial's wall is never kept) and the curve stays curve.
+                var extra = new List<ProfileWrite>();
+                if (a.ValueKind == JsonValueKind.Object && a.TryGetProperty("writes", out var ws) && ws.ValueKind == JsonValueKind.Array)
+                    foreach (var w in ws.EnumerateArray())
+                    {
+                        string kind = Text(w, "kind") ?? throw new ArgumentException("a trial write names its kind");
+                        string key = Text(w, "key") ?? throw new ArgumentException("a trial write names its key");
+                        if (WriteRegistry.Find(kind) == null) throw new ArgumentException($"'{kind}' is not a write path (one of: {string.Join(", ", WriteRegistry.Kinds)})");
+                        if (kind == VfWrites.Kind) throw new ArgumentException("the curve goes in 'curve', not in writes");
+                        if (kind == PowerCap.Kind && key.Equals(PowerCap.Key(PowerRequestKind.Ordinary), StringComparison.OrdinalIgnoreCase))
+                            throw new ArgumentException("the board wall goes in 'power_mw', not in writes");
+                        extra.Add(new ProfileWrite(kind, key, Text(w, "value") ?? throw new ArgumentException("a trial write names its value")));
+                    }
                 bool keepCurve = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("keep_curve", out var kc) && kc.ValueKind == JsonValueKind.True
-                    && memoryKhz == null;
+                    && memoryKhz == null && !extra.Any(w => w.Kind == ClockOffsets.Kind);
                 lock (_experiment)
                 {
                     var exp = Experiment.Load(path) ?? throw new InvalidOperationException("no experiment session is open; begin one first");
@@ -506,48 +521,54 @@ public sealed class BrokerDispatcher
                     var context = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("context", out var c) && c.ValueKind == JsonValueKind.Array
                         ? c.EnumerateArray().Select(x => x.GetString()).ToList() : [];
                     var written = new List<BrokerResponse>();
+                    // Everything goes on in the profile's write order (DailyProfile.Rank), the order added within a rank:
+                    // the wall, current limits and fans first, a P0 offset (the curve set aside for it), the rails, the
+                    // voltage demands before the clock offsets they carry, the curve last.
+                    var queue = new List<(int Rank, BrokerRequest Request)>();
+                    string Num(long v) => v.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     if (powerMw is { } mw)
-                        written.Add(Dispatch(new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: PowerCap.Kind,
-                            Key: PowerCap.Key(PowerRequestKind.Ordinary), Value: mw.ToString(System.Globalization.CultureInfo.InvariantCulture))));
+                        queue.Add((0, WriteOf(target, PowerCap.Kind, PowerCap.Key(PowerRequestKind.Ordinary), Num(mw))));
                     // nvvdd_ma / msvdd_ma: a current limit for the trial (a lower one caps the rail's power below the
                     // 400 W the board request stops at); never kept, put back to its original when the trial ends.
                     foreach (var (rail, ma) in new[] { (Rail.Nvvdd, nvvddMa), (Rail.Msvdd, msvddMa) })
-                        if (ma is { } v && written.All(x => x.Ok))
-                            written.Add(Dispatch(LimitWrite(target, CurrentLimitWrites.Key(rail), v.ToString(System.Globalization.CultureInfo.InvariantCulture))));
+                        if (ma is { } v) queue.Add((0, WriteOf(target, CurrentLimitWrites.Kind, CurrentLimitWrites.Key(rail), Num(v))));
                     // The fan curve goes on every policy the firmware lets be edited (curve 0 and 1 on a 5090), as the
                     // daily profile's does; a fixed duty on every fan channel is trial-only, as a current limit is (fan_pct 0:
                     // the fans back to the curve).
                     if (fanCurve != null)
                         foreach (var i in FanPolicyReader.ReadInfo(_hw, target.Session).Editable.Select(p => p.Index))
-                            if (written.All(x => x.Ok))
-                                written.Add(Dispatch(new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: FanPolicyWrites.Kind, Key: FanPolicyWrites.Key(i), Value: fanCurve)));
+                            queue.Add((1, WriteOf(target, FanPolicyWrites.Kind, FanPolicyWrites.Key(i), fanCurve)));
                     if (fanPct is { } pct)
                         foreach (var id in FanReader.Snapshot(_hw, target.Session).Channels.Select(c => c.Id))
-                            if (written.All(x => x.Ok))
-                                written.Add(Dispatch(new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: FanControl.Kind, Key: FanControl.Key(id), Value: (pct == 0 ? FanState.Auto : new FanState(true, pct)).ToString())));
-                    if (memoryKhz is { } mem && written.All(x => x.Ok))
-                    {
-                        string memKey = ClockOffsets.Key(ClockDomain.Memory), memValue = mem.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                        if (CurveAside(target, memKey, memValue) is { } aside) written.Add(aside);
-                        if (written.All(x => x.Ok))
-                            written.Add(Dispatch(new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: ClockOffsets.Kind, Key: memKey, Value: memValue)));
-                    }
+                            queue.Add((1, WriteOf(target, FanControl.Kind, FanControl.Key(id), (pct == 0 ? FanState.Auto : new FanState(true, pct)).ToString())));
+                    if (memoryKhz is { } mem)
+                        queue.Add((DailyProfile.Rank(ClockOffsets.Kind), WriteOf(target, ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Memory), Num(mem))));
                     // msvdd_rel_uv / msvdd_vmin_uv: the MSVDD rail's offsets for the trial, through the rails path (its
                     // rules and post-write MAX check hold); putting the daily profile back puts its offsets back (the
                     // originals when it keeps none), and a keep takes them from the card.
-                    if ((msvddRel != null || msvddVmin != null) && written.All(x => x.Ok))
+                    if (msvddRel != null || msvddVmin != null)
                     {
                         var slots = new List<string>();
-                        if (msvddRel is { } rel) slots.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"rel={rel}"));
-                        if (msvddVmin is { } vmin) slots.Add(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"vmin={vmin}"));
-                        written.Add(Dispatch(new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: RailWrites.Kind, Key: RailWrites.Key(Rail.Msvdd), Value: string.Join(",", slots))));
+                        if (msvddRel is { } rel) slots.Add($"rel={Num(rel)}");
+                        if (msvddVmin is { } vmin) slots.Add($"vmin={Num(vmin)}");
+                        queue.Add((DailyProfile.Rank(RailWrites.Kind), WriteOf(target, RailWrites.Kind, RailWrites.Key(Rail.Msvdd), string.Join(",", slots))));
                     }
-                    if (xbarVdemand is { } vd && written.All(x => x.Ok))
-                        written.Add(Dispatch(new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: ClockVdemand.Kind, Key: ClockVdemand.Key(ClockDomainId.Xbar),
-                            Value: vd.ToString(System.Globalization.CultureInfo.InvariantCulture))));
-                    if (xbarKhz is { } xk && written.All(x => x.Ok))
-                        written.Add(Dispatch(new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: ClockDomainOffsets.Kind, Key: ClockDomainOffsets.Key(ClockDomainId.Xbar),
-                            Value: xk.ToString(System.Globalization.CultureInfo.InvariantCulture))));
+                    if (xbarVdemand is { } vd)
+                        queue.Add((DailyProfile.Rank(ClockVdemand.Kind), WriteOf(target, ClockVdemand.Kind, ClockVdemand.Key(ClockDomainId.Xbar), Num(vd))));
+                    if (xbarKhz is { } xk)
+                        queue.Add((DailyProfile.Rank(ClockDomainOffsets.Kind), WriteOf(target, ClockDomainOffsets.Kind, ClockDomainOffsets.Key(ClockDomainId.Xbar), Num(xk))));
+                    foreach (var w in extra)
+                        queue.Add((DailyProfile.Rank(w.Kind), WriteOf(target, w.Kind, w.Key, w.Value)));
+                    foreach (var (_, request) in queue.OrderBy(q => q.Rank))
+                    {
+                        if (!written.All(x => x.Ok)) break;
+                        if (request.Kind == ClockOffsets.Kind && CurveAside(target, request.Key!, request.Value!) is { } aside)
+                        {
+                            written.Add(aside);
+                            if (!aside.Ok) break;
+                        }
+                        written.Add(Dispatch(request));
+                    }
                     if (!keepCurve && written.All(x => x.Ok))
                         written.Add(Dispatch(new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: VfWrites.Kind, Key: VfWrites.CoreKey, Value: curve,
                             EnableSlots: [nameof(Slot.ClockClientClkVfPointsSetControl)])));
@@ -582,7 +603,9 @@ public sealed class BrokerDispatcher
                         NvvddMa: nvvddMa ?? exp.Trial?.NvvddMa, MsvddMa: msvddMa ?? exp.Trial?.MsvddMa,
                         MsvddRelUv: msvddRel ?? exp.Trial?.MsvddRelUv, MsvddVminUv: msvddVmin ?? exp.Trial?.MsvddVminUv,
                         FanCurve: fanCurve ?? exp.Trial?.FanCurve, FanPct: fanPct == 0 ? null : fanPct ?? exp.Trial?.FanPct, MemoryKhz: memoryKhz ?? exp.Trial?.MemoryKhz,
-                        XbarKhz: xbarKhz ?? exp.Trial?.XbarKhz, XbarVdemandUv: xbarVdemand ?? exp.Trial?.XbarVdemandUv);
+                        XbarKhz: xbarKhz ?? exp.Trial?.XbarKhz, XbarVdemandUv: xbarVdemand ?? exp.Trial?.XbarVdemandUv,
+                        Writes: extra.Count == 0 ? exp.Trial?.Writes
+                            : [.. (exp.Trial?.Writes ?? []).Where(b => !extra.Any(n => n.Kind == b.Kind && n.Key == b.Key)), .. extra]);
                     (exp with { Trial = trial }).Save(path);
                     Log(target, $"Trial · {exp.Game}", [
                         $"Change: {change}",
@@ -667,18 +690,30 @@ public sealed class BrokerDispatcher
     private static string Mv(uint? uv) => uv is { } v ? $"NVVDD {v / 1000.0:0.#} mV" : "NVVDD unread";
     private static string Wall(uint? mw) => mw is { } v ? $"{v / 1000.0:0.#} W (set by the trial)" : "the daily profile's";
     private static string Limits(uint? powerMw, uint? nvvddMa, uint? msvddMa, int? msvddRelUv, int? msvddVminUv,
-        string? fanCurve, uint? fanPct, int? memoryKhz, int? xbarKhz, int? xbarVdemandUv) =>
+        string? fanCurve, uint? fanPct, int? memoryKhz, int? xbarKhz, int? xbarVdemandUv, IReadOnlyList<ProfileWrite>? writes) =>
         $"power limit {Wall(powerMw)}" + (nvvddMa is { } n ? $", NVVDD current limit {n / 1000.0:0.#} A" : "") + (msvddMa is { } m ? $", MSVDD current limit {m / 1000.0:0.#} A" : "")
         + (msvddRelUv is { } r ? $", MSVDD REL offset {r / 1000.0:0.#} mV" : "") + (msvddVminUv is { } v ? $", MSVDD VMIN offset {v / 1000.0:0.#} mV" : "")
         + (fanCurve is { } fc ? $", fan curve {fc}" : "") + (fanPct is { } fp ? $", fans held at {fp} %" : "")
         + (memoryKhz is { } mk ? $", memory offset {mk / 1000.0:+0.#;-0.#;0} MHz" : "")
-        + (xbarKhz is { } xk ? $", XBAR offset {xk / 1000.0:+0.#;-0.#;0} MHz" : "") + (xbarVdemandUv is { } xv ? $", XBAR voltage demand {xv / 1000.0:+0.#;-0.#;0} mV" : "");
-    private static string Limits(DataPoint p) => Limits(p.PowerMw, p.NvvddMa, p.MsvddMa, p.MsvddRelUv, p.MsvddVminUv, p.FanCurve, p.FanPct, p.MemoryKhz, p.XbarKhz, p.XbarVdemandUv);
-    private static string Limits(ExperimentTrial t) => Limits(t.PowerMw, t.NvvddMa, t.MsvddMa, t.MsvddRelUv, t.MsvddVminUv, t.FanCurve, t.FanPct, t.MemoryKhz, t.XbarKhz, t.XbarVdemandUv);
+        + (xbarKhz is { } xk ? $", XBAR offset {xk / 1000.0:+0.#;-0.#;0} MHz" : "") + (xbarVdemandUv is { } xv ? $", XBAR voltage demand {xv / 1000.0:+0.#;-0.#;0} mV" : "")
+        + string.Concat((writes ?? []).Select(w => $", {w.Kind}/{w.Key} {w.Value}"));
+    private static string Limits(DataPoint p) => Limits(p.PowerMw, p.NvvddMa, p.MsvddMa, p.MsvddRelUv, p.MsvddVminUv, p.FanCurve, p.FanPct, p.MemoryKhz, p.XbarKhz, p.XbarVdemandUv, p.Writes);
+    private static string Limits(ExperimentTrial t) => Limits(t.PowerMw, t.NvvddMa, t.MsvddMa, t.MsvddRelUv, t.MsvddVminUv, t.FanCurve, t.FanPct, t.MemoryKhz, t.XbarKhz, t.XbarVdemandUv, t.Writes);
 
     /// <summary>A current-limit write: its setter is off until a request enables it, as the V/F points' is.</summary>
-    private static BrokerRequest LimitWrite(IGpuTarget target, string key, string value) =>
-        new(BrokerRequest.OpWrite, target.StableId, Kind: CurrentLimitWrites.Kind, Key: key, Value: value, EnableSlots: [nameof(Slot.PowerPolicySetControl)]);
+    private static BrokerRequest LimitWrite(IGpuTarget target, string key, string value) => WriteOf(target, CurrentLimitWrites.Kind, key, value);
+
+    /// <summary>The setters a kind's write enables for itself: the ones off by default whose rule is complete.</summary>
+    private static string[]? Setters(string kind) => kind switch
+    {
+        VfWrites.Kind => [nameof(Slot.ClockClientClkVfPointsSetControl)],
+        CurrentLimitWrites.Kind => [nameof(Slot.PowerPolicySetControl)],
+        _ => null,
+    };
+
+    /// <summary>The ordinary write of one cell, with the setter it needs enabled.</summary>
+    private static BrokerRequest WriteOf(IGpuTarget target, string kind, string key, string value) =>
+        new(BrokerRequest.OpWrite, target.StableId, Kind: kind, Key: key, Value: value, EnableSlots: Setters(kind));
 
     /// <summary>A cell only a trial sets and no daily profile holds: a rail's current limit, a fixed fan duty.</summary>
     private static bool TrialOnly(OwnedItem i) => i.Kind is CurrentLimitWrites.Kind or FanControl.Kind;
@@ -834,9 +869,7 @@ public sealed class BrokerDispatcher
                 string? Get(string name) => item.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
                 if (Get("outcome") != nameof(TxOutcome.Applied) || Get("kind") is not { } kind || Get("key") is not { } key || Get("before") is not { } before || before == Get("after"))
                     continue;
-                undone.Add(Dispatch(kind == CurrentLimitWrites.Kind ? LimitWrite(target, key, before)
-                    : new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: kind, Key: key, Value: before,
-                        EnableSlots: kind == VfWrites.Kind ? [nameof(Slot.ClockClientClkVfPointsSetControl)] : null)));
+                undone.Add(Dispatch(WriteOf(target, kind, key, before)));
             }
         return undone;
     }
@@ -850,10 +883,7 @@ public sealed class BrokerDispatcher
     }
 
     /// <summary>The write that puts a held cell back to its original, with the setter it needs enabled.</summary>
-    private static BrokerRequest PutBack(IGpuTarget target, OwnedItem held) => held.Kind == CurrentLimitWrites.Kind
-        ? LimitWrite(target, held.Key, held.Original)
-        : new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: held.Kind, Key: held.Key, Value: held.Original,
-            EnableSlots: held.Kind == VfWrites.Kind ? [nameof(Slot.ClockClientClkVfPointsSetControl)] : null);
+    private static BrokerRequest PutBack(IGpuTarget target, OwnedItem held) => WriteOf(target, held.Kind, held.Key, held.Original);
 
     /// <summary>
     /// A P0 offset write (pstates20) resets every V/F point offset, so its path refuses one while any is set. When this
@@ -952,8 +982,7 @@ public sealed class BrokerDispatcher
                     if (aside.Result is { } ar && ar.TryGetProperty("applied", out var aa)) applied.Add(aa[0]);
                     if (!aside.Ok) return new BrokerResponse(false, aside.Error ?? "the curve could not be set aside for a P0 write", Element(new { success = false, path, profile, applied }), aside.Code);
                 }
-                var r = Dispatch(new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: w.Kind, Key: w.Key, Value: w.Value,
-                    EnableSlots: w.Kind == VfWrites.Kind ? [nameof(Slot.ClockClientClkVfPointsSetControl)] : null));
+                var r = Dispatch(WriteOf(target, w.Kind, w.Key, w.Value));
                 if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
                 if (!r.Ok) return new BrokerResponse(false, r.Error ?? $"{w.Kind}/{w.Key} did not apply", Element(new { success = false, path, profile, applied }), r.Code);
             }

@@ -976,6 +976,36 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("MSVDD REL offset -75 mV", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
+    /// <summary>A trial may carry any other registry write in "writes" (here NVVDD's REL offset, under the fixture's 1.15 V ceiling). It goes through the
+    /// path's rules, is on the data point, and goes back with the daily profile; the wall and the curve keep their own
+    /// fields.</summary>
+    [Fact]
+    public void A_trial_carries_any_registry_write_and_it_goes_back_with_the_daily_profile()
+    {
+        var d = Rails();
+        uint controlWord = Slots.Info(Slot.VoltVoltRailsGetControl).Shape!.Value.Word;
+        int NvvddRel() => RailWrites.OffsetsIn(FakeDriver.State[controlWord], Rail.Nvvdd)!.Value.RelUv;
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"Steel Nomad"}""")).Ok);
+
+        string Try(object writes) => JsonSerializer.Serialize(new { curve = "0*127", change = "NVVDD REL -100 mV", keep_curve = true, writes });
+        var t = d.Dispatch(Exp("try", Try(new[] { new { kind = "rails", key = "nvvdd", value = "rel=-100000" } })));
+        Assert.True(t.Ok, t.Error);
+        Assert.Equal(-100_000, NvvddRel());
+        Assert.True(d.Dispatch(Exp("stable", "a run at -100")).Ok);
+        var w = Assert.Single(Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10)).Writes!);
+        Assert.Equal(("rails", "nvvdd", "rel=-100000"), (w.Kind, w.Key, w.Value));
+        Assert.Contains("rails/nvvdd rel=-100000", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+
+        Assert.False(d.Dispatch(Exp("try", Try(new[] { new { kind = "power", key = "fe", value = "450000" } }))).Ok);   // power_mw
+        Assert.False(d.Dispatch(Exp("try", Try(new[] { new { kind = "bogus", key = "x", value = "1" } }))).Ok);
+        Assert.Equal(-100_000, NvvddRel());   // a refused trial wrote nothing
+
+        var back = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily"));
+        Assert.True(back.Ok, back.Error);
+        Assert.Equal(0, NvvddRel());
+        Assert.Empty(_journal.Inspect().Items);
+    }
+
     /// <summary>The MSVDD offsets are kept from the card, as the curves are (the user, 2026-10-20: REL 0 is free speed).
     /// A trial's offset then goes back to the kept one in a single write, and a later keep takes the card's again.</summary>
     [Fact]

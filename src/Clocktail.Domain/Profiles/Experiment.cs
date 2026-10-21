@@ -37,7 +37,10 @@ public sealed record ExperimentTrial(
     /// <summary>The XBAR clock offset (kHz) and voltage demand (µV, on MSVDD) the trial runs under, when a trial set
     /// them; null: the daily profile's.</summary>
     int? XbarKhz = null,
-    int? XbarVdemandUv = null);
+    int? XbarVdemandUv = null,
+    /// <summary>Every other write the trial runs under, through its own write path (the core P0 offset, NVVDD's offsets,
+    /// SYS/Video, the boost, a clock lock…), when a trial set them; null: none.</summary>
+    IReadOnlyList<ProfileWrite>? Writes = null);
 
 /// <summary>One data point: how a trial ended in a game.</summary>
 public sealed record DataPoint(
@@ -68,7 +71,9 @@ public sealed record DataPoint(
     uint? FanPct = null,
     int? MemoryKhz = null,
     int? XbarKhz = null,
-    int? XbarVdemandUv = null);
+    int? XbarVdemandUv = null,
+    /// <summary>The trial's other writes (<see cref="ExperimentTrial.Writes"/>).</summary>
+    IReadOnlyList<ProfileWrite>? Writes = null);
 
 /// <summary>
 /// An agent tuning the curve live while the person plays (the MCP server): the session and the trial in force, in
@@ -124,7 +129,7 @@ public sealed record Experiment(string Game, string? Note, DateTimeOffset Starte
     public DataPoint? Point(string outcome, DateTimeOffset at, string? note = null, uint? crashUv = null) =>
         Trial is { } t
             ? new DataPoint(at, Game, outcome, Math.Round((at - t.At).TotalMinutes, 1), t.Change, t.AtUv, t.AtMhz, t.Curve, note, crashUv, t.PowerMw, t.NvvddMa, t.MsvddMa, t.MsvddRelUv, t.MsvddVminUv,
-                t.FanCurve, t.FanPct, t.MemoryKhz, t.XbarKhz, t.XbarVdemandUv)
+                t.FanCurve, t.FanPct, t.MemoryKhz, t.XbarKhz, t.XbarVdemandUv, t.Writes)
             : null;
 
     public static void Append(string dataPath, DataPoint point)
