@@ -660,6 +660,27 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal("450000", Kept());                                            // deleting a saved one leaves the daily profile
     }
 
+    /// <summary>A saved profile (or preset) this card cannot take, here a wall above its 600 W board maximum, does not
+    /// replace the daily profile: the daily one stays and goes back on, and the answer carries both runs' writes.</summary>
+    [Fact]
+    public void A_profile_the_card_refuses_leaves_the_daily_profile_kept_and_on_the_card()
+    {
+        var d = Power();
+        static BrokerRequest P(string kind, string? value = null) => new(BrokerRequest.OpProfile, Kind: kind, Value: value);
+        string profilePath = DailyProfile.PathBeside(_journal.Path);
+        Assert.True(d.Dispatch(P("wall", "450000")).Ok);
+        Assert.Equal(450_000u, _requests[0xfe]);
+        SavedProfiles.Save(SavedProfiles.PathBeside(_journal.Path), "too big",
+            new DailyProfile([new ProfileWrite(PowerCap.Kind, PowerCap.Key(PowerRequestKind.Ordinary), "700000")], _host.Now));
+
+        var r = d.Dispatch(P("preset", "too big"));
+        Assert.False(r.Ok);
+        Assert.Contains("was not loaded: the daily profile stays as it was and is back on the card", r.Error);
+        Assert.Equal("450000", Assert.Single(DailyProfile.Load(profilePath)!.Writes).Value);
+        Assert.Equal(450_000u, _requests[0xfe]);
+        Assert.Contains("Not loaded · saved profile 'too big'", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
     /// <summary>A trial may lower a rail's current limit, where the board request stops at 400 W. The data point
     /// carries it, whatever puts the daily profile back puts the limit back first, and it is never kept.</summary>
     [Fact]

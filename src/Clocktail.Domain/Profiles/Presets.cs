@@ -9,8 +9,14 @@ namespace Clocktail.Domain.Profiles;
 /// </summary>
 public sealed record Preset(string Name, string Title, string Gpu, string Note, IReadOnlyList<ProfileWrite> Writes)
 {
-    /// <summary>Whether this card is the model the preset was tuned on (the GPU name contains <see cref="Gpu"/>).</summary>
-    public bool Fits(string gpuName) => gpuName.Contains(Gpu, StringComparison.OrdinalIgnoreCase);
+    /// <summary>Whether this card is the model the preset was tuned on: the GPU name is <see cref="Gpu"/> or ends with it
+    /// as a whole word ("NVIDIA GeForce RTX 5090"), so "RTX 5090 D" and "RTX 5090 Laptop GPU", other chips with other
+    /// power ranges, do not fit.</summary>
+    public bool Fits(string gpuName)
+    {
+        string name = gpuName.Trim();
+        return name.Equals(Gpu, StringComparison.OrdinalIgnoreCase) || name.EndsWith(" " + Gpu, StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 public static class Presets

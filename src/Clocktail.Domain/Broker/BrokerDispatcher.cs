@@ -313,8 +313,9 @@ public sealed class BrokerDispatcher
                 CloseTrial(target, Experiment.Survived, $"preset '{preset.Name}' went on");
                 var loaded = new DailyProfile(DailyProfile.InWriteOrder(preset.Writes), _host.Now, History: profile?.History)
                     .Noted(_host.Now, $"preset '{preset.Name}' loaded");
-                loaded.Save(path);
                 var r = ApplyProfile(target, loaded, path);
+                if (!r.Ok) return NotLoaded(target, $"preset '{preset.Name}'", r, profile, path);
+                loaded.Save(path);
                 Log(target, $"Preset loaded · {preset.Title}", [
                     .. (profile?.Writes ?? []).Select(w => $"Old: {w.Kind}/{w.Key} = {w.Value}"),
                     .. Writes(r)]);
@@ -626,12 +627,31 @@ public sealed class BrokerDispatcher
         CloseTrial(target, Experiment.Survived, $"saved profile '{name}' went on");
         var loaded = new DailyProfile(DailyProfile.InWriteOrder(saved.Writes), _host.Now, History: profile?.History)
             .Noted(_host.Now, $"saved profile '{name}' loaded");
-        loaded.Save(path);
         var r = ApplyProfile(target, loaded, path);
+        if (!r.Ok) return NotLoaded(target, $"saved profile '{name}'", r, profile, path);
+        loaded.Save(path);
         Log(target, $"Saved profile loaded · {name}", [
             .. (profile?.Writes ?? []).Select(w => $"Old: {w.Kind}/{w.Key} = {w.Value}"),
             .. Writes(r)]);
         return r;
+    }
+
+    /// <summary>A preset or saved profile that did not all go on (a write this card refuses, e.g. a wall above its board
+    /// maximum) does not become the daily profile: the daily profile stays as it was and goes back on, so the card is
+    /// never left holding part of a profile nothing keeps. The answer carries both runs' writes.</summary>
+    private BrokerResponse NotLoaded(IGpuTarget target, string what, BrokerResponse failed, DailyProfile? profile, string path)
+    {
+        var back = ApplyProfile(target, profile, path);
+        Log(target, $"Not loaded · {what}", [
+            $"Reason: {failed.Error}",
+            .. Writes(failed),
+            back.Ok ? "The daily profile stays as it was and went back on" : $"The daily profile stays as it was, but it did not all go back on: {back.Error}",
+            .. Writes(back)]);
+        JsonElement[] Applied(BrokerResponse x) =>
+            x.Result is { } res && res.TryGetProperty("applied", out var a) && a.ValueKind == JsonValueKind.Array ? [.. a.EnumerateArray()] : [];
+        string error = $"{failed.Error}; {what} was not loaded: the daily profile stays as it was" +
+            (back.Ok ? " and is back on the card" : $", but it did not all go back on ({back.Error}): read the card");
+        return new BrokerResponse(false, error, Element(new { success = false, path, profile, applied = (JsonElement[])[.. Applied(failed), .. Applied(back)] }), failed.Code);
     }
 
     private static IEnumerable<OwnedItem> CellsToPutBack(IGpuTarget target, DailyProfile? profile, bool whole)

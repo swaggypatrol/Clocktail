@@ -22,7 +22,12 @@ public sealed class PresetsTests
     {
         var p = Presets.Find("founders")!;
         Assert.True(p.Fits("NVIDIA GeForce RTX 5090"));
+        Assert.True(p.Fits(" nvidia geforce rtx 5090 "));
         Assert.False(p.Fits("NVIDIA GeForce RTX 5080"));
         Assert.False(p.Fits("NVIDIA GeForce RTX 4090"));
+        // Other chips under the same number, with their own power ranges.
+        Assert.False(p.Fits("NVIDIA GeForce RTX 5090 Laptop GPU"));
+        Assert.False(p.Fits("NVIDIA GeForce RTX 5090 D"));
+        Assert.False(p.Fits("NVIDIA GeForce RTX 5090 D v2"));
     }
 }
