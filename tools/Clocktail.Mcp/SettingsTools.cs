@@ -47,7 +47,8 @@ public sealed partial class SettingsTools(Card card)
         "keeps none. journal_holds names the settings Clocktail has written and gives back on recovery; daily_profile is " +
         "absent when none is kept, session when none is open. daily_differs_on_card lists what the daily profile keeps that " +
         "the card does not hold now ([] = the card is on it; absent when none is kept, it is suspended or a trial is in " +
-        "force). A section that cannot be read is {\"error\"} and the rest still answer. Read-only.")]
+        "force). controls is the capability map: each control, the MCP tool that sets it (null: none does), whether it can " +
+        "be set on this card and driver, and why not. A section that cannot be read is {\"error\"} and the rest still answer. Read-only.")]
     public string CardSettings() => Guard(() =>
     {
         // What every section compares against comes first, and fails soft like a section: without it only stock_* and
@@ -94,6 +95,8 @@ public sealed partial class SettingsTools(Card card)
             rails = Section(() => Rails(c, rails ?? throw new InvalidOperationException(railsError))),
             clock_domains = Section(() => ClockDomains(c, rails, sample)),
             voltage_boost = Section(() => Boost(c)),
+            controls = Section(() => Controls.Map(card.WithDriver(Capabilities.Probe), WritePolicySet.Default)
+                .Select(x => new { control = x.Name, tool = x.Tool, can = x.Can, why = x.Why }).ToList()),
             fans = new
             {
                 nvml_fan_pct = t?.FanPercent,

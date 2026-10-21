@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using Clocktail.Domain.Boost;
 using Clocktail.Hw;
 
 namespace Clocktail.Domain;
@@ -55,14 +56,17 @@ public sealed record Capabilities(
         }
         var voltWrite = !voltRead.Available ? Capability.No("no voltage read") : Present("set", Slot.VoltVoltRailsSetControl);
 
+        // The path a boost write takes, by the rule the write itself uses (BoostObservation.DefaultRule): independent only
+        // when its getter answers and NVVDD is not kind 3. The 5090's rails are kind 3, so it is legacy there.
         VoltBoostPath boost = VoltBoostPath.None;
-        if (Has(Slot.ClientVoltRailsGetControl, Slot.ClientVoltRailsSetControl))
-        {
-            var b = NvClient.NewBuffer(Slot.ClientVoltRailsGetControl);
-            var r = hw.Call(gpu, Slot.ClientVoltRailsGetControl, b);
-            if (r.IsOk && BinaryPrimitives.ReadUInt32LittleEndian(b.AsSpan(4)) <= 100) boost = VoltBoostPath.Independent;
-        }
-        if (boost == VoltBoostPath.None && voltWrite.Available) boost = VoltBoostPath.Legacy;
+        if (voltRead.Available)
+            try
+            {
+                var rule = BoostReader.Observe(hw, gpu).DefaultRule(voltWrite.Available);
+                boost = rule == BoostPath.Independent && Has(Slot.ClientVoltRailsSetControl) ? VoltBoostPath.Independent
+                    : voltWrite.Available ? VoltBoostPath.Legacy : VoltBoostPath.None;
+            }
+            catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
 
         Capability pstates;
         if (!Has(Slot.GetPstates20)) pstates = Capability.No(Missing(Slot.GetPstates20));
