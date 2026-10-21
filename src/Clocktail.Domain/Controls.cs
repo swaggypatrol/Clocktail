@@ -31,6 +31,7 @@ public static class Controls
         new("NVVDD offsets", "adjust_nvvdd", c => c.VoltWrite, Slot.VoltVoltRailsSetControl),
         new("fan curve", "set_fan_curve", c => Present(c, "fan policy", Slot.FanPolicyGetInfo, Slot.FanPolicyGetControl, Slot.FanPolicySetControl), Slot.FanPolicySetControl),
         new("fixed fan speed", "set_fan_speed", c => c.FanCoolers, Slot.ClientFanCoolersSetControl),
+        new("fan start temperature (zero-RPM band)", "set_fan_start", c => Present(c, "fan policy", Slot.FanPolicyGetInfo, Slot.FanPolicyGetControl, Slot.FanPolicySetControl), Slot.FanPolicySetControl),
         new("voltage boost", "set_voltage_boost", c => c.Boost == VoltBoostPath.None ? Capability.No("no boost path") : Capability.Yes($"the {c.Boost.ToString().ToLowerInvariant()} path"), null),
         new("clock lock", "set_clock_lock", c => c.BoostLock, Slot.PerfClientLimitsSetStatus, PerWrite: true),
         new("XBAR/core clock ratio", "set_clock_ratio", c => c.PropagationRatio, Slot.ClockClkPropTopRelsSetControl, PerWrite: true),

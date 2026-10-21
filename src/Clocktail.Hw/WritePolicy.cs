@@ -388,7 +388,7 @@ public static class WritePolicies
         // start: the layout read live (2026-10-17, 2026-10-20); the first write is its live drill.
         On(Slot.FanPolicySetControl, "kind 0x18",
             new ExactSize(0x14ac), new Dword(0, 0x214ac), new SubsetMask(4, 0xffffffff),
-            new Custom("+8 bit 0 clear; every selected policy a type-2/3 entry whose three points pass the point check", b =>
+            new Custom("+8 bit 0 clear; every selected policy a type-2/3 entry whose three points pass the point check and whose zero-RPM band (+0x64 stop, +0x68 start) is a band within 0..120 °C", b =>
             {
                 if ((b[8] & 1) != 0) return "+0x8 bit 0 must be clear";
                 uint mask = BinaryPrimitives.ReadUInt32LittleEndian(b[4..]);
@@ -399,6 +399,8 @@ public static class WritePolicies
                     int type = BinaryPrimitives.ReadInt32LittleEndian(b[e..]);
                     if (type is not (2 or 3)) return $"policy {i} is entry type {type}; only type-2/3 policies have points";
                     if (FanCurveRule.Check(b.Slice(e + 0x3c, FanCurveRule.Size)) is { } why) return $"policy {i}: {why}";
+                    int stop = BinaryPrimitives.ReadInt32LittleEndian(b[(e + 0x64)..]), start = BinaryPrimitives.ReadInt32LittleEndian(b[(e + 0x68)..]);
+                    if (stop < 0 || start > 120 * 256 || stop >= start) return $"policy {i}: the zero-RPM band {stop / 256.0}..{start / 256.0} °C is not a band";
                 }
                 return null;
             })),

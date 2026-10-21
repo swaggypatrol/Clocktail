@@ -402,6 +402,13 @@ public sealed partial class SettingsTools(Card card)
         }).ToList();
     }
 
+    private static string? Band(byte[]? control, int index)
+    {
+        if (control == null) return null;
+        try { return FanStopWrites.Format(FanStopWrites.Read(control, index)); }
+        catch (InvalidDataException) { return null; }
+    }
+
     private object FanCurves(Context c)
     {
         var snap = card.WithDriver(FanPolicyReader.Read);
@@ -420,6 +427,10 @@ public sealed partial class SettingsTools(Card card)
                 target_rpm = st?.TargetRpm,
                 stock_curve = ctl == null ? null : c.Stock(FanPolicyWrites.Kind, key, ctl.Curve),
                 daily_curve = c.Daily(FanPolicyWrites.Kind, key),
+                // The zero-RPM band: the fans stop under stop and start past start (on the curve's temperature).
+                stop_start_c = Band(snap.ControlRaw, p.Index),
+                stock_stop_start_c = Band(snap.ControlRaw, p.Index) is { } band ? c.Stock(FanStopWrites.Kind, key, band) : null,
+                daily_stop_start_c = c.Daily(FanStopWrites.Kind, key),
             };
         }).ToList();
     }

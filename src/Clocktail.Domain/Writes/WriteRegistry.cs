@@ -187,6 +187,13 @@ public static class WriteRegistry
                 return new Prepared(cell, plan, cannot);
             }),
 
+        new(FanStopWrites.Kind, "fan policy index (an editable one)", "the zero-RPM band stop:start, °C (43:50 stock on a 5090); only an earlier start",
+            (hw, gpu, key, value, o) =>
+            {
+                var (cell, plan, cannot) = FanStopWrites.Prepare(hw, gpu, key, value, o.IsRecovery);
+                return new Prepared(cell, plan, cannot);
+            }),
+
         new(ClockLimitWrites.Kind, "max | min | voltage", "kHz for the maximum and minimum clock, µV for the voltage lock (1500000 = Boost Lock); 0 or 'off' releases",
             (hw, gpu, key, value, o) =>
             {

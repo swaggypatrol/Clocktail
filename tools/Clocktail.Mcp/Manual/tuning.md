@@ -51,6 +51,7 @@ Stock up to 800 mV; +30 MHz per point to +210 by ~840 mV; +405 to +510 through 8
 | `set_power_limit` | the wall, for the session (to reach other points) | no: `set_daily_power_limit` sets the daily wall |
 | `set_power_cap` | the F8 power request, for the session (ask first: it cannot be deleted) | never |
 | `set_current_limit` | a rail's current limit, for the session | never |
+| `set_fan_start` | the temperature the stopped fans start at (and stop under) | yes |
 | `set_fan_speed` | a fixed fan duty, for the session | never |
 
 `keep_as_daily` keeps everything a trial set, not just the last change. Call `back_to_daily` first if only some of it should stay.

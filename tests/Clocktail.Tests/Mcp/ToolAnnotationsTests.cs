@@ -25,7 +25,7 @@ public class ToolAnnotationsTests
     [Fact]
     public void Reading_tools_are_read_only_and_only_card_report_reaches_the_internet()
     {
-        Assert.Equal(48, Tools.Count);
+        Assert.Equal(49, Tools.Count);
         var read = Tools.Where(t => t.ReadOnly).Select(t => t.Name!).ToHashSet();
         Assert.Subset(read, new HashSet<string> { "card_report", "card_settings", "gpu_status", "limiter", "manual", "read_log", "data_points", "preview_daily", "diagnostic_report" });
         Assert.DoesNotContain("adjust_curve", read);

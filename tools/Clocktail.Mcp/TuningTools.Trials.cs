@@ -77,6 +77,32 @@ public sealed partial class TuningTools
         return Trial($"fan curve → {text}", reason, new() { ["fan_curve"] = text });
     });
 
+    [McpServerTool(Name = "set_fan_start", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Set the temperature the stopped fans start at, and the one they stop under, on every editable fan policy, as a new " +
+        "trial: the firmware's zero-RPM band, 43 / 50 °C stock on a 5090 FE, on the curve's own (filtered) temperature. " +
+        "Watched on the reference card: stopped at idle, the fans started when it reached 50.0 °C and stopped when it fell " +
+        "to 43.0 °C. Only an earlier start: startC no later than the curve's first point, stopC at least 3 °C under it (7 by " +
+        "default, as stock), 20 °C at the lowest. A stopped card warms by itself at idle (36 → 52 °C in about 5 minutes), so " +
+        "a lower start keeps it cooler and quieter to the ear only above it. keep_as_daily keeps it; back_to_daily, " +
+        "end_session and a crash put the daily profile's back.")]
+    public string SetFanStart(
+        [Description("Temperature the fans start at, °C.")] double startC,
+        [Description("Temperature they stop under, °C (default startC - 7).")] double? stopC = null,
+        [Description("Why (what it is meant to hold).")] string? reason = null) => Guard(() =>
+    {
+        decimal start = (decimal)startC, stop = (decimal)(stopC ?? startC - 7);
+        var snap = card.WithDriver(FanPolicyReader.Read);
+        var editable = snap.Info.Editable.Select(p => p.Index).ToList();
+        if (editable.Count == 0) throw new InvalidOperationException("this card has no editable fan policy");
+        string value = string.Create(CultureInfo.InvariantCulture, $"{stop:0.##}:{start:0.##}");
+        var want = FanStopWrites.Parse(value)!.Value;
+        foreach (int i in editable)
+            if (snap.ControlRaw is { } raw && FanStopWrites.Invalid(want, FanPolicyParser.PointsIn(raw, i)) is { } why) throw new ArgumentException($"policy {i}: {why}");
+        string was = snap.ControlRaw is { } r0 ? FanStopWrites.Format(FanStopWrites.Read(r0, editable[0])) : "?";
+        return Trial($"fans stop/start {was} → {value} °C", reason,
+            new() { ["writes"] = editable.Select(i => TrialWrite(FanStopWrites.Kind, FanPolicyWrites.Key(i), value)).ToList() });
+    });
+
     [McpServerTool(Name = "set_fan_speed", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Hold every fan at a fixed duty for the session, as a new trial (or 'auto' to give them back to the fan curve): to " +
         "hold a temperature while testing, e.g. a fan sweep at the wall to see what each degree costs. On the reference card at " +
