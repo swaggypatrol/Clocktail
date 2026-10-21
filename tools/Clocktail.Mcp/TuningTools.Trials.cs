@@ -21,12 +21,11 @@ public sealed partial class TuningTools
 {
     /// <summary>set_memory_offset: the largest change per call (CLOCKTAIL_MCP_MEMORY_STEP_MHZ).</summary>
     public static readonly int MemoryStepMhz = Env("CLOCKTAIL_MCP_MEMORY_STEP_MHZ", 250);
-    /// <summary>adjust_xbar: the largest offset change per call and the offset's range (CLOCKTAIL_MCP_XBAR_STEP_MHZ,
-    /// CLOCKTAIL_MCP_MAX_XBAR_MHZ, CLOCKTAIL_MCP_MIN_XBAR_MHZ). Measured 0..+400 on the 5090; an overclocker's +450
-    /// without more voltage gave a grey screen.</summary>
+    /// <summary>adjust_xbar / adjust_clock_domain: the largest offset change per call (CLOCKTAIL_MCP_XBAR_STEP_MHZ). The
+    /// offset's range is the driver's (±1000 MHz on a 5090), unless CLOCKTAIL_MCP_MAX_XBAR_MHZ caps XBAR lower. Measured
+    /// 0..+400 on the 5090; an overclocker's +450 without more voltage gave a grey screen.</summary>
     public static readonly int XbarStepMhz = Env("CLOCKTAIL_MCP_XBAR_STEP_MHZ", 50);
-    public static readonly int MaxXbarMhz = Env("CLOCKTAIL_MCP_MAX_XBAR_MHZ", 400);
-    public static readonly int MinXbarMhz = Env("CLOCKTAIL_MCP_MIN_XBAR_MHZ", -100);
+    public static readonly int MaxXbarMhz = Env("CLOCKTAIL_MCP_MAX_XBAR_MHZ", int.MaxValue);
     /// <summary>adjust_xbar: the largest voltage demand change per call; the demand's own range is -25..+50 mV.</summary>
     public static readonly int VdemandStepMv = Env("CLOCKTAIL_MCP_VDEMAND_STEP_MV", 10);
     public const int MinVdemandMv = -25, MaxVdemandMv = 50;
@@ -157,8 +156,9 @@ public sealed partial class TuningTools
         "MSVDD fall to its 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand keeps " +
         "it off up to +300, so above +250 the demand must be +20 mV or more, and above +300 +50 mV (at +400 the memory phase " +
         "still dropped to ~1830-1940 MHz with +20/+30 mV; raise the demand first). At most 50 MHz and 10 mV per call; " +
-        "offset -100..+400 MHz, demand -25..+50 mV. If anything is unstable with XBAR raised, step it down 50 MHz before " +
-        "touching the curve. keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
+        "offset within the driver's range (±1000 MHz on a 5090), demand -25..+50 mV. Past +400 is unmeasured: an overclocker " +
+        "saw grey-screen artefacts at +450 with no voltage added. If anything is unstable with XBAR raised, step it down 50 " +
+        "MHz before touching the curve. keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
     public string AdjustXbar(
         [Description("MHz to add to XBAR's clock offset (negative lowers); default 0.")] double offsetDeltaMhz = 0,
         [Description("mV to add to XBAR's voltage demand (negative lowers); default 0.")] double vdemandDeltaMv = 0,
@@ -169,8 +169,10 @@ public sealed partial class TuningTools
         if (Math.Abs(vdemandDeltaMv) > VdemandStepMv) throw new ArgumentException($"a demand step is at most {VdemandStepMv} mV (CLOCKTAIL_MCP_VDEMAND_STEP_MV)");
         var (offNow, demandNow) = SettingsTools.Domain(card, ClockDomainId.Xbar);
         int off = offNow + (int)Math.Round(offsetDeltaMhz * 1000), demand = demandNow + (int)Math.Round(vdemandDeltaMv * 1000);
-        if (off > MaxXbarMhz * 1000 || off < MinXbarMhz * 1000)
-            throw new ArgumentException($"the XBAR offset stays within {MinXbarMhz}..+{MaxXbarMhz} MHz (it would be {off / 1000.0})");
+        var (min, max) = OffsetRange(ClockDomainId.Xbar);
+        max = Math.Min(max, MaxXbarMhz);
+        if (off > max * 1000 || off < min * 1000)
+            throw new ArgumentException($"the XBAR offset stays within {min}..+{max} MHz (it would be {off / 1000.0})");
         if (demand > MaxVdemandMv * 1000 || demand < MinVdemandMv * 1000)
             throw new ArgumentException($"the voltage demand stays within {MinVdemandMv}..+{MaxVdemandMv} mV (it would be {demand / 1000.0})");
         if (XbarDemandNeededMv(off / 1000.0) is { } need && demand < need * 1000)
@@ -182,6 +184,60 @@ public sealed partial class TuningTools
         if (demand != demandNow) { items["xbar_vdemand_uv"] = demand; parts.Add(string.Create(CultureInfo.InvariantCulture, $"XBAR voltage demand {demandNow / 1000.0:+0.#;-0.#;0} → {demand / 1000.0:+0.#;-0.#;0} mV")); }
         return Trial(string.Join(", ", parts), reason, items);
     });
+
+    [McpServerTool(Name = "adjust_clock_domain", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Move SYS's or Video's clock offset and/or voltage demand as a new trial, as adjust_xbar does for XBAR. SYS is the " +
+        "system clock (it falls as XBAR's offset rises: XBAR 0/+200/+300/+400 gave SYS 2182/2017/1912/1830 MHz in the memory " +
+        "phase, and SYS +150 back at XBAR +300 changed nothing in a Blender render); Video is the video engine (NVENC/NVDEC), " +
+        "which games do not use. Neither was written on the reference card before: judge a step by its own clock in " +
+        "gpu_status and by a benchmark that uses it. The demand goes to the rail the domain's topology names (MSVDD on a 5090). " +
+        "At most 50 MHz and 10 mV per call; offset within the driver's range, demand -25..+50 mV. keep_as_daily keeps it; " +
+        "back_to_daily, end_session and a crash put the daily profile's back.")]
+    public string AdjustClockDomain(
+        [Description("'sys' or 'video'.")] string domain,
+        [Description("MHz to add to the domain's clock offset (negative lowers); default 0.")] double offsetDeltaMhz = 0,
+        [Description("mV to add to the domain's voltage demand (negative lowers); default 0.")] double vdemandDeltaMv = 0,
+        [Description("Why this step (what you saw, what you expect).")] string? reason = null) => Guard(() =>
+    {
+        var d = domain.Trim().ToLowerInvariant() switch
+        {
+            "sys" => ClockDomainId.Sys,
+            "video" => ClockDomainId.Video,
+            "xbar" => throw new ArgumentException("XBAR is adjust_xbar's: it carries the rules for the MSVDD-floor cliff"),
+            _ => throw new ArgumentException("domain is 'sys' or 'video'"),
+        };
+        if (offsetDeltaMhz == 0 && vdemandDeltaMv == 0) throw new ArgumentException("both deltas are 0: nothing to try");
+        if (Math.Abs(offsetDeltaMhz) > XbarStepMhz) throw new ArgumentException($"an offset step is at most {XbarStepMhz} MHz (CLOCKTAIL_MCP_XBAR_STEP_MHZ)");
+        if (Math.Abs(vdemandDeltaMv) > VdemandStepMv) throw new ArgumentException($"a demand step is at most {VdemandStepMv} mV (CLOCKTAIL_MCP_VDEMAND_STEP_MV)");
+        var (offNow, demandNow) = SettingsTools.Domain(card, d);
+        int off = offNow + (int)Math.Round(offsetDeltaMhz * 1000), demand = demandNow + (int)Math.Round(vdemandDeltaMv * 1000);
+        var (min, max) = OffsetRange(d);
+        if (off > max * 1000 || off < min * 1000)
+            throw new ArgumentException($"the {d} offset stays within the driver's {min}..+{max} MHz (it would be {off / 1000.0})");
+        if (demand > MaxVdemandMv * 1000 || demand < MinVdemandMv * 1000)
+            throw new ArgumentException($"the voltage demand stays within {MinVdemandMv}..+{MaxVdemandMv} mV (it would be {demand / 1000.0})");
+        string name = d == ClockDomainId.Sys ? "SYS" : "Video";
+        var writes = new List<object>();
+        var parts = new List<string>();
+        if (demand != demandNow)
+        {
+            writes.Add(TrialWrite(ClockVdemand.Kind, ClockVdemand.Key(d), demand));
+            parts.Add(string.Create(CultureInfo.InvariantCulture, $"{name} voltage demand {demandNow / 1000.0:+0.#;-0.#;0} → {demand / 1000.0:+0.#;-0.#;0} mV"));
+        }
+        if (off != offNow)
+        {
+            writes.Add(TrialWrite(ClockDomainOffsets.Kind, ClockDomainOffsets.Key(d), off));
+            parts.Add(string.Create(CultureInfo.InvariantCulture, $"{name} offset {offNow / 1000.0:+0.#;-0.#;0} → {off / 1000.0:+0.#;-0.#;0} MHz"));
+        }
+        return Trial(string.Join(", ", parts), reason, new() { ["writes"] = writes });
+    });
+
+    /// <summary>A clock domain's offset range, MHz, as the driver's topology states it.</summary>
+    private (int Min, int Max) OffsetRange(ClockDomainId d)
+    {
+        var t = ClockDomainsParser.Find(card.WithDriver(ClockDomainOffsets.ReadTopology), (uint)d);
+        return (t.MinOffsetMhz, t.MaxOffsetMhz);
+    }
 
     [McpServerTool(Name = "set_daily_power_limit", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make this the daily power limit: it goes on now and at every start and after every driver reset. A trial's wall " +

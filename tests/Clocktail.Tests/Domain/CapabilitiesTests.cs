@@ -83,9 +83,8 @@ public class CapabilitiesTests
         Assert.Equal("adjust_xbar", Assert.Single(map, c => c.Name == "XBAR offset and voltage demand").Tool);
         Assert.Equal("set_core_offset", Assert.Single(map, c => c.Name == "core P0 offset").Tool);
         Assert.True(Assert.Single(map, c => c.Name == "NVVDD offsets") is { Tool: "adjust_nvvdd", Can: true });
-        Assert.All(map.Where(c => c.Name is "SYS and Video offsets and voltage demands" or "additional power request (F8)"),
-            c => Assert.Equal((null, false), (c.Tool, c.Can)));
-        Assert.Equal(2, map.Count(c => c.Why.StartsWith("not offered: only the CLI") && c.Name != "voltage boost"));
+        Assert.Equal("adjust_clock_domain", Assert.Single(map, c => c.Name == "SYS and Video offsets and voltage demands").Tool);
+        Assert.Null(Assert.Single(map, c => c.Name == "additional power request (F8)").Tool);
     }
 
     [Fact]

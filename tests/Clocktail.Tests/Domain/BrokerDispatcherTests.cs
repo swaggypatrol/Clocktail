@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Text.Json;
 using Clocktail.Domain.Broker;
+using Clocktail.Domain.Clocks;
 using Clocktail.Domain.Ownership;
 using Clocktail.Domain.Power;
 using Clocktail.Domain.Profiles;
@@ -1174,6 +1175,37 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply")).Ok);
         Assert.Equal(15_000, CoreKhz());
         Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());
+    }
+
+    /// <summary>SYS's offset and voltage demand in one trial (adjust_clock_domain): the demand goes on before the clock it
+    /// carries whatever order the writes came in, and both go back with the daily profile.</summary>
+    [Fact]
+    public void A_sys_trial_writes_its_demand_before_its_offset_and_both_go_back()
+    {
+        ClockDomainsFixture.Seed();
+        var info = RailsFixture.Info();
+        foreach (int bit in new[] { 0, 1 }) W(info, RailsLayout.InfoBase + bit * RailsLayout.InfoEntry, 3);   // the 5090's rails are kind 3
+        foreach (var b in new[] { info, RailsFixture.Control(), RailsFixture.Status(), RailsFixture.Devices() }) FakeDriver.State[U(b, 0)] = b;
+        var hw = new NvClient(FakeDriver.ApiFor(
+            [Slot.ClockClkDomainsGetInfo, Slot.ClockClkDomainsGetControl, Slot.VoltVoltRailsGetInfo, Slot.VoltVoltRailsGetControl, Slot.VoltVoltRailsGetStatus, Slot.VoltVoltDevicesGetInfo],
+            [Slot.ClockClkDomainsSetControl]));
+        var d = new BrokerDispatcher(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true);
+        int sys = ClockDomainsParser.Find(ClockDomainsParser.ParseTopology(ClockDomainsFixture.Topology()), (uint)Clocktail.Domain.Clocks.ClockDomainId.Sys).Index;
+        int Demand() => BinaryPrimitives.ReadInt32LittleEndian(FakeDriver.Current(Slot.ClockClkDomainsGetControl).AsSpan(ClockDomainsLayout.OffsetAt(sys, 0xf) + 8));
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"drill"}""")).Ok);
+
+        var t = d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "SYS +150 MHz, +10 mV", keep_curve = true,
+            writes = new[] { new { kind = "clockdomain", key = "sys", value = "150000" }, new { kind = "vdemand", key = "sys", value = "10000" } } })));
+        Assert.True(t.Ok, t.Error);
+        Assert.Equal(150_000, ClockDomainsFixture.OffsetKhz(sys));
+        Assert.Equal(10_000, Demand());
+        var order = t.Result!.Value.GetProperty("writes").EnumerateArray().Select(w => w.GetProperty("applied")[0].GetProperty("kind").GetString()).ToList();
+        Assert.Equal(["vdemand", "clockdomain"], order);
+
+        var back = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply"));
+        Assert.True(back.Ok, back.Error);
+        Assert.Equal((0, 0), (ClockDomainsFixture.OffsetKhz(sys), Demand()));
+        Assert.Empty(_journal.Inspect().Items);
     }
 
     [Fact]
