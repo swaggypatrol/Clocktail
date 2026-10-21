@@ -238,7 +238,7 @@ public sealed class Card : IDisposable
     /// that stops answering after the request went out may have.</summary>
     public BrokerAnswer Broker(string op, string? kind = null, string? value = null)
     {
-        bool reads = op is BrokerRequest.OpPing or BrokerRequest.OpOwnership || kind is "show" or "saved" or "preview";
+        bool reads = op is BrokerRequest.OpPing or BrokerRequest.OpOwnership || kind is "show" or "saved" or "preview" or "alive";
         BrokerResponse? r;
         try { r = BrokerClient.TryCall(new BrokerRequest(op, StableId, Kind: kind, Value: value)); }
         catch (Exception e) when (e is IOException or InvalidDataException or ObjectDisposedException or TimeoutException)

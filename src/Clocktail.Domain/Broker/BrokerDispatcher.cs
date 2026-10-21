@@ -609,6 +609,10 @@ public sealed class BrokerDispatcher
                     "Back to the daily profile:", .. writes]);
                 return r;
             }
+            case "alive":
+                // An agent's MCP server says it is still there (TrialLease): nothing is written or saved.
+                LastAlive = _host.Now;
+                return Ok(new { success = true });
             case "release":
                 // The agent running the trial is gone (its MCP server's input closed): what only a watching agent may hold
                 // goes back, a fixed fan duty (it can hold the fans at 30 % at a 600 W wall) and lowered current limits.
@@ -630,7 +634,7 @@ public sealed class BrokerDispatcher
                 return r;
             }
             default:
-                return Fail($"experiment needs show, begin, try, stable, crash, note, release, fans-back or end, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"experiment needs show, begin, try, stable, crash, note, alive, release, fans-back or end, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 
@@ -771,6 +775,9 @@ public sealed class BrokerDispatcher
             (back.Ok ? " and is back on the card" : $", but it did not all go back on ({back.Error}): read the card");
         return new BrokerResponse(false, error, Element(new { success = false, path, profile, applied = (JsonElement[])[.. AppliedOf(failed), .. AppliedOf(back)] }), failed.Code);
     }
+
+    /// <summary>When an agent's MCP server last said it was there ("alive"); the broker's start until one does.</summary>
+    public DateTimeOffset LastAlive { get; private set; } = DateTimeOffset.Now;
 
     /// <summary>
     /// The trial-only cells (a fixed fan duty, and unless <paramref name="fansOnly"/> lowered current limits) back to their

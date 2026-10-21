@@ -17,6 +17,7 @@ builder.Services.AddSingleton<Card>();
 builder.Services.AddSingleton<Residency>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Residency>());
 builder.Services.AddSingleton<LiveWatch>();
+builder.Services.AddHostedService<Heartbeat>();
 if (worker) builder.Services.AddHostedService<DriverWatch>();
 builder.Services.AddMcpServer(o => o.ServerInstructions = ManualTools.Instructions)
     .WithStdioServerTransport().WithTools<TuningTools>().WithTools<SettingsTools>().WithTools<LiveTools>().WithTools<ManualTools>();

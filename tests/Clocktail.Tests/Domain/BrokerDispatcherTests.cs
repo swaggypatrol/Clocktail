@@ -782,6 +782,18 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("Trial-only settings handed back", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
+    /// <summary>"alive" records when an agent was last heard, for the trial lease, and writes nothing.</summary>
+    [Fact]
+    public void Alive_records_the_agent_and_writes_nothing()
+    {
+        var d = Power();
+        int sets = FakeDriver.Sets;
+        Assert.True(d.Dispatch(Exp("alive")).Ok);
+        Assert.Equal(_host.Now, d.LastAlive);
+        Assert.Equal(sets, FakeDriver.Sets);
+        Assert.False(File.Exists(Experiment.PathBeside(_journal.Path)));
+    }
+
     /// <summary>An unattended session stops writing trials once it has spent its crash budget; a session the person is at
     /// has none, and a new session starts a new budget.</summary>
     [Fact]

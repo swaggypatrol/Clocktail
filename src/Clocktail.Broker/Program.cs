@@ -161,6 +161,17 @@ static int Run()
     // The last 60 s of each GPU in memory; on a reset the window is saved and its crash point steps the curve there.
     var sampler = new FlightSampler(mgr, hw, targets.Ids.Select(id => (id, targets.Resolve(id)!.Session)).ToList());
     KeepRunning("the flight recorder", () => sampler.RunAsync(cts.Token));
+    // What only a watching agent may hold goes back when no agent has been heard from for 5 minutes.
+    var lease = new TrialLease(dispatcher.Dispatch, targets.Ids, () => dispatcher.LastAlive, Log);
+    KeepRunning("the trial lease", async () =>
+    {
+        while (!cts.IsCancellationRequested)
+        {
+            lease.Look(DateTimeOffset.Now);
+            try { await Task.Delay(TimeSpan.FromSeconds(30), cts.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+        }
+    });
     // A fixed fan duty is the agent's to watch; when the card gets too hot under one anyway, the fans go back to the curve.
     var fanGuard = new FanGuard(dispatcher.Dispatch, Log);
     KeepRunning("the fan guard", async () =>
