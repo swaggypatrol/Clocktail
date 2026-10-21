@@ -18,7 +18,8 @@ public sealed class DriverResetResponder(
     Action<string> log,
     Func<DateTimeOffset> now,
     Action<TimeSpan> sleep,
-    Func<string, bool>? idle = null)
+    Func<string, bool>? idle = null,
+    Func<DateTime, int?>? resetsSince = null)
 {
     /// <summary>
     /// The daily profile goes back on only once the GPU has been idle for this many looks in a row: two of three hangs
@@ -114,6 +115,14 @@ public sealed class DriverResetResponder(
             bool down = crashed.Contains(id);
             try
             {
+                if (!down && UnansweredReset(id) is { } reset)
+                {
+                    // The worker before this one died in the hang (inside NVML), or handed over when the driver went
+                    // away, before it answered the reset: answered now, as it would have been.
+                    log($"gpu {id}: at start: {reset}");
+                    RespondFor(id, reset, 0);
+                    continue;
+                }
                 if (!down) { Profile(id, "apply", "the broker started", "at start"); continue; }
                 const string why = "the machine went down holding the profile";
                 Record(id, why, "at start");
@@ -121,6 +130,24 @@ public sealed class DriverResetResponder(
             }
             catch (Exception e) { log($"gpu {id}: daily profile at start: failed: {e}"); }
         }
+    }
+
+    /// <summary>
+    /// At start in the same boot, a trial still in force with a driver reset in the System log since it was written: that
+    /// reset was never answered (an answered one closes the trial as the crash at once). A device restart of a hung GPU
+    /// ends the worker within a second, before it settles to answer. Null when there is none, or the log cannot be read.
+    /// </summary>
+    private string? UnansweredReset(string gpuId)
+    {
+        if (resetsSince == null) return null;
+        var show = perform(new BrokerRequest(BrokerRequest.OpExperiment, gpuId, Kind: "show"));
+        if (show.Result is not { } res || !res.TryGetProperty("experiment", out var e) || e.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !e.TryGetProperty("Trial", out var t) || t.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !t.TryGetProperty("At", out var at) || !at.TryGetDateTimeOffset(out var since))
+            return null;
+        return resetsSince(since.UtcDateTime) is > 0 and var n
+            ? $"a driver reset while the service restarted ({n} reset event{(n == 1 ? "" : "s")} in the System log since the trial in force was written)"
+            : null;
     }
 
     /// <summary>The crash recorded ("crashed"): the trial in force made a data point, nothing written.</summary>

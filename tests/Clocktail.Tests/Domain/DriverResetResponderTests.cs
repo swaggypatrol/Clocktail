@@ -106,6 +106,38 @@ public class DriverResetResponderTests
         Assert.Contains("daily profile at start: failed", _log[^1]);
     }
 
+    /// <summary>A device restart of a hung GPU ends the worker before it answers the reset, and the next one starts in
+    /// the same boot. A trial still in force with a reset in the System log since it was written is that crash: given
+    /// back and recorded as one, not closed as "survived" by the start's apply.</summary>
+    [Fact]
+    public void A_reset_the_last_worker_never_answered_is_answered_at_start()
+    {
+        var written = new DateTimeOffset(2026, 10, 19, 21, 47, 30, TimeSpan.Zero);
+        DateTime? askedSince = null;
+        DriverResetResponder Start(int? resets, bool trial) => new(req =>
+        {
+            if (req.Op == BrokerRequest.OpExperiment)
+                return new BrokerResponse(true, Result: JsonSerializer.SerializeToElement(new { success = true, experiment = new { Game = "KCD2", Trial = trial ? new { At = written, Change = "+15" } : null } }));
+            if (req.Op == BrokerRequest.OpProfile) { _profile.Add(req); return new BrokerResponse(true, Result: JsonSerializer.SerializeToElement(new { success = true })); }
+            _asked.Add(req);
+            return Recovered(true, "Written");
+        }, ["gpu-A"], _log.Add, () => _now, t => _now += t, resetsSince: s => { askedSince = s; return resets; });
+
+        Start(resets: 9, trial: true).ApplyAtStart([]);
+        Assert.Equal(written.UtcDateTime, askedSince);
+        Assert.Equal(BrokerRequest.RecoverAfterDriverReset, Assert.Single(_asked).Kind);   // on record in the crash log too
+        Assert.Equal(["crashed", "apply-power", "after-reset"], _profile.Select(p => p.Kind));
+        Assert.Contains("9 reset events", _profile[0].Value);
+
+        foreach (var (resets, trial) in new[] { ((int?)0, true), (null, true), (3, false) })   // no reset, an unreadable log, no trial
+        {
+            _asked.Clear(); _profile.Clear();
+            Start(resets, trial).ApplyAtStart([]);
+            Assert.Empty(_asked);
+            Assert.Equal("apply", Assert.Single(_profile).Kind);
+        }
+    }
+
     [Fact]
     public void Waking_up_asks_for_the_profile_once_the_GPU_is_idle()
     {

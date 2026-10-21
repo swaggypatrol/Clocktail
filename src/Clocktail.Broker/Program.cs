@@ -145,7 +145,13 @@ static int Run()
         Log($"gpu {id}: the machine went down holding cells (a write window open, or an unclean shutdown); recorded in {path}");
 
     // A driver reset keeps every offset on the card: give back what is held, through the same recovery op a client would send.
-    var responder = new DriverResetResponder(dispatcher.Dispatch, targets.Ids, Log, () => DateTimeOffset.Now, Thread.Sleep, id => Idle(mgr, targets, id));
+    // A reset the worker before this one never answered (it died in the hang, or handed over) is answered at start.
+    static int? ResetsSince(DateTime sinceUtc)
+    {
+        try { return SystemLog.Count(SystemLog.DriverResetFilter, sinceUtc); }
+        catch (InvalidOperationException) { return null; }
+    }
+    var responder = new DriverResetResponder(dispatcher.Dispatch, targets.Ids, Log, () => DateTimeOffset.Now, Thread.Sleep, id => Idle(mgr, targets, id), ResetsSince);
     KeepRunning("the driver-reset responder", () => responder.RunAsync(cts.Token));
     // The daily profile goes on at start once the GPU is idle, unchanged; a crash before it (a window open, an unclean
     // shutdown) is recorded first.
