@@ -3,7 +3,7 @@ How a session runs, how big a step is, how to test a part of the curve the game 
 
 ## The loop
 1. `begin_session` with the game, and `live_start` with it: the card is watched for the whole session, a line every 10 s under load. In Claude Code, follow its log with the Monitor tool and say what you see as lines arrive; otherwise `live_read` when the person talks.
-2. Where the card runs: the live lines (clock, voltage and the curve point, what held it), or `gpu_status` for one look (the operating point, NVVDD median over the last 3 s).
+2. Where the card runs: the live lines (clock, voltage and the curve point, what held it), or `gpu_status` for one look (NVVDD and the curve point at that instant; `adjust_curve` centres its window on the median under load over the last 3 s, or over the last 2 minutes once the load has stopped).
 3. One change: usually `adjust_curve` (default window: 20 mV under the operating point to 10 mV above; at most 15 MHz per call; never more than 200 MHz above the daily profile; points under 850 mV are never touched).
 4. Judge it: 5-10 minutes of play in a demanding scene (the live lines show the clock and voltage it held, and flag a suspected hang as it happens), or `stress_test`. Avoid writing under full load mid-fight: 2 of 3 hangs on the reference card began right after a write under load.
 5. Record it: `mark_stable` with what was played, or `mark_crash` with what was seen. A driver reset is recorded by the service by itself.

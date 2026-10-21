@@ -70,6 +70,22 @@ public sealed class Residency(Card card) : BackgroundService
         return v.Count == 0 ? null : v[v.Count / 2];
     }
 
+    /// <summary>The median NVVDD over the last <paramref name="span"/> of load, when the load ended within
+    /// <paramref name="within"/> (a stress run that just finished); null when the card has not been loaded since.</summary>
+    public uint? LastLoadMedianUv(TimeSpan within, TimeSpan span)
+    {
+        lock (_gate) return LastLoadMedian([.. _recent], DateTimeOffset.Now, within, span);
+    }
+
+    public static uint? LastLoadMedian(IReadOnlyList<Tick> ticks, DateTimeOffset now, TimeSpan within, TimeSpan span)
+    {
+        var recent = ticks.Where(t => t.At >= now - within).ToList();
+        if (recent.Count == 0) return null;
+        var end = recent.Max(t => t.At);
+        var v = recent.Where(t => t.At >= end - span).Select(t => t.Uv).Order().ToList();
+        return v[v.Count / 2];
+    }
+
     /// <summary>Every loaded sample between two moments, from the day files (and what is not written yet).</summary>
     public IReadOnlyList<Tick> Between(DateTimeOffset from, DateTimeOffset to)
     {

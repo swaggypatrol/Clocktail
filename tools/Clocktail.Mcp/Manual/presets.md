@@ -18,7 +18,7 @@ Verified on the reference card: bit-exact compute tests, nvgwls at 50 % and 100 
 ## Offering it
 - `list_presets` says whether this card is the model a preset was tuned on; `load_preset` refuses any other model.
 - Ask first. Say what it changes (the table above, in a sentence), that it replaces their daily profile (the old one is kept in the tuning log), and that their chip may not hold it.
-- After loading: `stress_test load=100` for 60-120 s, then load 50 for 60 s, then have them play. If anything fails, it is their silicon, not the preset (and `back_to_daily` now means the preset). Lower the curve where it failed (`begin_session`, `adjust_curve` -15 MHz, test, `keep_as_daily` once it holds).
+- After loading: `stress_test load=100` for 60-120 s, then load 50 for 60 s, then have them play. If anything fails, it is their silicon, not the preset (and `back_to_daily` now means the preset). Lower the curve where it failed (`begin_session`, `adjust_curve` -15 MHz with `fromMv`/`toMv` around the voltage it failed at, from `data_points` or the stress run's p50 `nvvdd_mv`; the card is idle after a crash, test, `keep_as_daily` once it holds).
 - If lowering the curve does not cure it and the failure was memory-bound or showed artefacts, XBAR +300 may be too much for this chip: `adjust_xbar` -50 MHz per step, test, `keep_as_daily` once it holds.
 - From stock without a preset is equally valid; it just takes more sessions.
 

@@ -44,7 +44,7 @@ Three loads reach three regions of the curve:
 Per region:
 1. `begin_session` ("stress").
 2. Bring the card to temperature.
-3. `adjust_curve +15` around the operating point.
+3. `adjust_curve +15` around the point the last run held: pass `fromMv`/`toMv` around its p50 `nvvdd_mv` (about -15/+10 mV). Between runs the card is idle, so there is no operating point of its own to centre on.
 4. `stress_test` 60 s.
 5. Pass: `mark_stable` and go to step 3. Fail: the trial is recorded as a crash and the daily profile goes back by itself.
 The last pass is the edge there. `data_points` -> `by_point` keeps the score per point.

@@ -53,6 +53,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     public static readonly int MinMv = Env("CLOCKTAIL_MCP_MIN_MV", 850);
     /// <summary>The operating point is the median NVVDD under load over this long: a game's voltage moves with the scene.</summary>
     public static readonly TimeSpan OperatingSpan = TimeSpan.FromSeconds(3);
+    /// <summary>adjust_curve on an idle card: the last load within this long (a stress run that just ended), its last 10 s.</summary>
+    public static readonly TimeSpan LastLoadWithin = TimeSpan.FromMinutes(2), LastLoadSpan = TimeSpan.FromSeconds(10);
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
 
@@ -135,7 +137,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "Raise or lower the Core V/F points around where the card runs now, as a new trial of the session. Each call moves " +
         "each point by at most the step (default 15 MHz) and never above the daily profile by more than the cap (default " +
         "200 MHz); the firmware's own limits are held by the broker. The operating point is the median NVVDD under load " +
-        "over the last 3 s; the default window is 20 mV below it to 10 mV above, and any point above the window that the " +
+        "over the last 3 s (or the last 10 s of a load that ended within 2 minutes, such as a stress run; an idle card needs " +
+        "fromMv/toMv); the default window is 20 mV below it to 10 mV above, and any point above the window that the " +
         "raise would overtake is lifted just enough to keep the curve rising. Points under 850 mV (CLOCKTAIL_MCP_MIN_MV) are " +
         "never touched. Under a power wall a raise shows as the same " +
         "clock at a lower voltage: the points the card then runs on are the ones tested (mark_stable records them). " +
@@ -151,9 +154,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         if (Math.Abs(deltaMhz) > StepMhz) throw new ArgumentException($"{deltaMhz} MHz is more than one step ({StepMhz} MHz); split it into several trials");
         var look = card.Read();
         var daily = DailyOffsets(out _);
-        uint? at = residency.MedianUv(OperatingSpan) ?? look.NvvddUv;
-        uint lo = fromMv is { } f ? (uint)(f * 1000) : (at ?? throw new InvalidOperationException("NVVDD is unreadable; give fromMv and toMv")) - WindowBelowMv * 1000;
-        uint hi = toMv is { } h ? (uint)(h * 1000) : (at ?? throw new InvalidOperationException("NVVDD is unreadable; give fromMv and toMv")) + WindowAboveMv * 1000;
+        // Where the card ran under load: the last 3 s, else the last load within 2 minutes (a stress run that just ended). An
+        // idle card's NVVDD (~800-835 mV) is not an operating point: the window would sit under the 850 mV floor.
+        uint? at = residency.MedianUv(OperatingSpan) ?? residency.LastLoadMedianUv(LastLoadWithin, LastLoadSpan);
+        const string Idle = "the card has not been under load in the last 2 minutes, so there is no operating point: give fromMv and toMv (e.g. around the last stress run's p50 nvvdd_mv, or the crash voltage in data_points)";
+        uint lo = fromMv is { } f ? (uint)(f * 1000) : (at ?? throw new InvalidOperationException(Idle)) - WindowBelowMv * 1000;
+        uint hi = toMv is { } h ? (uint)(h * 1000) : (at ?? throw new InvalidOperationException(Idle)) + WindowAboveMv * 1000;
         var pts = look.Curve.Points;
         if (hi < MinMv * 1000) throw new ArgumentException($"the window ({lo / 1000.0}-{hi / 1000.0} mV) is all under the {MinMv} mV floor (CLOCKTAIL_MCP_MIN_MV): points there keep the daily offsets");
         lo = Math.Max(lo, (uint)MinMv * 1000);

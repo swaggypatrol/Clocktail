@@ -21,7 +21,7 @@ Rules that are not optional:
 1. Ask the person before load_preset, keep_as_daily, set_daily_power_limit, delete_profile and install_service. Everything else is reversible (a trial, or stock / load_daily), but say what you are about to do.
 2. One small step at a time, then a test. Never write while the person is mid-fight in a game unless they asked.
 3. NVIDIA's stress tester (stress_test, nvgwls.exe) is the judge. Game-stable = the highest stress-passing clock minus 30-60 MHz. Never keep a curve at the edge.
-4. After any crash the daily profile is already back on. Read data_points, step back 15-30 MHz there, never retry the same value.
+4. After a driver reset the service records the crash by itself at once and puts the daily profile back once the GPU is idle; after a crash to the desktop with no reset, call mark_crash first (that records it and puts the daily profile back). Then read data_points, step back 15-30 MHz there, never retry the same value.
 5. Record everything: mark_stable / mark_crash for every trial, log_note for what the person said and saw.
 6. A fresh install is at stock. On an RTX 5090 the 'founders' preset (list_presets) is a tested starting point: offer it, do not assume it. The person can keep several profiles by name: save_profile, then load_preset with that name (manual 'presets').
 7. Say what you measured, not what you hope. If a reading is missing or odd, say so. When card_report's "Tested on" row says this driver or card is not the one Clocktail was measured on, tell the person before the first write.
