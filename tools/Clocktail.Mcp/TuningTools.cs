@@ -44,6 +44,11 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     public static readonly int MsvddVminBelowMv = Env("CLOCKTAIL_MCP_MSVDD_VMIN_BELOW_MV", 100);
     /// <summary>The longest stress_test run (CLOCKTAIL_MCP_MAX_STRESS_S): the call blocks for the whole run.</summary>
     public static readonly int MaxStressSeconds = Env("CLOCKTAIL_MCP_MAX_STRESS_S", 300);
+    /// <summary>stress_test stops the run at this temperature by default (CLOCKTAIL_MCP_STRESS_MAX_C): the agent cannot see
+    /// the card while the call blocks, and a fixed low fan duty at the wall passed 85 °C in 40 s on the reference card.</summary>
+    public static readonly int StressMaxC = Env("CLOCKTAIL_MCP_STRESS_MAX_C", 85);
+    /// <summary>The highest maxTempC a run may ask for: under NVIDIA's own slowdown (90 °C on the reference card).</summary>
+    public const int StressMaxCeilingC = 88;
     /// <summary>The default window around the operating point: further below than above, because under a wall a raised
     /// curve moves the operating point down (the card runs the same clock a point lower).</summary>
     public const int WindowBelowMv = 20, WindowAboveMv = 10;
@@ -366,9 +371,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     public string StressTest(
         [Description("0..100; 100 = continuous full load (default).")] int load = 100,
         [Description("Run length in seconds, 10..300 (default 60).")] int seconds = 60,
-        [Description("What this run is meant to show, for the log.")] string? note = null) => Guard(() =>
+        [Description("What this run is meant to show, for the log.")] string? note = null,
+        [Description("Stop the run if the GPU reaches this temperature, °C (default 85, at most 88); a stop is neither a pass nor a crash.")] int? maxTempC = null) => Guard(() =>
     {
         if (load is < 0 or > 100) throw new ArgumentException("load is 0..100");
+        int maxC = maxTempC ?? StressMaxC;
+        if (maxC is < 50 or > StressMaxCeilingC) throw new ArgumentException($"maxTempC is 50..{StressMaxCeilingC}");
         if (seconds < 10 || seconds > MaxStressSeconds) throw new ArgumentException($"seconds is 10..{MaxStressSeconds} (CLOCKTAIL_MCP_MAX_STRESS_S)");
         string exe = Nvgwls.Find() ?? throw new InvalidOperationException("nvgwls.exe was not found beside the loaded driver");
         var before = card.Read();
@@ -377,11 +385,29 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         // A sample the driver does not answer in time is a missing one (a hang is what this run is looking for).
         residency.StressUntil(DateTimeOffset.Now.AddSeconds(seconds + 30));   // light load counts as load for this run
         int? code;
-        try { code = Nvgwls.Run(exe, load, seconds, () => { try { samples.Add(card.ReadSample()); } catch (DriverBusyException) { } }); }
+        bool tooHot = false;
+        int hotRun = 0;
+        double? stopC = null;
+        bool Sample()
+        {
+            try
+            {
+                var s = card.ReadSample();
+                samples.Add(s);
+                hotRun = Nvgwls.TooHot(s.Telemetry?.TemperatureC, s.Telemetry?.TempMarginC, maxC) ? hotRun + 1 : 0;
+                if (hotRun >= 2) { stopC = s.Telemetry?.TemperatureC; return true; }
+            }
+            catch (DriverBusyException) { }
+            return false;
+        }
+        try { code = Nvgwls.Run(exe, load, seconds, Sample, out tooHot); }
         finally { residency.StressUntil(DateTimeOffset.MinValue); }
-        int? resets = Nvgwls.DriverResets(started, code);
-        string verdict = Nvgwls.Verdict(code, resets);
-        bool failed = Nvgwls.Failed(code, resets);
+        int? resets = tooHot ? Nvgwls.DriverResets(started, 0) : Nvgwls.DriverResets(started, code);
+        double ranS = Math.Round((DateTime.UtcNow - started).TotalSeconds);
+        string verdict = tooHot && resets is not > 0
+            ? string.Create(CultureInfo.InvariantCulture, $"thermal stop at {stopC:0} °C after {ranS:0} s (maxTempC {maxC}): stopped by stress_test, not a pass or a crash")
+            : Nvgwls.Verdict(code, resets);
+        bool failed = tooHot ? resets > 0 : Nvgwls.Failed(code, resets);
 
         // The first 2 s are the ramp; the rest is what the settings were tested at.
         var held = samples.Count > 4 ? samples.Skip(4).ToList() : samples;
@@ -449,7 +475,9 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             samples_csv = csv,
             trial_in_force = trial,
             crash_recorded = crashRecorded,
-            next = failed ? "the card failed: read data_points / read_log before the next step" : null,
+            thermal_stop = tooHot && !failed ? new { at_c = stopC, after_s = ranS, max_temp_c = maxC } : null,
+            next = failed ? "the card failed: read data_points / read_log before the next step"
+                : tooHot ? "too hot to test this way: a steeper fan curve (set_fan_curve), fans back to auto, or a lower wall, then run again" : null,
         });
     });
 

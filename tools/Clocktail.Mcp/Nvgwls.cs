@@ -52,6 +52,10 @@ public static class Nvgwls
     /// <summary>A failure of the card, not of the run: what counts against the settings under test.</summary>
     public static bool Failed(int? code) => code is null or 3 or 4 or 5 or 6;
 
+    /// <summary>stress_test's own stop: the run was ended because the card got too hot (two samples in a row at or above
+    /// the limit, or within 2 °C of the driver's slowdown point). Neither a pass nor a failure of the settings.</summary>
+    public static bool TooHot(double? tempC, int? marginC, double maxC) => tempC >= maxC || marginC <= 2;
+
     /// <summary>The verdict with the System log's word on it. A driver reset during the run is the card's failure whatever
     /// the exit code: every hang measured on the reference card was a driver reset (nvlddmkm 153) followed by exit code 2,
     /// which on its own reads as "could not run". <paramref name="resets"/> is null when the log could not be read.</summary>
@@ -82,9 +86,11 @@ public static class Nvgwls
         catch (InvalidOperationException) { return null; }
     }
 
-    /// <summary>Runs it hidden and calls <paramref name="sample"/> every 500 ms until it exits or overruns.</summary>
-    public static int? Run(string exe, int load, int seconds, Action sample)
+    /// <summary>Runs it hidden and calls <paramref name="sample"/> every 500 ms until it exits or overruns. A sample that
+    /// answers true stops the run (its process tree is ended) and sets <paramref name="stopped"/>; the code is then null.</summary>
+    public static int? Run(string exe, int load, int seconds, Func<bool> sample, out bool stopped)
     {
+        stopped = false;
         var dir = Path.Combine(Path.GetTempPath(), "clocktail-stress");
         Directory.CreateDirectory(dir);
         var psi = new ProcessStartInfo(exe)
@@ -99,7 +105,12 @@ public static class Nvgwls
         var deadline = DateTime.UtcNow.AddSeconds(seconds + 30);
         while (!p.WaitForExit(500))
         {
-            sample();
+            if (sample())
+            {
+                try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+                stopped = true;
+                return null;
+            }
             if (DateTime.UtcNow > deadline)
             {
                 try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }

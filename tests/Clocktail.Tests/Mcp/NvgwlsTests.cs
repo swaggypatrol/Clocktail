@@ -34,3 +34,16 @@ public class NvgwlsTests
         Assert.Contains("2 reset events", Nvgwls.Verdict(0, 2));
     }
 }
+
+/// <summary>stress_test's temperature stop: the limit, or within 2 °C of the driver's slowdown point.</summary>
+public class StressThermalStopTests
+{
+    [Fact]
+    public void Too_hot_is_the_limit_or_the_last_two_degrees_of_margin()
+    {
+        Assert.False(Clocktail.Mcp.Nvgwls.TooHot(84, 6, 85));
+        Assert.True(Clocktail.Mcp.Nvgwls.TooHot(85, 5, 85));
+        Assert.True(Clocktail.Mcp.Nvgwls.TooHot(80, 2, 85));     // the driver says it is about to slow down
+        Assert.False(Clocktail.Mcp.Nvgwls.TooHot(null, null, 85)); // nothing read: not a reason to stop
+    }
+}
