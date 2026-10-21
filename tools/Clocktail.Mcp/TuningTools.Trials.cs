@@ -74,7 +74,8 @@ public sealed partial class TuningTools
         "Hold every fan at a fixed duty for the session, as a new trial (or 'auto' to give them back to the fan curve): to " +
         "hold a temperature while testing, e.g. a fan sweep at the wall to see what each degree costs. On the reference card at " +
         "600 W: 100 % held 67 C, 75 % 73 C, 60 % 79 C; 45 % passed 85 C within 40 s. Watch temp_c and go back to 'auto' above " +
-        "85 C. Never kept: back_to_daily, end_session, keep_as_daily and a crash give the fans back to the curve. 30..100 % " +
+        "85 C. Never kept: back_to_daily, end_session, keep_as_daily, a crash and the agent disconnecting give the fans back to " +
+        "the curve. 30..100 % " +
         "(the firmware's floor while spinning).")]
     public string SetFanSpeed(
         [Description("Duty in percent, 30..100, or 'auto'.")] string percent,

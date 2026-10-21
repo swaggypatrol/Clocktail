@@ -4,6 +4,7 @@ using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Clocktail.Domain.Broker;
 using Clocktail.Domain.Platform;
 
 namespace Clocktail.Mcp;
@@ -266,8 +267,33 @@ public static class Relay
         using var stdin = new StreamReader(Console.OpenStandardInput(), Utf8);
         while (stdin.ReadLine() is { } line)
             if (line.Length > 0) core.FromClient(line);
-        core.Stop();   // the agent closed the connection: the worker goes with it
+        Release(Log);  // the agent closed the connection: nothing it was watching stays held for it,
+        core.Stop();   // and the worker goes with it
         return 0;
+    }
+
+    /// <summary>
+    /// What only a watching agent may hold (a fixed fan duty, lowered current limits) goes back on every GPU the service
+    /// has, through the broker's "release": the broker keeps a trial until someone ends it, and a fan held at 30 % with no
+    /// agent watching temp_c stays there until a reboot. The relay loads no driver; it only asks the service.
+    /// </summary>
+    private static void Release(Action<string> log)
+    {
+        try
+        {
+            var ping = BrokerClient.TryCall(new BrokerRequest(BrokerRequest.OpPing), connectMs: 800);
+            if (ping?.Result is not { } r || !r.TryGetProperty("gpus", out var gpus) || gpus.ValueKind != JsonValueKind.Array) return;   // no service: it holds nothing
+            foreach (var id in gpus.EnumerateArray().Select(g => g.GetString()))
+            {
+                var a = BrokerClient.TryCall(new BrokerRequest(BrokerRequest.OpExperiment, id, Kind: "release", Value: "the agent disconnected"),
+                    connectMs: 800, answerWait: TimeSpan.FromSeconds(30));
+                if (a is { Ok: false }) log($"gpu {id}: trial-only settings not all handed back: {a.Error}");
+            }
+        }
+        catch (Exception e) when (e is IOException or InvalidDataException or TimeoutException or ObjectDisposedException)
+        {
+            log($"trial-only settings not handed back: {e.Message}");
+        }
     }
 
     private sealed class ProcessChild : IRelayChild

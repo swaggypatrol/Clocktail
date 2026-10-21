@@ -78,8 +78,9 @@ public sealed record BrokerRequest(
     /// curve trial after it runs under the same wall), keep_curve records the curve on the card without writing it; "note" puts the
     /// agent's own words in the tuning log (<see cref="Value"/>: the text); "stable" records the trial as stable
     /// (<see cref="Value"/>: a note); "crash" records it as a crash the broker could not see (the game fell to the
-    /// desktop with no driver reset; <see cref="Value"/>: what the player saw) and puts the daily profile back; "end"
-    /// closes the trial as survived, ends the session and puts the daily profile back. A crash while a trial is in force is recorded by the "crashed" step of <see cref="OpProfile"/>, at once,
+    /// desktop with no driver reset; <see cref="Value"/>: what the player saw) and puts the daily profile back; "release"
+    /// hands back what only a watching agent may hold (a fixed fan duty, lowered current limits) when the agent has gone,
+    /// the rest of the trial staying in force; "end" closes the trial as survived, ends the session and puts the daily profile back. A crash while a trial is in force is recorded by the "crashed" step of <see cref="OpProfile"/>, at once,
     /// and "after-reset" puts the daily profile back unchanged once the GPU is idle. Not itself a write: "try" and "end" write through the ordinary ops.
     /// </summary>
     public const string OpExperiment = "experiment";

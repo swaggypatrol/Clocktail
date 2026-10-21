@@ -753,6 +753,35 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("ocp/nvvdd: 300000 → 600000", log);
     }
 
+    /// <summary>When the agent goes away (its MCP server's input closes) the relay asks for "release": what only a
+    /// watching agent may hold goes back, here a lowered current limit, while the rest of the trial (its wall) stays in
+    /// force, recorded from then on as a trial of its own. Before, nothing ended it until a reboot or a driver event.</summary>
+    [Fact]
+    public void An_agent_that_leaves_hands_back_the_trial_only_settings_and_nothing_else()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"sweep"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W, NVVDD 350 A", power_mw = 450_000u, nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+        Assert.Equal(350_000u, CurrentLimitsFixture.Limit(13));
+
+        var r = d.Dispatch(Exp("release", "the agent disconnected"));
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(600_000u, CurrentLimitsFixture.Limit(13));     // the limit back to its default
+        Assert.Equal(450_000u, _requests[0xfe]);                    // the trial's wall stays
+        Assert.DoesNotContain(_journal.Inspect().Items, i => i.Kind == CurrentLimitWrites.Kind);
+        var trial = Experiment.Load(Experiment.PathBeside(_journal.Path))!.Trial!;
+        Assert.Equal((450_000u, (uint?)null), (trial.PowerMw!.Value, trial.NvvddMa));
+        Assert.Contains("handed back: the agent disconnected", trial.Change);
+        var before = Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10));
+        Assert.Equal((Experiment.Survived, 350_000u), (before.Outcome, before.NvvddMa!.Value));   // the part that ran with it
+
+        // Nothing trial-only held: nothing written, nothing recorded.
+        Assert.True(d.Dispatch(Exp("release", "again")).Ok);
+        Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10));
+        Assert.Contains("Trial-only settings handed back", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
     /// <summary>A new session while a trial is in force ends that trial as end_session does: its wall goes back to the daily
     /// one, so the new session's data points are recorded under the wall they ran at, and a first keep cannot keep the
     /// old trial's lowered wall as the daily one.</summary>

@@ -253,7 +253,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "is. The firmware caps the rail's current at it, so a lower NVVDD limit caps the core's power (P = V x I) and moves " +
         "the card down the curve below where the 400 W board wall stops; gpu_status shows each rail's amps and watts to " +
         "pick it from. Never above the VBIOS default (NVVDD 600 A, MSVDD 180 A); 'default' as amps puts the default back. " +
-        "Never kept: back_to_daily, end_session, keep_as_daily and a crash all put the default back.")]
+        "Never kept: back_to_daily, end_session, keep_as_daily, a crash and the agent disconnecting all put the default back.")]
     public string SetCurrentLimit(
         [Description("nvvdd or msvdd.")] string rail,
         [Description("The limit in amps, or 'default'.")] string amps,

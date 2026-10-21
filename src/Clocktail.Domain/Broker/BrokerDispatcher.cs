@@ -600,6 +600,35 @@ public sealed class BrokerDispatcher
                     "Back to the daily profile:", .. writes]);
                 return r;
             }
+            case "release":
+            {
+                // The agent running the trial is gone (its MCP server's input closed): what only a watching agent may hold
+                // goes back, a fixed fan duty (it can hold the fans at 30 % at a 600 W wall) and lowered current limits. The
+                // rest of the trial stays on the card and in force, recorded from here as a trial of its own without them.
+                // No curve is written: the GPU may be under load. With two agents on one card, one leaving hands these back
+                // for both: the safe side.
+                string why = req.Value ?? "the agent disconnected";
+                var held = HeldTrialCells(target).OrderBy(i => DailyProfile.Rank(i.Kind)).ToList();
+                if (held.Count == 0) return Ok(new { success = true, released = Array.Empty<object>() });
+                var back = held.Select(h => Dispatch(PutBack(target, h))).ToList();
+                DataPoint? closed = null;
+                lock (_experiment)
+                {
+                    if (Experiment.Load(path) is { Trial: { } t } exp)
+                    {
+                        closed = t.Marked ? null : exp.Point(Experiment.Survived, _host.Now, $"{why}: fans and current limits handed back");
+                        if (closed != null) Experiment.Append(data, closed);
+                        (exp with { Trial = t with { At = _host.Now, Marked = false, FanPct = null, NvvddMa = null, MsvddMa = null,
+                            Change = $"{t.Change} (fans and current limits handed back: {why})" } }).Save(path);
+                    }
+                }
+                Log(target, "Trial-only settings handed back", [$"Reason: {why}",
+                    closed != null ? $"The trial ran {closed.Minutes} min with them: recorded as survived; the rest of it stays in force" : null,
+                    .. back.SelectMany(Writes)]);
+                bool ok = back.All(x => x.Ok);
+                return new BrokerResponse(ok, ok ? null : $"not every trial-only setting went back ({back.First(x => !x.Ok).Error}): read the card",
+                    Element(new { success = ok, released = (JsonElement[])[.. back.SelectMany(AppliedOf)] }), ok ? null : back.First(x => !x.Ok).Code);
+            }
             case "end":
             {
                 var exp = Experiment.Load(path);
@@ -612,7 +641,7 @@ public sealed class BrokerDispatcher
                 return r;
             }
             default:
-                return Fail($"experiment needs show, begin, try, stable, crash, note or end, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"experiment needs show, begin, try, stable, crash, note, release or end, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 
