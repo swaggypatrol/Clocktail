@@ -193,16 +193,16 @@ public sealed partial class SettingsTools
         if (curve.ValueKind == JsonValueKind.Object)
         {
             string? now = Str(curve, "curve"), stock = Str(curve, "stock_curve");
-            var (nt, nd) = Last(now);
-            var (st, _) = Last(stock);
-            bool ok = nd is >= 99.5 && (st is not { } stTop || nt <= stTop + 0.01);
+            var (nt, nd, _) = Last(now);
+            var (st, _, _) = Last(stock);
+            string? why = FanCurveShort(now, stock);
             if (stock == null)
                 rows.Add(new("🌀", "Fan curve", "?", Short(now), "?", nd is >= 99.5 ? Info : Look,
                     Join(StockUnknown, nd is >= 99.5 ? $"full speed at {F(nt)} °C" : "never reaches full speed")));
             else
                 rows.Add(new("🌀", "Fan curve", Short(stock), Short(now),
                     now == stock ? "—" : nt is { } a && st is { } b ? $"full speed at {F(a)} °C (stock {F(b)} °C)" : "changed",
-                    ok ? Safe : Look, ok ? (nt < st ? "full speed sooner than stock" : now == stock ? "the card's own" : "full speed no later than stock") : "full speed later than the stock curve"));
+                    why == null ? Safe : Look, why ?? (nt < st ? "full speed sooner than stock" : now == stock ? "the card's own" : "full speed no later than stock")));
         }
 
         // The fans now: following the curve, or held by a trial.
@@ -456,11 +456,25 @@ public sealed partial class SettingsTools
         return f.Length >= 2 ? $"{f[0]} °C {f[1]} %" : p;
     }));
 
-    /// <summary>The last point's temperature and duty.</summary>
-    private static (double? Temp, double? Duty) Last(string? curve)
+    /// <summary>
+    /// Why a fan curve falls short of the stock one, or null when it does not: it must reach 100 % no later than stock,
+    /// and, because the firmware drives by the rpm column, its top rpm must be no lower than stock's.
+    /// </summary>
+    public static string? FanCurveShort(string? now, string? stock)
+    {
+        var (nt, nd, nr) = Last(now);
+        var (st, _, sr) = Last(stock);
+        if (nd is not >= 99.5 || st is { } stTop && !(nt <= stTop + 0.01)) return "full speed later than the stock curve";
+        if (sr is { } srTop && nr is { } nrTop && nrTop < srTop) return $"full speed at {F(nrTop)} rpm, under stock's {F(srTop)} rpm (the firmware drives by rpm)";
+        return null;
+    }
+
+    /// <summary>The last point's temperature, duty and rpm (null when the text names none).</summary>
+    private static (double? Temp, double? Duty, double? Rpm) Last(string? curve)
     {
         var f = curve?.Split(',').LastOrDefault()?.Split(':');
+        double? rpm = f is { Length: >= 3 } && double.TryParse(f[2], NumberStyles.Float, Inv, out var r) ? r : null;
         return f is { Length: >= 2 } && double.TryParse(f[0], NumberStyles.Float, Inv, out var t) && double.TryParse(f[1], NumberStyles.Float, Inv, out var d)
-            ? (t, d) : (null, null);
+            ? (t, d, rpm) : (null, null, null);
     }
 }

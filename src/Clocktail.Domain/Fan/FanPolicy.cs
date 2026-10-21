@@ -359,11 +359,18 @@ public static class FanPolicyRules
         if (!policy.Editable) return new Mutation.Abort($"fan policy {i} is not editable");
 
         var now = FanPolicyParser.PointsIn(s, i);
-        var want = target == null ? now : Resolve(target, origin ?? now);
+        var reference = origin ?? now;
+        var want = target == null ? now : Resolve(target, reference);
         if (target != null && !isRecovery && !(origin != null && want.SequenceEqual(origin)))
             foreach (var p in want)
+            {
                 if (p.Temp < 0 || p.Temp > MaxRequestC * 256)
                     return new Mutation.Abort($"{p.TempC.ToString("0.###", CultureInfo.InvariantCulture)} degC is outside the 0..{MaxRequestC} degC a fan curve request may name; nothing written");
+                // The firmware drives by rpm: a named rpm under the reference's pairing would let a duty that passes every
+                // duty rule spin the fans slower than that duty does on the stock curve.
+                if (RpmFor(p.Duty, reference) is var floor && p.Rpm < floor)
+                    return new Mutation.Abort($"{p.Rpm} rpm at {p.DutyPct.ToString("0.###", CultureInfo.InvariantCulture)} % is under the {floor} rpm the policy's own curve pairs with that duty; an rpm may only be faster; nothing written");
+            }
         if (Validate(want) is { } why) return new Mutation.Abort($"fan policy {i}: {why}");
         if (want.SequenceEqual(now)) return new Mutation.Apply([]);
         return Mutation.Of(new Edit(FanPolicyLayout.PointsAt(i), FanCurvePoint.Encode(want)));

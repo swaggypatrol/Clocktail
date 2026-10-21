@@ -359,6 +359,27 @@ public class FanPolicyTests : IDisposable
     }
 
     [Fact]
+    public void A_named_rpm_under_the_duty_pairing_is_refused_whatever_the_duties_say()
+    {
+        var hw = FanPolicyFixture.Install();
+        // Every duty passes the MCP's rules (100 % by 88 °C, none under 20 %); the firmware drives by the rpm column.
+        foreach (var slow in new[] { "50:20:1100,79:60:1300,86:100:1500", "50:20:0,83:50:0,88:100:0", "50:20:1100,79:60:1995,86:100:2874" })
+        {
+            var r = Write(hw, "0", slow);
+            Assert.Equal(TxOutcome.Aborted, r.Tx.Outcome);
+            Assert.Contains("may only be faster", r.Tx.Detail);
+        }
+        Assert.Equal(0, FakeDriver.Sets);
+        Assert.Null(_journal.Load());
+
+        var faster = Write(hw, "0", "50:20:1200,79:60:2100,86:100:2875");   // at or above the pairing: written as named
+        Assert.Equal(TxOutcome.Applied, faster.Tx.Outcome);
+        Assert.Equal("50:20:1200,79:60:2100,86:100:2875", faster.After);
+        var founders = Write(hw, "1", "50:20:1100,79:60:1995,86:100:2875");  // the preset's own rpm are the pairing
+        Assert.Equal(TxOutcome.Applied, founders.Tx.Outcome);
+    }
+
+    [Fact]
     public void A_policy_that_is_not_editable_or_not_there_is_refused_before_any_write()
     {
         var hw = FanPolicyFixture.Install();

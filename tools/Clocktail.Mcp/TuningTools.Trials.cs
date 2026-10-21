@@ -46,7 +46,8 @@ public sealed partial class TuningTools
 
     [McpServerTool(Name = "set_fan_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set the firmware fan curve (every editable curve policy) as a new trial, the V/F curve left as it is: three points " +
-        "degC:duty%, e.g. 50:20,79:60,86:100; rpm follows the firmware's own duty-to-rpm pairing. The fan curve decides the " +
+        "degC:duty%, e.g. 50:20,79:60,86:100; rpm follows the firmware's own duty-to-rpm pairing (a point may name its rpm, " +
+        "degC:duty%:rpm, only at or above that pairing: the firmware drives by rpm). The fan curve decides the " +
         "temperature the card runs at, and the V/F curve's clocks move with temperature (the driver's compensation steps near " +
         "57/62/72/82 C; ~2 MHz/C at 600 W, ~9 MHz/C near the knee), so set it before tuning the curve and test the curve at the " +
         "temperature it gives. Temperatures and duties must rise; the last point must be 100 % at 88 C or lower (full speed " +
