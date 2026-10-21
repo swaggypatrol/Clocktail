@@ -170,9 +170,10 @@ internal static class VfCommands
     public const int MaxUndervoltMv = 100;
 
     /// <summary>Millivolts with up to 3 decimals, 0..<see cref="MaxUndervoltMv"/>, to µV.</summary>
-    private static int Undervolt(string s)
+    internal static int Undervolt(string s)
     {
-        if (!decimal.TryParse(s, NumberStyles.Number, CultureInfo.InvariantCulture, out var mv) || mv < 0 || decimal.Round(mv, 3) != mv)
+        // Not NumberStyles.Number: its thousands separator made "7,5" (a decimal comma) 75 mV.
+        if (!decimal.TryParse(s, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var mv) || mv < 0 || decimal.Round(mv, 3) != mv)
             throw new ArgumentException($"'{s}' is not an undervolt in mV with at most 3 decimals.");
         if (mv > MaxUndervoltMv)
             throw new ArgumentException($"{mv} mV is deeper than {MaxUndervoltMv} mV: 75 mV held on the reference card and 250 mV crashed the whole system (bug check 0x133). Go down in 25 mV steps with a stress run between them.");

@@ -23,6 +23,7 @@
     <ProjectReference Include="..\..\src\Clocktail.Hw\Clocktail.Hw.csproj" />
     <ProjectReference Include="..\..\src\Clocktail.Domain\Clocktail.Domain.csproj" />
     <ProjectReference Include="..\..\tools\Clocktail.Mcp\Clocktail.Mcp.csproj" />
+    <ProjectReference Include="..\..\src\Clocktail.Cli\Clocktail.Cli.csproj" />
   </ItemGroup>
 
 </Project>

@@ -66,7 +66,7 @@ internal static class CurrentLimitCommands
         {
             var limit = limits.Get(rail) ?? throw new InvalidOperationException($"{rail} has no current limit here: {limits.Missing.GetValueOrDefault(rail)}");
             uint ma = amps.Equals("default", StringComparison.OrdinalIgnoreCase) ? limit.DefaultMa
-                : decimal.TryParse(amps, NumberStyles.Number, CultureInfo.InvariantCulture, out var a) && a > 0 && a < 2_000_000
+                : decimal.TryParse(amps, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var a) && a > 0 && a < 2_000_000
                     ? (uint)decimal.Round(a * 1000m, 0, MidpointRounding.AwayFromZero)
                     : throw new ArgumentException($"'{amps}' is not a number of amps (or 'default').");
             Console.Error.WriteLine($"{CurrentLimitWrites.Key(rail)} {limit.LimitMa / 1000.0:0.###} A -> {ma / 1000.0:0.###} A (default {limit.DefaultMa / 1000.0:0.###} A)");

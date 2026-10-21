@@ -96,7 +96,7 @@ internal static class Program
     /// <summary>Watts with up to 3 decimals, at least 1 W, to mW.</summary>
     private static uint ParseMilliwatts(string text)
     {
-        if (!decimal.TryParse(text, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var w) || w < 1 || w > 10_000)
+        if (!decimal.TryParse(text, System.Globalization.NumberStyles.AllowDecimalPoint, System.Globalization.CultureInfo.InvariantCulture, out var w) || w < 1 || w > 10_000)
             throw new ArgumentException($"'{text}' is not a wattage between 1 and 10000.");
         if (decimal.Round(w, 3) != w) throw new ArgumentException("Wattage has at most 3 decimals.");
         return (uint)(w * 1000);
@@ -155,8 +155,26 @@ internal static class Program
         return reqs;
     }
 
+    /// <summary>The kind of write each option belongs to. One command line does one kind: each kind is dispatched on its
+    /// own and the first one found returned, so a second kind given beside it was silently not written.</summary>
+    private static readonly Dictionary<string, string> WriteGroup = new(StringComparer.Ordinal)
+    {
+        ["--power-limit"] = "power", ["--power-cap"] = "power",
+        ["--core-offset"] = "P0 clock offsets", ["--memory-offset"] = "P0 clock offsets",
+        ["--rail"] = "rails", ["--fan"] = "fans", ["--fan-curve"] = "fan curve", ["--profile"] = "profile", ["--recover"] = "recover",
+        ["--xbar-offset"] = "clock domains", ["--xbar-vdemand"] = "clock domains", ["--sys-offset"] = "clock domains",
+        ["--sys-vdemand"] = "clock domains", ["--video-offset"] = "clock domains", ["--video-vdemand"] = "clock domains", ["--boost"] = "voltage boost",
+        ["--vf-offsets"] = "V/F curve", ["--vf-undervolt"] = "V/F curve", ["--current-limit"] = "current limits", ["--session"] = "session",
+    };
+
+    /// <summary>The kinds of write a command line asks for, in the order given.</summary>
+    internal static IReadOnlyList<string> WriteGroups(string[] args) =>
+        [.. args.Select(a => WriteGroup.GetValueOrDefault(a)).OfType<string>().Distinct()];
+
     private static int Run(string[] args)
     {
+        if (WriteGroups(args) is { Count: > 1 } groups)
+            throw new ArgumentException($"one kind of write per command, and this one asks for {string.Join(", ", groups)}: run them one after another, or put them in one --session file.");
         if (ClockCommands.TryRun(args, out var clockCode)) return clockCode;
         if (VfCommands.TryRun(args, out var vfCode)) return vfCode;
         if (SessionCommands.TryRun(args, out var sessionCode)) return sessionCode;
