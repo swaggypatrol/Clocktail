@@ -355,8 +355,8 @@ public sealed partial class TuningTools(Card card, Residency residency)
         "~2900 MHz on the daily curve); under 100 it is a 250 Hz square wave at that duty (load 50: ~385 W, ~3055 MHz, " +
         "the curve's top). Combine with set_power_limit / set_current_limit to pin it lower down the curve. If it fails " +
         "(TDR, Xid, data error, crash, hang, or a driver reset in the System log during the run) while a trial is in force, " +
-        "the trial is recorded as a crash and the daily " +
-        "profile goes back at once. The result goes into the tuning log. Blocks for the run's length.")]
+        "the trial is recorded as a crash (after a driver reset by the service itself, with the voltage it hung at) and the " +
+        "daily profile goes back on. The result goes into the tuning log. Blocks for the run's length.")]
     public string StressTest(
         [Description("0..100; 100 = continuous full load (default).")] int load = 100,
         [Description("Run length in seconds, 10..300 (default 60).")] int seconds = 60,
@@ -406,9 +406,7 @@ public sealed partial class TuningTools(Card card, Residency residency)
         var reasons = held.SelectMany(s => s.Telemetry?.ThrottleReasons ?? []).Distinct().ToList();
         int? pointIndex = p50Mv is { } mv && Nearest(before.Curve, (uint)(mv * 1000)) is { } pt ? pt.Index : null;
 
-        var session = card.Broker(BrokerRequest.OpExperiment, "show");
-        bool trial = session.Ok && session.Result is { } sr && sr.TryGetProperty("experiment", out var e)
-            && e.ValueKind == JsonValueKind.Object && e.TryGetProperty("Trial", out var tr) && tr.ValueKind == JsonValueKind.Object;
+        bool trial = TrialInForce(card.Broker(BrokerRequest.OpExperiment, "show")) == true;
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Stress nvgwls -l {load}, {seconds} s: {verdict} (exit code {(code?.ToString(CultureInfo.InvariantCulture) ?? "none")}). P50 {p50Mhz} MHz @ NVVDD {p50Mv} mV (curve point {pointIndex}), XBAR {P(held.Select(s => s.Mhz(AllClocksLayout.Xbar)), 0.5)} / SYS {P(held.Select(s => s.Mhz(AllClocksLayout.Sys)), 0.5)} MHz, board {p50W} W, NVVDD {p50NvW} W, MSVDD {p50MsMv} mV / {p50MsW} W; max {held.Max(s => s.Telemetry?.TemperatureC)} °C; limit reasons [{string.Join(", ", reasons)}]; {held.Count} samples; per sample {csv}")
             + (note != null ? $". Purpose: {note}" : "");
@@ -416,8 +414,14 @@ public sealed partial class TuningTools(Card card, Residency residency)
         bool crashRecorded = false;
         if (failed && trial)
         {
-            var c = card.Broker(BrokerRequest.OpExperiment, "crash", $"nvgwls -l {load} {seconds} s: {verdict}");
-            crashRecorded = c.Ok;   // a TDR's trial is closed by the broker's own reset handling first
+            // A driver reset is the service's to record: it gives the cells back and records the trial as the crash, with
+            // the flight recorder's voltage, seconds after the event. Recording it here too wrote a second entry without the
+            // voltage, and the service's then blamed the daily profile. Only when it has not within the wait, or the run
+            // failed with no reset (a data error), is it recorded here.
+            if (resets > 0 && TrialClosedWithin(() => TrialInForce(card.Broker(BrokerRequest.OpExperiment, "show")), ServiceRecordsWithin, Thread.Sleep))
+                crashRecorded = true;
+            else
+                crashRecorded = card.Broker(BrokerRequest.OpExperiment, "crash", $"nvgwls -l {load} {seconds} s: {verdict}").Ok;
         }
         return Out(new
         {
@@ -446,6 +450,28 @@ public sealed partial class TuningTools(Card card, Residency residency)
         "the note: those are the points this trial proved, not the whole window.")]
     public string MarkStable([Description("What was played and seen.")] string note) => Guard(() =>
         Reply(card.Broker(BrokerRequest.OpExperiment, "stable", note + TrialStays(out _))));
+
+    /// <summary>stress_test: how long a run that saw a driver reset waits for the service to record the crash (it settles
+    /// 3 s, gives the cells back, then records it; a write window or a judge in the way can make it later).</summary>
+    public static readonly TimeSpan ServiceRecordsWithin = TimeSpan.FromSeconds(30);
+
+    /// <summary>Whether the experiment answer ("show") has a trial in force; null when it could not be read.</summary>
+    public static bool? TrialInForce(BrokerAnswer show) =>
+        show.Ok && show.Result is { } r && r.TryGetProperty("experiment", out var e)
+            ? e.ValueKind == JsonValueKind.Object && e.TryGetProperty("Trial", out var t) && t.ValueKind == JsonValueKind.Object
+            : null;
+
+    /// <summary>Polls once a second until no trial is in force (true) or <paramref name="within"/> passes (false). An
+    /// answer that cannot be read does not count as closed.</summary>
+    public static bool TrialClosedWithin(Func<bool?> trialInForce, TimeSpan within, Action<TimeSpan> sleep)
+    {
+        for (var waited = TimeSpan.Zero; ; waited += TimeSpan.FromSeconds(1))
+        {
+            if (trialInForce() == false) return true;
+            if (waited >= within) return false;
+            sleep(TimeSpan.FromSeconds(1));
+        }
+    }
 
     [McpServerTool(Name = "mark_crash", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "The game crashed to the desktop (or froze) with no driver reset: record the trial in force as a crash, with what " +

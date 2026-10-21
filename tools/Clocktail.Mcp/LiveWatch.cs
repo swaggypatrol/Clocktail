@@ -307,7 +307,7 @@ public sealed class LiveWatch(Card card) : IDisposable
             run.SilentSince = run.LastAnswer;
             run.Silences++;
         }
-        Emit(run, "⛔ the card has not answered for 3 s: a hang, or a driver reset under way. After a crash the service puts the daily profile back on its own; ask what the person saw, then mark_crash");
+        Emit(run, "⛔ the card has not answered for 3 s: a hang, or a driver reset under way. A driver reset the service records as the trial's crash by itself, then puts the daily profile back; ask what the person saw and read data_points: mark_crash only if no crash shows there (the game fell to the desktop with no reset)");
     }
 
     /// <summary>The game's frame rate since the last line, for a window's line; nothing without a capture.</summary>
