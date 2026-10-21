@@ -542,6 +542,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             p90 = Stat(0.9),
             limit_reasons = reasons,
             pstates = PStates(held),
+            efficiency = Efficiency(held, null, p50Mhz),
             curve_point = pointIndex,
             curve_shift = shift,
             samples_csv = csv,
@@ -593,6 +594,30 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     {
         try { return card.Read().Curve; }
         catch (Exception e) when (e is InvalidOperationException or InvalidDataException or IOException or Clocktail.Hw.NvApiException or DriverBusyException) { return null; }
+    }
+
+    /// <summary>
+    /// What a stretch of load cost: the average board power, the energy (Wh, the samples' watts over the time between
+    /// them) and, with a frame rate, frames per second per 100 W, the figure a power-limit sweep compares (manual
+    /// 'power-thermal'). Null without board power.
+    /// </summary>
+    public static object? Efficiency(IReadOnlyList<Card.Sample> samples, double? avgFps, double? p50Mhz = null)
+    {
+        var w = samples.Where(s => s.Telemetry?.PowerWatts is not null).ToList();
+        if (w.Count == 0) return null;
+        double avgW = w.Average(s => s.Telemetry!.PowerWatts!.Value), wh = 0;
+        for (int i = 1; i < w.Count; i++)
+        {
+            double dt = (w[i].At - w[i - 1].At).TotalSeconds;
+            if (dt is > 0 and < 5) wh += w[i].Telemetry!.PowerWatts!.Value * dt / 3600;   // a gap (load stopped) is not energy spent here
+        }
+        return new
+        {
+            avg_board_w = Math.Round(avgW, 1),
+            energy_wh = Math.Round(wh, 2),
+            fps_per_100w = avgFps is { } f && avgW > 0 ? Math.Round(f / avgW * 100, 2) : (double?)null,
+            mhz_per_w = p50Mhz is { } m && avgW > 0 ? Math.Round(m / avgW, 2) : (double?)null,
+        };
     }
 
     /// <summary>The performance states a stretch of samples ran in, most first ("P0 98 %, P2 2 %"); null when none was read.

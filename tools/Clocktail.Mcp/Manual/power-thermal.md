@@ -20,6 +20,7 @@ The wall, what a watt buys, current limits, the fan curve and what temperature c
 - Sweet spot at 600 W: 78-80 C (fan ~60 %): about 20 MHz better than the stock curve's 83 C target and under the 82 C compensation step. Below ~72 C needs 75 %+ fan and is not worth the noise.
 
 ## Fans
+- **Finding the efficient wall (frames per watt).** Warm the card, pick one fixed scene, then step the wall down a trial at a time: `begin_session`, `set_power_limit` 600 → 400 W in 25 W steps, and at each step `watch` 60-120 s in the same scene. Each `watch` gives `efficiency.fps_per_100w` with the frames: list wall, fps, fps/100 W and find the bend, where fps start to fall faster than watts. Ask the person, then `set_daily_power_limit` there. Under 400 W the board refuses; use `set_current_limit nvvdd` 350 → 200 A the same way. On the reference card the last 100 W bought about 10 % frames, and stress ran 4.74 MHz/W at 600 W against 6.05 at 250 A. `stress_test` gives `efficiency.mhz_per_w` when there is no game to measure frames in.
 - The firmware fan curve has three points (temperature : duty : rpm). Stock: 50 C 20 % (1100 rpm), 83 C 50 % (1775), 88 C 100 % (2875). The founders preset: 50 C 20 %, 79 C 60 % (1995 rpm), 86 C 100 %.
 - The firmware drives by the rpm column, not the duty; Clocktail writes both. Fans stop below about 43 C (normal). Spinning, the firmware minimum is 30 %.
 - The fan curve follows a temperature 1.5-2.5 C under NVML's while heating.

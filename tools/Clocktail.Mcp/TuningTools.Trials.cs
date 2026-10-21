@@ -225,6 +225,7 @@ public sealed partial class TuningTools
             curve_point = point,
             limit_reasons = reasons,
             pstates = PStates(loaded),
+            efficiency = Efficiency(loaded, fps?.AvgFps),
             curve_shift = CurveShift(curve, ReadCurveOrNull(), point?.index, loaded),
             fps = FrameFeed.Show(fps) ?? (object)new
             {
