@@ -227,8 +227,14 @@ public sealed partial class SettingsTools
         {
             bool manual = channels.Any(c => Str(c, "mode") == "manual");
             double? duty = channels.Select(c => Num(c, "duty_pct")).Max(), rpm = channels.Select(c => Num(c, "rpm")).Max();
-            rows.Add(new("🌀", "Fans", "auto", manual ? $"held at {F(duty)} %" : "auto", manual ? "held" : "—", Safe,
-                Join(rpm is { } r ? (r == 0 ? "stopped (idle, normal)" : $"{F(rpm)} rpm, {F(duty)} %") : null, manual ? "a trial holds them; back_to_daily gives them back" : null)));
+            // A fixed duty Clocktail did not set (Afterburner, NV App, a lost journal): back_to_daily cannot give it back.
+            var holds = Arr(s, "journal_holds").Select(h => h.ValueKind == JsonValueKind.String ? h.GetString() : null).ToList();
+            bool known = s.TryGetProperty("journal_holds", out var jh) && jh.ValueKind == JsonValueKind.Array;
+            bool ours = holds.Any(h => h?.StartsWith("fan/", StringComparison.Ordinal) == true);
+            string fanNote = !manual ? "" : !known ? "held at a fixed duty; whether Clocktail set it is unknown (the journal could not be read)"
+                : ours ? "a trial holds them; back_to_daily gives them back" : "held at a fixed duty by something other than Clocktail: back_to_daily will not give them back; the tool that set it, or its 'auto', does";
+            rows.Add(new("🌀", "Fans", "auto", manual ? $"held at {F(duty)} %" : "auto", manual ? "held" : "—", manual && !ours ? Look : Safe,
+                Join(rpm is { } r ? (r == 0 ? "stopped (idle, normal)" : $"{F(rpm)} rpm, {F(duty)} %") : null, fanNote is { Length: > 0 } fn ? fn : null)));
         }
 
         // Current limits: never above the VBIOS default.
@@ -248,6 +254,9 @@ public sealed partial class SettingsTools
     private static List<ReportRow> LiveRows(JsonElement s, JsonElement l)
     {
         var rows = new List<ReportRow>();
+        if (Obj(s, "last_crash") is { } crash)
+            rows.Add(new("💥", "Last crash", "", Str(crash, "found_at") is { } fa && DateTimeOffset.TryParse(fa, CultureInfo.InvariantCulture, out var when) ? when.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture) : "?", "", Look,
+                Join(Str(crash, "what"), Num(crash, "held") is { } n && n > 0 ? $"{F(n)} setting(s) were held; they were given back" : null, "data_points and read_log have the trial it happened in")));
         var locks = Arr(s, "clock_locks").Select(x => Str(x, "what")).OfType<string>().ToList();
         if (locks.Count > 0)
             rows.Add(new("🔒", "Clock lock", "", string.Join("; ", locks), "", Look,

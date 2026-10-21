@@ -1101,17 +1101,26 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
 
     /// <summary>A profile apply (or a recovery) in one line per write: the full answer carries the whole profile and each
     /// transaction's log, which an agent does not need and would spend its context on.</summary>
-    private static string Applied(BrokerAnswer r, JsonElement? point)
+    public static string Applied(BrokerAnswer r, JsonElement? point)
     {
         var lines = new List<string>();
+        var notBack = new List<string>();
         if (r.Result is { } res)
             foreach (var name in new[] { "applied", "items" })
                 if (res.TryGetProperty(name, out var arr) && arr.ValueKind == JsonValueKind.Array)
                     foreach (var w in arr.EnumerateArray())
-                        lines.Add($"{Str(w, "kind") ?? Str(w, "Kind")}/{Str(w, "key") ?? Str(w, "Key")}: {Str(w, "outcome") ?? Str(w, "action")}");
+                    {
+                        string cell = $"{Str(w, "kind") ?? Str(w, "Kind")}/{Str(w, "key") ?? Str(w, "Key")}", outcome = Str(w, "outcome") ?? Str(w, "action") ?? "?";
+                        // A cell that could not go back says why: an F8 request made by the CLI, a journal from another
+                        // tool, a cell this version cannot read. Without it the agent saw only "Refused".
+                        string? why = outcome is "Refused" or "Failed" or "Aborted" ? Str(w, "detail") ?? Str(w, "Detail") : null;
+                        lines.Add(why != null ? $"{cell}: {outcome} ({why})" : $"{cell}: {outcome}");
+                        if (why != null) notBack.Add($"{cell}: {why}");
+                    }
         // "end" and "crash" carry the profile's answer in "back": what that wrote is what the card went through.
         string? written = WriteOutcome.Of(r.Ok, r.Code, r.Result) ?? r.Written;
-        return Out(new { success = r.Ok, error = r.Error, code = r.Ok ? null : r.Code, written, next = written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst : null, data_point = point, writes = lines });
+        string? error = !r.Ok && notBack.Count > 0 && (r.Error is null or "failed") ? $"not everything went back: {string.Join("; ", notBack)}" : r.Error;
+        return Out(new { success = r.Ok, error, code = r.Ok ? null : r.Code, written, next = written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst : null, data_point = point, writes = lines });
     }
 
     private static string? Str(JsonElement e, string name) =>

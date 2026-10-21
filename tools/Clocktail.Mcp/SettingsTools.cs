@@ -54,9 +54,9 @@ public sealed partial class SettingsTools(Card card)
         // daily_* go missing.
         IReadOnlyDictionary<string, string> writes = new Dictionary<string, string>();
         IReadOnlyDictionary<string, string>? originals = null;
-        object? daily = null, held = null;
+        object? daily = null, held = null, lastCrash = null;
         try { writes = Daily(out daily); } catch (Exception e) when (Soft(e)) { daily = new { error = e.Message }; }
-        try { originals = Held(out held); } catch (Exception e) when (Soft(e)) { held = new { error = e.Message }; }
+        try { originals = Held(out held, out lastCrash); } catch (Exception e) when (Soft(e)) { held = new { error = e.Message }; }
         var c = new Context(writes, originals);
         Card.Sample? sample = null;
         try { sample = card.ReadSample(); } catch (Exception e) when (Soft(e)) { }
@@ -100,6 +100,7 @@ public sealed partial class SettingsTools(Card card)
             current_limits = Section(() => Limits(c)),
             daily_profile = daily,
             journal_holds = held,
+            last_crash = lastCrash,
             session = Section(() => Session(session)),
             trial_in_force = Trial(session),
         });
@@ -445,8 +446,9 @@ public sealed partial class SettingsTools(Card card)
 
     /// <summary>The journal's originals by "kind/key"; null when the broker cannot say. <paramref name="held"/> lists the
     /// cells Clocktail holds now (written, with the original kept to give back).</summary>
-    private IReadOnlyDictionary<string, string>? Held(out object? held)
+    private IReadOnlyDictionary<string, string>? Held(out object? held, out object? lastCrash)
     {
+        lastCrash = null;
         var r = card.Broker(BrokerRequest.OpOwnership);
         if (!r.Ok || r.Result is not { } res || !res.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
         {
@@ -458,6 +460,12 @@ public sealed partial class SettingsTools(Card card)
             if (Text(i, "Kind") is { } kind && Text(i, "Key") is { } key && Text(i, "Original") is { } original)
                 originals[$"{kind}/{key}"] = original;
         held = originals.Keys.ToList();
+        // The last crash on record (a driver reset, or a reboot with a write window open or cells held), when it was found
+        // in the last 24 hours: what card_report says happened, and when.
+        if (res.TryGetProperty("crashes", out var crashes) && crashes.ValueKind == JsonValueKind.Array && crashes.GetArrayLength() > 0
+            && crashes[crashes.GetArrayLength() - 1] is var last && last.TryGetProperty("found_at", out var at) && at.TryGetDateTimeOffset(out var found)
+            && DateTimeOffset.Now - found < TimeSpan.FromHours(24))
+            lastCrash = new { found_at = found, what = Text(last, "sentinel"), held = last.TryGetProperty("items", out var its) && its.ValueKind == JsonValueKind.Array ? its.GetArrayLength() : 0 };
         return originals;
     }
 
