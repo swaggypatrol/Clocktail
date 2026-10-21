@@ -18,3 +18,18 @@ public class LastLoadTests
         Assert.Null(Residency.LastLoadMedian([], now, TimeSpan.FromMinutes(2), TimeSpan.FromSeconds(10)));
     }
 }
+
+/// <summary>A light-load stress run (nvgwls -l 30/40, read as 30-57 % utilization) leaves samples for its trial.</summary>
+public class StressResidencyTests
+{
+    private static readonly DateTimeOffset T0 = new(2026, 10, 21, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void Light_load_counts_only_while_a_stress_run_is_on()
+    {
+        Assert.False(Residency.Counts(35, T0, DateTimeOffset.MinValue));          // a game at 35 %: a menu, not load
+        Assert.True(Residency.Counts(35, T0, T0.AddSeconds(90)));                  // stress_test load 40
+        Assert.False(Residency.Counts(10, T0, T0.AddSeconds(90)));                 // idle even during the run
+        Assert.True(Residency.Counts(80, T0, DateTimeOffset.MinValue));
+    }
+}

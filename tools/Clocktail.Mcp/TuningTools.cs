@@ -375,7 +375,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         var samples = new List<Card.Sample>();
         var started = DateTime.UtcNow;
         // A sample the driver does not answer in time is a missing one (a hang is what this run is looking for).
-        int? code = Nvgwls.Run(exe, load, seconds, () => { try { samples.Add(card.ReadSample()); } catch (DriverBusyException) { } });
+        residency.StressUntil(DateTimeOffset.Now.AddSeconds(seconds + 30));   // light load counts as load for this run
+        int? code;
+        try { code = Nvgwls.Run(exe, load, seconds, () => { try { samples.Add(card.ReadSample()); } catch (DriverBusyException) { } }); }
+        finally { residency.StressUntil(DateTimeOffset.MinValue); }
         int? resets = Nvgwls.DriverResets(started, code);
         string verdict = Nvgwls.Verdict(code, resets);
         bool failed = Nvgwls.Failed(code, resets);

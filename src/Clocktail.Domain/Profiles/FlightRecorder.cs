@@ -74,7 +74,7 @@ public sealed class FlightRecorder(TimeSpan keep)
     {
         var frozen = FrozenFrom(window);
         var live = frozen == null ? window : window.Where(s => s.At < frozen.At).ToList();
-        var loaded = live.Where(s => s.UtilPercent >= 60 && s.CoreMv is > 0 && s.Watts is > 0).ToList();
+        var loaded = live.Where(Loaded).ToList();
         if (loaded.Count == 0) return null;
         var watts = loaded.Select(s => s.Watts!.Value).Order().ToList();
         double floor = 0.6 * watts[watts.Count / 2];
@@ -92,6 +92,11 @@ public sealed class FlightRecorder(TimeSpan keep)
             : $"last loaded sample {HangDetectAtLeast.TotalSeconds:0} s or more before the reset";
         return new CrashPoint(pick, (resetSeenAt - pick.At).TotalSeconds, why);
     }
+
+    /// <summary>A sample of the GPU under load: 60 % utilization, or (a light-load stress run, a 250 Hz square wave NVML
+    /// reads as 30-57 %) 25 % with at least 150 W behind it; an idle card draws well under that.</summary>
+    public static bool Loaded(FlightSample s) =>
+        s.CoreMv is > 0 && s.Watts is double w && w > 0 && (s.UtilPercent >= 60 || s.UtilPercent >= 25 && w >= 150);
 
     /// <summary>A sample of the limit letting go, against the one before it: power down at least 10 % while the clock
     /// rose 15 MHz or more, or NVVDD 10 mV or more (a GPU doing less work at a higher point: the hang beginning).</summary>

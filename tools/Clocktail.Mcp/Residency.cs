@@ -15,6 +15,18 @@ namespace Clocktail.Mcp;
 public sealed class Residency(Card card) : BackgroundService
 {
     public const int MinUtilPct = 50;
+    /// <summary>During a stress run: nvgwls at load 30-50 is a 250 Hz square wave that NVML reads as 30-57 % utilization,
+    /// under <see cref="MinUtilPct"/>, so the top of the curve (where the reference card's light-load hangs were) left no
+    /// samples for its trial. While stress_test runs, a sample counts from this.</summary>
+    public const int StressMinUtilPct = 20;
+    private DateTimeOffset _stressUntil;
+
+    /// <summary>stress_test is running until then (<see cref="DateTimeOffset.MinValue"/>: it has ended).</summary>
+    public void StressUntil(DateTimeOffset until) { lock (_gate) _stressUntil = until; }
+
+    /// <summary>Whether a sample at this utilization is load worth keeping.</summary>
+    public static bool Counts(uint util, DateTimeOffset at, DateTimeOffset stressUntil) =>
+        util >= (at < stressUntil ? StressMinUtilPct : MinUtilPct);
     private static readonly TimeSpan Keep = TimeSpan.FromMinutes(10);
 
     /// <summary>A day's file name, Gregorian whatever the person's calendar, so a day written is the day read back.</summary>
@@ -47,8 +59,11 @@ public sealed class Residency(Card card) : BackgroundService
     private void Take()
     {
         var (uv, mhz, util, w) = card.ReadPoint();
-        if (uv is not { } u || mhz is not { } m || util is not { } p || p < MinUtilPct) return;
-        var tick = new Tick(DateTimeOffset.Now, u, m, p, w);
+        var now = DateTimeOffset.Now;
+        DateTimeOffset stress;
+        lock (_gate) stress = _stressUntil;
+        if (uv is not { } u || mhz is not { } m || util is not { } p || !Counts(p, now, stress)) return;
+        var tick = new Tick(now, u, m, p, w);
         lock (_gate)
         {
             _recent.Enqueue(tick);

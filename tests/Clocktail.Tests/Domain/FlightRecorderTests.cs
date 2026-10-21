@@ -38,6 +38,19 @@ public class FlightRecorderTests
         Assert.True(FlightRecorder.LettingGo(S(1, 2947, 970, 514), S(0.5, 2895, 910, 598.6)));
     }
 
+    /// <summary>A hang at the top of the curve under nvgwls -l 40: NVML reads the square wave as ~40 % utilization at
+    /// ~380 W. It used to leave no crash point (loaded meant 60 % or more).</summary>
+    [Fact]
+    public void A_light_load_hang_has_a_crash_point_and_idle_still_has_none()
+    {
+        var w = new List<FlightSample>();
+        for (int i = 0; i < 40; i++) w.Add(S(i * 0.5, 3045, 985, 380, util: 40));
+        for (int i = 0; i < 60; i++) w.Add(S(20 + i * 0.5, 3180, 1000, 120, util: 100));   // frozen, power fell into it
+        var p = FlightRecorder.Pick(w, T0.AddSeconds(51));
+        Assert.Equal(985u, p!.Sample.CoreMv);
+        Assert.False(FlightRecorder.Loaded(S(0, 2100, 850, 90, util: 30)));   // the desktop: not load
+    }
+
     [Fact]
     public void The_crash_point_is_the_last_loaded_sample_before_the_reads_block_not_the_wall_letting_go()
     {
