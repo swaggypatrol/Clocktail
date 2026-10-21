@@ -8,14 +8,15 @@ namespace Clocktail.Domain.Clocks;
 public sealed record ClientLimit(int Domain, uint Mode, uint Value)
 {
     /// <summary>What it is, in words. Entry 6 mode 3 is a voltage lock (1 500 000 µV is Boost Lock, a sentinel above
-    /// every point); entry 0 mode 2 the maximum-clock cap (kHz); entry 1 mode 2 [inferred] a floor. From the decompiled
-    /// original [observed]; which of entries 0 and 1 is the floor is the open question (the T04 probe).</summary>
+    /// every point); entry 0 mode 2 the maximum clock (kHz), entry 1 mode 2 the minimum. Measured 2026-10-21 (617.42):
+    /// nvidia-smi -lgc 1200,2400 set entry 0 to mode 2 / 2 400 000 and entry 1 to mode 2 / 1 200 000, the clock held
+    /// at most 2392 MHz under load, and -rgc put both back to 0.</summary>
     public string Describe() => (Domain, Mode) switch
     {
         (6, 3) when Value == ClientLimitsLayout.BoostLockUv => "Boost Lock: the card held at its top boost",
         (6, 3) => string.Create(CultureInfo.InvariantCulture, $"voltage locked at {Value / 1000.0:0.#} mV (a V/F point lock)"),
         (0, 2) => string.Create(CultureInfo.InvariantCulture, $"maximum clock {Value / 1000.0:0.#} MHz"),
-        (1, 2) => string.Create(CultureInfo.InvariantCulture, $"clock record 1: {Value / 1000.0:0.#} MHz (probably a floor)"),
+        (1, 2) => string.Create(CultureInfo.InvariantCulture, $"minimum clock {Value / 1000.0:0.#} MHz"),
         _ => string.Create(CultureInfo.InvariantCulture, $"entry {Domain}, mode {Mode}, value {Value}"),
     };
 }
@@ -25,7 +26,7 @@ public sealed record ClientLimit(int Domain, uint Mode, uint Value)
 /// lock, Boost Lock and a V/F maximum-clock cap all live in. Such a lock outlives the program that set it and quietly
 /// changes what a stress run or a curve test measures. Layout from the original's reader [observed]: +0 version word,
 /// +4 0, +8 7 entries, each 0x18 bytes from +0xc: {+0 domain == its index, +4 0, +8 mode, +0xc 0, +0x10 value, +0x14 0}.
-/// Read on the reference card (617.42): all seven entries 0.
+/// Read on the reference card (617.42): all seven entries 0 with no lock in force.
 /// </summary>
 public static class ClientLimitsLayout
 {

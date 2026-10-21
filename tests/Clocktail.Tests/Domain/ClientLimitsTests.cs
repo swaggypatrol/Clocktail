@@ -32,7 +32,7 @@ public class ClientLimitsTests
         var held = ClientLimitsLayout.Parse(Record((0, 2, 2_400_000), (1, 2, 1_200_000), (6, 3, 950_000)));
         Assert.Equal(3, held.Count);
         Assert.Equal("maximum clock 2400 MHz", held[0].Describe());
-        Assert.Contains("probably a floor", held[1].Describe());
+        Assert.Equal("minimum clock 1200 MHz", held[1].Describe());   // nvidia-smi -lgc 1200,2400, read 2026-10-21
         Assert.Equal("voltage locked at 950 mV (a V/F point lock)", held[2].Describe());
         Assert.Contains("Boost Lock", ClientLimitsLayout.Parse(Record((6, 3, ClientLimitsLayout.BoostLockUv)))[0].Describe());
     }
