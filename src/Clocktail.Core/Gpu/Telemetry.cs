@@ -22,7 +22,9 @@ public sealed record TelemetrySnapshot(
     IReadOnlyList<uint> FanPercent,
     IReadOnlyList<string> ThrottleReasons,
     double? PowerInstantWatts = null,
-    int? TempMarginC = null);
+    int? TempMarginC = null,
+    /// <summary>The performance state (0 = P0); null when unread.</summary>
+    int? PState = null);
 
 public static class Telemetry
 {
@@ -71,7 +73,7 @@ public static class Telemetry
             Try(() => nvml.MaxClockMhz(h, NvmlClock.Graphics)),
             Try(() => nvml.MaxClockMhz(h, NvmlClock.Memory)),
             util?.Gpu, util?.Memory, mem?.Total, mem?.Used, fans, names,
-            instant / 1000.0, nvml.MarginTemperatureC(h));
+            instant / 1000.0, nvml.MarginTemperatureC(h), nvml.PerformanceState(h));
     }
 
 }

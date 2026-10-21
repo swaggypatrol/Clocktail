@@ -224,6 +224,7 @@ public sealed partial class TuningTools
             on_the_wall_pct = atWall,
             curve_point = point,
             limit_reasons = reasons,
+            pstates = PStates(loaded),
             fps = FrameFeed.Show(fps) ?? (object)new
             {
                 unavailable = noFrames ?? (process != null ? $"no frames from {process}: is that the game's process name?" : "no application drew frames: was the game running?"),

@@ -92,6 +92,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             power_limit_w = t?.PowerEnforcedWatts,
             temp_c = t?.TemperatureC,
             temp_margin_c = t?.TempMarginC,
+            pstate = t?.PState is { } ps ? $"P{ps}" : null,
             util_pct = t?.GpuUtilPercent,
             vram_used_gib = Gib(t?.VramUsedBytes),
             vram_total_gib = Gib(t?.VramTotalBytes),
@@ -471,6 +472,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             p10 = Stat(0.1),
             p90 = Stat(0.9),
             limit_reasons = reasons,
+            pstates = PStates(held),
             curve_point = pointIndex,
             samples_csv = csv,
             trial_in_force = trial,
@@ -487,6 +489,15 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "the note: those are the points this trial proved, not the whole window.")]
     public string MarkStable([Description("What was played and seen.")] string note) => Guard(() =>
         Reply(card.Broker(BrokerRequest.OpExperiment, "stable", note + TrialStays(out _))));
+
+    /// <summary>The performance states a stretch of samples ran in, most first ("P0 98 %, P2 2 %"); null when none was read.
+    /// The memory offset acts in P0 only, so a compute load sitting in P2 does not test it.</summary>
+    public static string? PStates(IReadOnlyList<Card.Sample> samples)
+    {
+        var read = samples.Select(s => s.Telemetry?.PState).OfType<int>().ToList();
+        return read.Count == 0 ? null : string.Join(", ", read.GroupBy(p => p).OrderByDescending(g => g.Count())
+            .Select(g => string.Create(CultureInfo.InvariantCulture, $"P{g.Key} {100.0 * g.Count() / read.Count:0} %")));
+    }
 
     /// <summary>stress_test: how long a run that saw a driver reset waits for the service to record the crash (it settles
     /// 3 s, gives the cells back, then records it; a write window or a judge in the way can make it later).</summary>

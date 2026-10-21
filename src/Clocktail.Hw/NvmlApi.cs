@@ -82,6 +82,7 @@ public sealed unsafe class NvmlApi : IDisposable
     private delegate* unmanaged[Cdecl]<nint, byte*, uint, int> _vbios;
     private delegate* unmanaged[Cdecl]<nint, int, FieldValue*, int> _fields;
     private delegate* unmanaged[Cdecl]<nint, MarginTemperature*, int> _margin;
+    private delegate* unmanaged[Cdecl]<nint, uint*, int> _pstate;
     private delegate* unmanaged[Cdecl]<nint, uint, uint*, int> _threshold;
 
     /// <summary>nvmlFieldValue_t: 40 bytes, the value union 8-aligned at +32.</summary>
@@ -179,6 +180,7 @@ public sealed unsafe class NvmlApi : IDisposable
         _vbios = (delegate* unmanaged[Cdecl]<nint, byte*, uint, int>)Sym(e, "nvmlDeviceGetVbiosVersion", true);
         _fields = (delegate* unmanaged[Cdecl]<nint, int, FieldValue*, int>)Sym(e, "nvmlDeviceGetFieldValues", true);
         _margin = (delegate* unmanaged[Cdecl]<nint, MarginTemperature*, int>)Sym(e, "nvmlDeviceGetMarginTemperature", true);
+        _pstate = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetPerformanceState", true);
         _threshold = (delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)Sym(e, "nvmlDeviceGetTemperatureThreshold", true);
     }
 
@@ -309,6 +311,15 @@ public sealed unsafe class NvmlApi : IDisposable
         if (_margin == null || _lost) return null;
         var m = new MarginTemperature { Version = (uint)sizeof(MarginTemperature) | 1u << 24 };
         return Seen(_margin(h, &m)) == 0 ? m.MarginC : null;
+    }
+
+    /// <summary>The performance state, 0 (P0, the fastest) to 15; null when NVML does not say (it answers 32 for unknown).
+    /// The memory offset and the curve's P0 offsets act in P0 only.</summary>
+    public int? PerformanceState(nint h)
+    {
+        if (_pstate == null || _lost) return null;
+        uint p;
+        return Seen(_pstate(h, &p)) == 0 && p <= 15 ? (int)p : null;
     }
 
     public uint? TemperatureThresholdC(nint h, NvmlTemperatureThreshold t)
