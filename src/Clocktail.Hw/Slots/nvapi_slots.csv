@@ -32,7 +32,7 @@
 30,0xef3d20ea,ClockClkPropTopRelsSetControl,clock propagation topology,W,kind 9 [observed]; 0x75c r1 in a 0x2000 buffer,Medium
 31,0xfb85b01e,ClientFanCoolersGetInfo,fan,R,0x62c r1 (617.42 size scan; 0x928 is FanPolicy Info's size; see slot 58),High
 32,0x35aed5e8,ClientFanCoolersGetStatus,fan,R,0x6a8 r1 (617.42 size scan; no rev2),High
-33,0x814b209f,ClientFanCoolersGetControl,fan,R,one of 0x62c/0x6a8 r1,Medium
+33,0x814b209f,ClientFanCoolersGetControl,fan,R,0x5ac r1 (0x2c header + 32 x 0x2c entries; the setter checks ver 0x105ac),Medium
 34,0xa58971a5,ClientFanCoolersSetControl,fan,W,kind 16 (0x5ac) or 0x6a8,Medium
 35,0x67f31384,PowerPolicyGetInfo,power policy,R,raw policy table layout 1: 0xa70 r4 (617.42 measured; r1 also accepts 0x628/0x828/0xa3c; undecoded); records 0x3c+i*0x58,High
 36,0x8b3e7343,PowerPolicyGetControl,power policy,R,raw policy table layout 1 CONTROL: 0xa4c r1 (617.42 measured); +4 mask queries by record; records 0x1c+i*0x28,High
@@ -44,7 +44,7 @@
 42,0x4d2c0a9c,PerfPerfLimitsGetInfo,perf limits,R,0x12308 r2; +8 limit mask; names at 0x290 + i*0x90,Medium
 43,0x0b62b9e2,PerfPerfLimitsGetStatus,perf limits,R,"0x207d90 r2; ceilings at 0x2010, floors at 0x1ae8, {kHz, limit} per domain",Medium
 44,0xdcb616c3,GetAllClockFrequencies,clocks,R,public API,Medium
-45,0x31b7a4cd,PowerPolicyGetStatus,power policy,R,0xca8 r3(0x30ca8) candidate,Low
+45,0x31b7a4cd,PowerPolicyGetStatus,power policy,R,size unknown (the 0xca8 r3 once listed here is slot 15's),Low
 46,0x54924bf5,ClientPwrPoliciesGetInfo,power (watts/board),R,0x728 r1 (617.42 size scan; the F8/FE watt request family lives here),High
 47,0x33ab0353,ClientPwrPoliciesGetControl,same as above,R,0x528 r1 (+4 single board bit; command code at 0x28+board*0x28+4; 617.42 accepts only r1 0x528; echo verified),High
 48,0x17695269,ClientPwrPoliciesSetControl,same as above,W,0x528 r1; kind 0x14 (F8)/0x15 (FE); on by default after the live drill (2026-10-17),High
@@ -74,4 +74,4 @@
 72,0x891fa0ae,SetCoolerLevels,legacy fan,W,0x1001c r1,High
 73,0x5f608315,GetTachReading,tachometer,R,fan,High
 74,0xfaceb39b,ClockClkProgsGetInfo,clock programs,R,read path unknown,Low
-75,0x57f7caac,GetRamType,memory type,R,"call shape `fn(gpu,&buf)` differs from the public GetRamType; purpose unconfirmed",Low
+75,0x57f7caac,GetRamType,memory type,R,"`fn(gpu,&u32)` as the original calls it, the public GetRamType's shape [observed]; not called",Low

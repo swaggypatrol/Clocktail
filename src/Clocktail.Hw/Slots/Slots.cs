@@ -145,7 +145,7 @@ public static class Slots
         W(Slot.SetCoolerLevels, 0x891fa0ae, "fan-legacy", V(0x1c, 1), Evidence.High, "3 x {level, policy}", Signature.GpuIndexStruct);
         R(Slot.GetTachReading, 0x5f608315, "fan", null, Evidence.High, "rpm", Signature.GpuScalar);
         R(Slot.ClockClkProgsGetInfo, 0xfaceb39b, "clocks", null, Evidence.Low);
-        R(Slot.GetRamType, 0x57f7caac, "memory", null, Evidence.Low, "call shape differs from the public GetRamType; purpose unconfirmed");
+        R(Slot.GetRamType, 0x57f7caac, "memory", null, Evidence.Low, "the original calls it fn(gpu, &u32), the public GetRamType's shape [observed]; nothing here calls it", Signature.GpuScalar);
 
         // Plain-ID structured calls.
         R(Slot.GetArchInfo, 0xd8265d24, "identity", V(0x10, 2), Evidence.High, "arch / implementation / revision");

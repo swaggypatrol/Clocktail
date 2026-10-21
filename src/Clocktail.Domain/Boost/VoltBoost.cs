@@ -17,7 +17,8 @@ public enum BoostPath
 
 /// <summary>
 /// One look at everything a boost write can move: both percentages and every rail's evaluated limits.
-/// Boost acts on MAX: a boost write can raise an evaluated rail MAX.
+/// On the reference card (617.42, drill 18) 1 % and 10 % moved no rail's MAX, the V/F table or where the card ran; mVolt+
+/// 0.50.6 describes the boost as headroom for Boost, not a voltage it sets. The look is kept so a card where it acts shows it.
 /// </summary>
 public sealed record BoostObservation(
     uint? IndependentPercent,
