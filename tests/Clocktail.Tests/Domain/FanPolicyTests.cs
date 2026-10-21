@@ -497,7 +497,8 @@ public class FanPolicyTests : IDisposable
         Assert.True(rec.Ok, rec.Error);
         Assert.Equal(FanPolicyFixture.Stock, FanPolicyFixture.CurveOf(0));
         Assert.Equal(FanPolicyFixture.Stock, FanPolicyFixture.CurveOf(1));
-        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "reset", Value: "nvlddmkm 153")).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "nvlddmkm 153")).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "after-reset", Value: "nvlddmkm 153")).Ok);
         Assert.Equal("45:30:1325,75:60:1995,85:100:2875", FanPolicyFixture.CurveOf(0));
         Assert.Equal(Mine, FanPolicyFixture.CurveOf(1));
 

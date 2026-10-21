@@ -462,7 +462,8 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal(575_000u, _requests[0xfe]);
         Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply-power")).Ok);
         Assert.Equal(560_000u, _requests[0xfe]);   // the limit goes back on at once
-        var reset = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "reset", Value: "nvlddmkm 153"));
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "nvlddmkm 153")).Ok);
+        var reset = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "after-reset", Value: "nvlddmkm 153"));
         Assert.True(reset.Ok, reset.Error);
         Assert.False(reset.Result!.Value.GetProperty("profile").GetProperty("Suspended").GetBoolean());
         Assert.Equal(560_000u, _requests[0xfe]);   // put back as kept
@@ -501,9 +502,10 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(t.Ok, t.Error);
         Assert.Equal(45_000, FakeVf.Offsets()[100]);
 
-        // The driver resets: the broker gives back what is held, then takes the profile's reset step.
+        // The driver resets: the broker gives back what is held, records the crash, then puts the profile back on.
         Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Ok);
-        var reset = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "reset", Value: "nvlddmkm 153", Uv: 950_000));
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "nvlddmkm 153", Uv: 950_000)).Ok);
+        var reset = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "after-reset", Value: "nvlddmkm 153"));
         Assert.True(reset.Ok, reset.Error);
         Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());   // put back as kept, not a notch down
         var p = Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10));
@@ -512,7 +514,8 @@ public class BrokerDispatcherTests : IDisposable
 
         // With no trial in force the profile goes back on unchanged too: no step-down (the user, 2026-10-19).
         Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "again")).Ok);
-        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "reset", Value: "again")).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "again")).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "after-reset", Value: "again")).Ok);
         Assert.Equal(30_000, FakeVf.Offsets()[100]);
         Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10));   // no trial, no data point
 
@@ -522,6 +525,39 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(log.IndexOf("Trial · TLOU2") < log.IndexOf("Crash · during trial · TLOU2"));
         Assert.True(log.IndexOf("Crash · during trial · TLOU2") < log.IndexOf("Crash · daily profile"));
         Assert.Contains("Crash voltage from the flight recorder: 950 mV", log);
+    }
+
+    /// <summary>The crash is recorded as soon as the cells are given back, not once the GPU idles: a trial the agent
+    /// writes in between (the game kept running) is not blamed for it, and the profile step that comes once the GPU is
+    /// idle leaves that trial alone. Before, the crashed trial was recorded as "survived" and the next one as the crash.</summary>
+    [Fact]
+    public void A_trial_written_after_a_reset_but_before_the_GPU_idles_is_not_the_crash()
+    {
+        var d = new BrokerDispatcher(new FakeVf().Install(), new Target(_journal, _sentinel, _gpu), _host, canWrite: true);
+        const string daily = "0*60,30000*67";
+        Assert.True(d.Dispatch(Curve(daily)).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep")).Ok);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"KCD2"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", Trial("0*60,60000*67", "+30 MHz on 60-126"))).Ok);
+
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "nvlddmkm 153", Uv: 970_000)).Ok);
+        var crash = Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10));
+        Assert.Equal((Experiment.Crash, "+30 MHz on 60-126", 970_000u), (crash.Outcome, crash.Change, crash.CrashUv));
+
+        // The game is still running; the agent steps back while the GPU is busy.
+        Assert.True(d.Dispatch(Exp("try", Trial("0*60,45000*67", "-15 MHz on 60-126"))).Ok);
+        var after = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "after-reset", Value: "nvlddmkm 153"));
+        Assert.True(after.Ok, after.Error);
+        Assert.Contains("a trial began after the crash", after.Result!.Value.GetProperty("skipped").GetString());
+        Assert.Equal(45_000, FakeVf.Offsets()[100]);                                           // the new trial stays on
+        Assert.Equal("-15 MHz on 60-126", Experiment.Load(Experiment.PathBeside(_journal.Path))!.Trial!.Change);
+        Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10));      // still only the crash
+
+        // With no trial in force, the same step puts the daily profile back.
+        Assert.True(d.Dispatch(Exp("stable", "held")).Ok);
+        Assert.True(d.Dispatch(Exp("end")).Ok);
+        Assert.Equal(30_000, FakeVf.Offsets()[100]);
     }
 
     /// <summary>A game that falls to the desktop leaves no driver reset for the broker to see: the player reports it, and

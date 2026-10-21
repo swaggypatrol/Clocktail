@@ -5,8 +5,9 @@
 /// A TDR is not a reboot: the driver comes back with every offset this program wrote still applied (V/F point 84
 /// at +450 MHz after the +120 in-game hang, 2026-10-18), so a curve that hung a game hangs it again. Each GPU's
 /// held cells are given back through the ordinary recovery op, the first attempt putting them on record in the
-/// crash log. Then the daily profile, if one is kept, goes back on unchanged: its power limit at once, the rest once
-/// the GPU is idle. A trial in force when it crashed becomes a data point. There is no step-down: the person is at the
+/// crash log. A trial in force when it crashed becomes a data point at once. Then the daily profile, if one is kept,
+/// goes back on unchanged: its power limit at once, the rest once the GPU is idle, unless the agent has begun a new
+/// trial by then. There is no step-down: the person is at the
 /// machine when a game crashes, and the agent adjusts through the MCP server (the user, 2026-10-19). The give-back is a
 /// write like any other, so it waits for the window and for a stability run to let go rather than going around either,
 /// and it retries until <see cref="GiveUpAfter"/>.
@@ -84,10 +85,12 @@ public sealed class DriverResetResponder(
             if (r.Ok)
             {
                 log($"gpu {gpuId}: driver reset ({evidence}): {Summary(r)}");
-                // The power limit at once (the reset put it back to 575 W; stock clocks under it are safe), the curve once idle.
+                // The crash on record at once, so a trial the agent writes while the GPU is still busy is not blamed for it;
+                // the power limit at once (the reset put it back to 575 W; stock clocks under it are safe); the curve once idle.
+                Record(gpuId, evidence, "after the reset", crashUv);
                 var power = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: "apply-power"));
                 log($"gpu {gpuId}: daily profile's power limit after the reset: {ProfileSummary(power)}");
-                return Profile(gpuId, "reset", evidence, "after the reset", crashUv);
+                return Profile(gpuId, "after-reset", evidence, "after the reset");
             }
             bool retry = r.Code is BrokerCode.JudgeBusy or BrokerCode.WindowBusy or BrokerCode.Failed || r.Result != null;
             if (!retry || now() + RetryEvery > deadline)
@@ -102,17 +105,34 @@ public sealed class DriverResetResponder(
 
     /// <summary>
     /// At start: each GPU's daily profile, unchanged. A GPU whose machine went down holding cells (a write window open,
-    /// or an unclean shutdown) goes through the crash step, which records it (and a trial in force as a data point).
+    /// or an unclean shutdown) has the crash recorded first (a trial in force as a data point), then the profile once idle.
     /// </summary>
     public void ApplyAtStart(IReadOnlyCollection<string> crashed)
     {
         foreach (var id in gpuIds)
         {
             bool down = crashed.Contains(id);
-            try { Profile(id, down ? "reset" : "apply", down ? "the machine went down holding the profile" : "the broker started", "at start"); }
+            try
+            {
+                if (!down) { Profile(id, "apply", "the broker started", "at start"); continue; }
+                const string why = "the machine went down holding the profile";
+                Record(id, why, "at start");
+                Profile(id, "after-reset", why, "at start");
+            }
             catch (Exception e) { log($"gpu {id}: daily profile at start: failed: {e}"); }
         }
     }
+
+    /// <summary>The crash recorded ("crashed"): the trial in force made a data point, nothing written.</summary>
+    private void Record(string gpuId, string evidence, string when, uint crashUv = 0)
+    {
+        var c = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: "crashed", Value: evidence, Uv: crashUv));
+        log($"gpu {gpuId}: crash recorded {when}: {(c.Ok ? CrashSummary(c) : c.Error ?? "failed")}");
+    }
+
+    private static string CrashSummary(BrokerResponse r) =>
+        r.Result is { } res && res.TryGetProperty("point", out var p) && p.ValueKind == System.Text.Json.JsonValueKind.Object
+            && p.TryGetProperty("Change", out var change) ? $"the trial in force ({change.GetString()}) is a crash data point" : "no trial was in force";
 
     /// <summary>
     /// After the PC wakes up: each GPU's daily profile again once it is idle, through "resume", which writes only what
@@ -128,14 +148,14 @@ public sealed class DriverResetResponder(
         }
     }
 
-    private bool Profile(string gpuId, string kind, string? evidence, string when, uint crashUv = 0)
+    private bool Profile(string gpuId, string kind, string? evidence, string when)
     {
         if (!WaitIdle(gpuId))
         {
             log($"gpu {gpuId}: daily profile {when}: the GPU was not idle for {IdleWaitAtMost.TotalHours:0} h; not applied (the card stays at stock)");
             return false;
         }
-        var p = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: kind, Value: evidence, Uv: crashUv));
+        var p = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: kind, Value: evidence));
         log($"gpu {gpuId}: daily profile {when}: {ProfileSummary(p)}");
         return p.Ok;
     }

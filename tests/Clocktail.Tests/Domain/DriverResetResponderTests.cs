@@ -39,8 +39,9 @@ public class DriverResetResponderTests
         Assert.Equal(BrokerRequest.RecoverAfterDriverReset, _asked[0].Kind);
         Assert.Equal(BrokerRequest.RecoverAfterDriverReset, _asked[1].Kind);   // the first never reached recovery
         Assert.Null(_asked[2].Kind);                                           // the second did: recorded once
-        Assert.Contains("vf/core Written", _log[^3]);
-        Assert.Equal(["apply-power", "reset"], _profile.Select(p => p.Kind));   // the limit at once, the step once idle
+        Assert.Contains("vf/core Written", _log[^4]);
+        // The crash on record and the limit at once, the profile once idle.
+        Assert.Equal(["crashed", "apply-power", "after-reset"], _profile.Select(p => p.Kind));
         Assert.Contains("none kept", _log[^1]);
     }
 
@@ -66,14 +67,24 @@ public class DriverResetResponderTests
     public void The_profile_goes_back_on_only_after_the_GPU_has_been_idle_three_looks_in_a_row()
     {
         var busy = new Queue<bool>([false, true, false, true, true, true]);
+        bool atStart = false;
         var r = new DriverResetResponder(req =>
         {
-            if (req.Op == BrokerRequest.OpProfile) { _profile.Add(req); if (req.Kind != "apply-power") Assert.Empty(busy); return new BrokerResponse(true, Result: JsonSerializer.SerializeToElement(new { success = true })); }
+            if (req.Op == BrokerRequest.OpProfile)
+            {
+                _profile.Add(req);
+                if (req.Kind == "after-reset") Assert.Empty(busy); else if (!atStart) Assert.Equal(6, busy.Count);   // the record and the wall do not wait
+                return new BrokerResponse(true, Result: JsonSerializer.SerializeToElement(new { success = true }));
+            }
             return Recovered(true, "Written");
         }, ["gpu-A"], _log.Add, () => _now, t => _now += t, _ => busy.Count == 0 || busy.Dequeue());
-        Assert.True(r.Respond("nvlddmkm 153"));
-        Assert.Equal(2, _profile.Count);
+        Assert.True(r.Respond("nvlddmkm 153", new Dictionary<string, uint> { ["gpu-A"] = 950_000 }));
+        Assert.Equal(["crashed", "apply-power", "after-reset"], _profile.Select(p => p.Kind));
+        Assert.Equal(950_000u, _profile[0].Uv);   // the flight recorder's crash point goes with the record
+        _profile.Clear();
+        atStart = true;
         r.ApplyAtStart(["gpu-A"]);   // idle now: the queue is spent, so a look would throw
+        Assert.Equal(["crashed", "after-reset"], _profile.Select(p => p.Kind));
     }
 
     [Fact]

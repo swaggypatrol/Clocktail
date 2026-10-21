@@ -381,11 +381,13 @@ public sealed class BrokerDispatcher
                 Log(target, "Driver reset: power limit put back first", Writes(r));
                 return r;
             }
-            case "reset":
+            case "crashed":
             {
-                // A crash: a driver reset, or the machine going down while it held cells. A trial in force is the one that
-                // crashed (a data point); either way the daily profile goes back on unchanged. No step-down: the person is
-                // at the machine and the agent adjusts from there (the user, 2026-10-19).
+                // A crash: a driver reset (the held cells already given back), or the machine going down while it held
+                // cells. Recorded at once, before anything waits for an idle GPU: a trial in force is the one that crashed
+                // (a data point), and one the agent writes after this is not blamed for it. Nothing is written here; the
+                // daily profile goes back on unchanged in "after-reset". No step-down: the person is at the machine and
+                // the agent adjusts from there (the user, 2026-10-19).
                 var crash = CloseTrial(target, Experiment.Crash, req.Value, req.Uv > 0 ? req.Uv : null);
                 if (profile != null)
                 {
@@ -394,18 +396,32 @@ public sealed class BrokerDispatcher
                         : $"{req.Value ?? "driver reset"}: put back unchanged");
                     profile.Save(path);
                 }
-                var r = profile == null ? Ok(new { success = true, path, profile, applied = Array.Empty<object>() }) : ApplyProfile(target, profile, path);
                 Log(target, crash != null ? $"Crash · during trial · {crash.Game}" : "Crash · daily profile", [
                     $"Evidence: {req.Value ?? "driver reset"}",
                     req.Uv > 0 ? $"Crash voltage from the flight recorder: {req.Uv / 1000.0:0.#} mV" : "The flight recorder found no crash point",
                     crash != null ? $"Trial: {crash.Change}, ran {crash.Minutes} min; written at {Mv(crash.AtUv)}, {crash.AtMhz} MHz; {Limits(crash)}" : null,
                     crash != null ? $"Trial curve: {crash.Curve}" : null,
-                    profile == null ? "No daily profile: the card stays at stock" : "Daily profile put back unchanged:",
+                    profile == null ? "No daily profile: the card stays at stock" : "The daily profile goes back on unchanged once the GPU is idle"]);
+                return Ok(new { success = true, path, profile, point = crash, applied = Array.Empty<object>() });
+            }
+            case "after-reset":
+            {
+                // The daily profile back on after a crash ("crashed" recorded it), once the GPU is idle. A trial in force
+                // now was written after the crash: the agent running it decides, as on waking up.
+                if (Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial != null)
+                {
+                    Log(target, "After the crash: a trial is in force, nothing written", [req.Value is { } w ? $"Reason: {w}" : null]);
+                    return Ok(new { success = true, skipped = "a trial began after the crash: the agent running it decides", profile });
+                }
+                var r = profile == null ? Ok(new { success = true, path, profile, applied = Array.Empty<object>() }) : ApplyProfile(target, profile, path);
+                Log(target, "Daily profile put back after the crash", [
+                    req.Value is { } why ? $"Reason: {why}" : null,
+                    profile == null ? "No daily profile: the card stays at stock" : profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null,
                     .. Writes(r)]);
                 return r;
             }
             default:
-                return Fail($"profile needs show, keep, off, apply, load, preset, save, saved, forget, wall, apply-power or reset, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"profile needs show, keep, off, apply, resume, load, preset, save, saved, forget, wall, apply-power, crashed or after-reset, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 

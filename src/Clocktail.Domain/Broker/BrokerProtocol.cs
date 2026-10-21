@@ -35,7 +35,7 @@ public sealed record BrokerRequest(
     /// (the policy refuses otherwise), and the limits in the plan apply regardless.
     /// </summary>
     string[]? EnableSlots = null,
-    /// <summary>For <see cref="OpProfile"/> "reset": the core voltage the GPU ran at when it hung, µV (the flight
+    /// <summary>For <see cref="OpProfile"/> "crashed": the core voltage the GPU ran at when it hung, µV (the flight
     /// recorder's crash point), for the record; 0 when it is not known.</summary>
     uint Uv = 0)
 {
@@ -62,9 +62,10 @@ public sealed record BrokerRequest(
     /// suspension and writes it; "preset" makes a shipped preset or a saved profile (<see cref="Value"/>: its name) the profile and writes it; "save"
     /// saves the profile under a name (<see cref="Value"/>), "saved" lists the saved ones, "forget" deletes one;
     /// "wall" sets the profile's power limit (<see cref="Value"/>: mW) and writes it unless suspended or a trial holds its own; "apply-power" writes only its power limit (right after a driver reset, which puts the
-    /// limit back to 575 W, without waiting for an idle GPU); "reset" is the step after a crash (the held cells already
-    /// given back): recorded, a trial in force made a data point, and the profile written back unchanged. Every one of
-    /// them that changes the card or the profile is an entry in the tuning log. Not itself a write: "apply" and "reset"
+    /// limit back to 575 W, without waiting for an idle GPU); "crashed" records a crash at once (the held cells already
+    /// given back): a trial in force made a data point, nothing written; "after-reset" then writes the profile back
+    /// unchanged once the GPU is idle, unless a trial written since is in force. Every one of
+    /// them that changes the card or the profile is an entry in the tuning log. Not itself a write: "apply" and "after-reset"
     /// send each write through <see cref="OpWrite"/>, which takes the window and every guard.
     /// </summary>
     public const string OpProfile = "profile";
@@ -78,8 +79,8 @@ public sealed record BrokerRequest(
     /// agent's own words in the tuning log (<see cref="Value"/>: the text); "stable" records the trial as stable
     /// (<see cref="Value"/>: a note); "crash" records it as a crash the broker could not see (the game fell to the
     /// desktop with no driver reset; <see cref="Value"/>: what the player saw) and puts the daily profile back; "end"
-    /// closes the trial as survived, ends the session and puts the daily profile back. A crash while a trial is in force is recorded here by the "reset" step of <see cref="OpProfile"/>, which
-    /// then puts the daily profile back unchanged. Not itself a write: "try" and "end" write through the ordinary ops.
+    /// closes the trial as survived, ends the session and puts the daily profile back. A crash while a trial is in force is recorded by the "crashed" step of <see cref="OpProfile"/>, at once,
+    /// and "after-reset" puts the daily profile back unchanged once the GPU is idle. Not itself a write: "try" and "end" write through the ordinary ops.
     /// </summary>
     public const string OpExperiment = "experiment";
 
