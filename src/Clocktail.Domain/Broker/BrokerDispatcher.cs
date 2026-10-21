@@ -81,6 +81,9 @@ public sealed class BrokerDispatcher
 
     private readonly Fps.IFrameCapture? _frames;
 
+    /// <summary>Why a GPU looks hung right now (the broker's flight recorder; <see cref="FlightRecorder.HungNow"/>), or null.</summary>
+    public Func<string, string?> HungReason { get; set; } = _ => null;
+
     public BrokerResponse Dispatch(BrokerRequest req)
     {
         try
@@ -490,6 +493,9 @@ public sealed class BrokerDispatcher
                 lock (_experiment)
                 {
                     var exp = Experiment.Load(path) ?? throw new InvalidOperationException("no experiment session is open; begin one first");
+                    // A trial written while the GPU hangs would be the one the coming reset is blamed on.
+                    if (HungReason(target.StableId) is { } hung)
+                        return Fail($"the GPU looks hung ({hung}): nothing written; a driver reset usually follows, and the service records it", BrokerCode.GpuHung);
                     if (exp.CrashBudget is { } budget && exp.CrashesSince(data) is var crashes && crashes >= budget)
                         return Fail($"this unattended session has had {crashes} crash{(crashes == 1 ? "" : "es")}, its budget of {budget}: no new trial until a new session begins (the daily profile stays on)", BrokerCode.CrashBudget);
                     // The writer's context (the readings and each point before and after, from the MCP server) goes in as given.

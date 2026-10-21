@@ -161,6 +161,7 @@ static int Run()
     // The last 60 s of each GPU in memory; on a reset the window is saved and its crash point steps the curve there.
     var sampler = new FlightSampler(mgr, hw, targets.Ids.Select(id => (id, targets.Resolve(id)!.Session)).ToList());
     KeepRunning("the flight recorder", () => sampler.RunAsync(cts.Token));
+    dispatcher.HungReason = id => sampler.Recorders.TryGetValue(id, out var r) ? FlightRecorder.HungNow(r.Freeze(), DateTimeOffset.Now) : null;
     // What only a watching agent may hold goes back when no agent has been heard from for 5 minutes.
     var lease = new TrialLease(dispatcher.Dispatch, targets.Ids, () => dispatcher.LastAlive, Log);
     KeepRunning("the trial lease", async () =>

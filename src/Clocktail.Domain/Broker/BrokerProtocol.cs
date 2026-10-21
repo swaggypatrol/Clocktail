@@ -144,4 +144,6 @@ public static class BrokerCode
     public const string Failed = "failed";
     /// <summary>An unattended session spent its crash budget: no new trial until a new session begins.</summary>
     public const string CrashBudget = "crash_budget";
+    /// <summary>The GPU looks hung (frozen readings, or reads that block): no trial is written until it answers again.</summary>
+    public const string GpuHung = "gpu_hung";
 }

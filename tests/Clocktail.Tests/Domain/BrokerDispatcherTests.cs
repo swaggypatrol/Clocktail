@@ -782,6 +782,22 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("Trial-only settings handed back", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
+    /// <summary>S-4: no trial is written while the GPU looks hung; the trial before stays in force.</summary>
+    [Fact]
+    public void No_trial_is_written_while_the_GPU_looks_hung()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"x"}""")).Ok);
+        d.HungReason = _ => "its readings have been frozen at 3180 MHz / 1000 mV since 17:59:21";
+        int sets = FakeDriver.Sets;
+        var r = d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W", power_mw = 450_000u, keep_curve = true })));
+        Assert.False(r.Ok);
+        Assert.Equal(BrokerCode.GpuHung, r.Code);
+        Assert.Equal(sets, FakeDriver.Sets);
+        d.HungReason = _ => null;
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W", power_mw = 450_000u, keep_curve = true }))).Ok);
+    }
+
     /// <summary>"alive" records when an agent was last heard, for the trial lease, and writes nothing.</summary>
     [Fact]
     public void Alive_records_the_agent_and_writes_nothing()

@@ -93,6 +93,22 @@ public sealed class FlightRecorder(TimeSpan keep)
         return new CrashPoint(pick, (resetSeenAt - pick.At).TotalSeconds, why);
     }
 
+    /// <summary>
+    /// Why the GPU looks hung right now, or null: the window ends in a frozen tail that power fell into (a steady pinned
+    /// load that fills the window is not one), or a read in the last 3 s blocked for a second or more. The driver keeps
+    /// answering for the whole TdrDelay of a hang (30 s on the reference machine), and a trial written then took the
+    /// blame for the hang before it (2026-10-19, corrected by hand in the log).
+    /// </summary>
+    public static string? HungNow(IReadOnlyList<FlightSample> window, DateTimeOffset now)
+    {
+        if (window.Count == 0 || now - window[^1].At > TimeSpan.FromSeconds(3)) return null;
+        if (window.LastOrDefault(s => s.ReadMs >= BlockedMs && now - s.At <= TimeSpan.FromSeconds(3)) is { } blocked)
+            return string.Create(CultureInfo.InvariantCulture, $"a read of the GPU blocked for {blocked.ReadMs} ms at {blocked.At:HH:mm:ss}");
+        return FrozenFrom(window) is { } frozen && frozen.At != window[0].At
+            ? string.Create(CultureInfo.InvariantCulture, $"its readings have been frozen at {frozen.ClockMhz} MHz / {frozen.CoreMv} mV since {frozen.At:HH:mm:ss}")
+            : null;
+    }
+
     /// <summary>A sample of the GPU under load: 60 % utilization, or (a light-load stress run, a 250 Hz square wave NVML
     /// reads as 30-57 %) 25 % with at least 150 W behind it; an idle card draws well under that.</summary>
     public static bool Loaded(FlightSample s) =>

@@ -38,6 +38,23 @@ public class FlightRecorderTests
         Assert.True(FlightRecorder.LettingGo(S(1, 2947, 970, 514), S(0.5, 2895, 910, 598.6)));
     }
 
+    /// <summary>S-4: the GPU looks hung while its readings sit frozen after power fell, or a read blocks; a steady pinned
+    /// load or an old window is not a hang.</summary>
+    [Fact]
+    public void A_hang_is_seen_while_it_lasts_and_a_steady_load_is_not_one()
+    {
+        var w = new List<FlightSample>();
+        for (int i = 0; i < 40; i++) w.Add(S(i * 0.5, 2895, 910, 598));
+        for (int i = 0; i < 12; i++) w.Add(S(20 + i * 0.5, 3180, 1000, 126));
+        Assert.Contains("frozen at 3180 MHz", FlightRecorder.HungNow(w, T0.AddSeconds(26)));
+        Assert.Null(FlightRecorder.HungNow(w, T0.AddSeconds(40)));                               // the window is old: the recorder stopped
+
+        var steady = Enumerable.Range(0, 80).Select(i => S(i * 0.5, 3045, 985, 380)).ToList();   // pinned at a flat top
+        Assert.Null(FlightRecorder.HungNow(steady, T0.AddSeconds(40)));
+        var blocked = new List<FlightSample>(steady) { S(40.2, 3045, 985, 380, readMs: 1800) };
+        Assert.Contains("blocked for 1800 ms", FlightRecorder.HungNow(blocked, T0.AddSeconds(41)));
+    }
+
     /// <summary>A hang at the top of the curve under nvgwls -l 40: NVML reads the square wave as ~40 % utilization at
     /// ~380 W. It used to leave no crash point (loaded meant 60 % or more).</summary>
     [Fact]
