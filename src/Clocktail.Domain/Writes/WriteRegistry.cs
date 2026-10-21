@@ -194,6 +194,13 @@ public static class WriteRegistry
                 return new Prepared(cell, plan, cannot);
             }),
 
+        new(ClockRatio.Kind, "msvdd", "the XBAR/core ratio, U16.16 (58976 = 0.8999 stock on a 5090) or a decimal, 0.5..1.0",
+            (hw, gpu, key, value, o) =>
+            {
+                var (cell, plan, cannot) = ClockRatio.Prepare(hw, gpu, key, value);
+                return new Prepared(cell, plan, cannot);
+            }),
+
         new(CurrentLimitWrites.Kind, "nvvdd | msvdd", "mA; the driver's range",
             (hw, gpu, key, value, o) =>
             {

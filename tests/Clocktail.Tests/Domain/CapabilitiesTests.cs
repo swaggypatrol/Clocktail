@@ -79,6 +79,7 @@ public class CapabilitiesTests
         Assert.True(clockLock.Can, clockLock.Why);
         Assert.Contains("for each write the tool makes", clockLock.Why);
         Assert.Equal("set_voltage_boost", Assert.Single(map, c => c.Name == "voltage boost").Tool);
+        Assert.Equal("set_clock_ratio", Assert.Single(map, c => c.Name == "XBAR/core clock ratio").Tool);
         // adjust_xbar moves XBAR only: SYS and Video, NVVDD and F8 are the CLI's.
         Assert.Equal("adjust_xbar", Assert.Single(map, c => c.Name == "XBAR offset and voltage demand").Tool);
         Assert.Equal("set_core_offset", Assert.Single(map, c => c.Name == "core P0 offset").Tool);

@@ -20,7 +20,7 @@ public class DiagnosticsTests
         Assert.True(control.VersionEchoed);
         Assert.True(control.NonZeroDwords >= 2);   // mask and the MSVDD offset
         Assert.Equal(NvOutcome.Missing, probes.Single(p => p.Slot == Slot.ClockClkDomainsGetInfo).Outcome);
-        Assert.DoesNotContain(probes, p => p.Slot == Slot.ClockClkPropTopRelsGetControl);   // unknown size: not swept
+        Assert.Equal(NvOutcome.Missing, probes.Single(p => p.Slot == Slot.ClockClkPropTopRelsGetControl).Outcome);   // swept in the original's buffer
     }
 
     [Fact]

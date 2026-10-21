@@ -97,6 +97,11 @@ public sealed partial class SettingsTools(Card card)
             rails = Section(() => Rails(c, rails ?? throw new InvalidOperationException(railsError))),
             clock_domains = Section(() => ClockDomains(c, rails, sample)),
             voltage_boost = Section(() => Boost(c)),
+            clock_ratio = Section(() =>
+            {
+                var cr = card.WithDriver(ClockRatio.Read);
+                return new { ratio = Math.Round(cr.Ratio, 4), raw = cr.Raw, stock_raw = c.Stock(ClockRatio.Kind, ClockRatio.Key, Str((int)cr.Raw)), daily_raw = c.Daily(ClockRatio.Kind, ClockRatio.Key) };
+            }),
             controls = Section(() => Controls.Map(card.WithDriver(Capabilities.Probe), WritePolicySet.Default)
                 .Select(x => new { control = x.Name, tool = x.Tool, can = x.Can, why = x.Why }).ToList()),
             fans = new

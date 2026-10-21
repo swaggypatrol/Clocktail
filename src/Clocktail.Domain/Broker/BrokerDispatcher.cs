@@ -712,6 +712,7 @@ public sealed class BrokerDispatcher
         VfWrites.Kind => [nameof(Slot.ClockClientClkVfPointsSetControl)],
         CurrentLimitWrites.Kind => [nameof(Slot.PowerPolicySetControl)],
         ClockLimitWrites.Kind => [nameof(Slot.PerfClientLimitsSetStatus)],
+        ClockRatio.Kind => [nameof(Slot.ClockClkPropTopRelsSetControl)],
         _ => null,
     };
 

@@ -27,9 +27,9 @@
 25,0x527fc458,(unnamed),single-domain frequency read,R,"0xc r1 `{ver,domain,value}`, 0xA5 sentinel; domain ids `0x14,0x1f,6,3,0x16`",Medium (usage) / name unknown
 26,0xe440b867,PerfClientLimitsGetStatus,perf limits (boost lock),R,0x30c r2,High
 27,0x39442cfb,PerfClientLimitsSetStatus,perf limits,W,kind 8,High
-28,0xe826e4f0,ClockClkPropTopRelsGetInfo,clock propagation topology,R,0x75c same family,Medium
-29,0xcbff71d0,ClockClkPropTopRelsGetControl,clock propagation topology,R,0x75c r1 is accepted but the driver writes past it (617.42 measured; real size larger; to probe); `@4=0x3fff`,Medium
-30,0xef3d20ea,ClockClkPropTopRelsSetControl,clock propagation topology,W,kind 9 [inferred]; size unknown,Low
+28,0xe826e4f0,ClockClkPropTopRelsGetInfo,clock propagation topology,R,0x5798 r1 in a 0x8000 buffer; +8 relation count,Medium
+29,0xcbff71d0,ClockClkPropTopRelsGetControl,clock propagation topology,R,0x75c r1 in a 0x2000 buffer (the driver writes past 0x75c; 617.42 measured); `@4=relation count`; +0x68 U16.16 ratio,Medium
+30,0xef3d20ea,ClockClkPropTopRelsSetControl,clock propagation topology,W,kind 9 [observed]; 0x75c r1 in a 0x2000 buffer,Medium
 31,0xfb85b01e,ClientFanCoolersGetInfo,fan,R,0x62c r1 (617.42 size scan; 0x928 is FanPolicy Info's size; see slot 58),High
 32,0x35aed5e8,ClientFanCoolersGetStatus,fan,R,0x6a8 r1 (617.42 size scan; no rev2),High
 33,0x814b209f,ClientFanCoolersGetControl,fan,R,one of 0x62c/0x6a8 r1,Medium

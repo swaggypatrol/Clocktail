@@ -33,8 +33,9 @@ public sealed unsafe class NvClient
     /// <summary>A zeroed buffer of the slot's size with its version word filled in.</summary>
     public static byte[] NewBuffer(Slot slot)
     {
-        var shape = Slots.Info(slot).Shape ?? throw new InvalidOperationException($"{slot}: structure size is unknown; probe it first.");
-        var b = new byte[shape.Size];
+        var info = Slots.Info(slot);
+        var shape = info.Shape ?? throw new InvalidOperationException($"{slot}: structure size is unknown; probe it first.");
+        var b = new byte[info.Buffer ?? shape.Size];
         BinaryPrimitives.WriteUInt32LittleEndian(b, shape.Word);
         return b;
     }
@@ -142,7 +143,7 @@ public sealed unsafe class NvClient
         uint word = BinaryPrimitives.ReadUInt32LittleEndian(buf);
         if (info.Shape is { } shape)
         {
-            if (buf.Length != shape.Size) return NvResult.Rejected(slot, $"buffer is 0x{buf.Length:x} bytes, structure is {shape}");
+            if (buf.Length != (info.Buffer ?? shape.Size)) return NvResult.Rejected(slot, $"buffer is 0x{buf.Length:x} bytes, structure is {shape}" + (info.Buffer is { } want ? $" in a 0x{want:x} buffer" : ""));
             if (word != shape.Word) return NvResult.Rejected(slot, $"version word 0x{word:x} does not match {shape}");
         }
         else if (word == 0)

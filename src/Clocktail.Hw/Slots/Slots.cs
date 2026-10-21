@@ -22,10 +22,10 @@ public static class Slots
     private static SlotInfo[] Build()
     {
         var t = new SlotInfo[78];
-        void R(Slot s, uint id, string dom, Versioned? shape, Evidence ev, string notes = "", Signature sig = Signature.GpuStruct)
-            => t[(int)s] = new SlotInfo(s, id, dom, SlotAccess.Read, shape, sig, ev, notes);
-        void W(Slot s, uint id, string dom, Versioned? shape, Evidence ev, string notes = "", Signature sig = Signature.GpuStruct)
-            => t[(int)s] = new SlotInfo(s, id, dom, SlotAccess.Write, shape, sig, ev, notes);
+        void R(Slot s, uint id, string dom, Versioned? shape, Evidence ev, string notes = "", Signature sig = Signature.GpuStruct, int? buffer = null)
+            => t[(int)s] = new SlotInfo(s, id, dom, SlotAccess.Read, shape, sig, ev, notes, buffer);
+        void W(Slot s, uint id, string dom, Versioned? shape, Evidence ev, string notes = "", Signature sig = Signature.GpuStruct, int? buffer = null)
+            => t[(int)s] = new SlotInfo(s, id, dom, SlotAccess.Write, shape, sig, ev, notes, buffer);
         static Versioned V(int size, int rev) => new(size, rev);
 
         // Voltage rails. Entries: info by rail bit (0xc0 stride @0x4c), control/status by popcount order.
@@ -70,10 +70,12 @@ public static class Slots
         R(Slot.PerfClientLimitsGetStatus, 0xe440b867, "perf-limits", V(0x30c, 2), Evidence.High);
         W(Slot.PerfClientLimitsSetStatus, 0x39442cfb, "perf-limits", V(0x30c, 2), Evidence.High, "write kind 8; exact 7-domain layout required");
 
-        R(Slot.ClockClkPropTopRelsGetInfo, 0xe826e4f0, "clock-prop", null, Evidence.Medium, "same family as control (0x75c), rev unconfirmed");
-        // Live 617.42: 0x75c r1 is accepted but the driver writes past 0x75c (the guard caught it), so the real size is larger.
-        R(Slot.ClockClkPropTopRelsGetControl, 0xcbff71d0, "clock-prop", null, Evidence.Medium, "+4 = 0x3fff; +0x68 U16.16 ratio; driver wrote past 0x75c live, probe the real size before use");
-        W(Slot.ClockClkPropTopRelsSetControl, 0xef3d20ea, "clock-prop", null, Evidence.Low, "kind 9 is inferred; size unknown (see GetControl); off by default");
+        // The original's call form [observed]: the version word says the structure (0x5798 r1, 0x75c r1) and the buffer is
+        // larger (0x8000, 0x2000), the guard after it; the driver writes past 0x75c (live 617.42, a 0x75c buffer's guard
+        // caught it). Control +4 = info +8 (the relation count), +0x68 the ratio, U16.16. Set: gateway kind 9 [observed].
+        R(Slot.ClockClkPropTopRelsGetInfo, 0xe826e4f0, "clock-prop", V(0x5798, 1), Evidence.Medium, "+8 = relation count; 0x8000 buffer", buffer: 0x8000);
+        R(Slot.ClockClkPropTopRelsGetControl, 0xcbff71d0, "clock-prop", V(0x75c, 1), Evidence.Medium, "+4 = info's relation count; +0x68 U16.16 ratio; 0x2000 buffer", buffer: 0x2000);
+        W(Slot.ClockClkPropTopRelsSetControl, 0xef3d20ea, "clock-prop", V(0x75c, 1), Evidence.Medium, "kind 9; the control block as read, +0x68 changed; 0x2000 buffer", buffer: 0x2000);
 
         // Fans. Sizes from the live size probe on 617.42: 0x62c/0x6a8. 0x928/0x14ac are not the coolers' sizes but the fan
         // policies' Info and Control (slots 58/60, below).

@@ -93,7 +93,7 @@ public class WriteRegistryTests : IDisposable
     [Fact]
     public void Every_kind_the_journal_can_hold_has_exactly_one_entry()
     {
-        Assert.Equal(["pstates20", "power", "rails", "clockdomain", "vdemand", "boost", "fan", "fancurve", "clocklimit", "ocp", "vf"], WriteRegistry.Kinds);
+        Assert.Equal(["pstates20", "power", "rails", "clockdomain", "vdemand", "boost", "fan", "fancurve", "clocklimit", "clockratio", "ocp", "vf"], WriteRegistry.Kinds);
         Assert.Equal(WriteRegistry.Kinds.Count(), WriteRegistry.Kinds.Distinct().Count());
         Assert.NotNull(WriteRegistry.Find("POWER"));
         Assert.Null(WriteRegistry.Find("register"));

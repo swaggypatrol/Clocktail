@@ -33,7 +33,7 @@ public static class Controls
         new("fixed fan speed", "set_fan_speed", c => c.FanCoolers, Slot.ClientFanCoolersSetControl),
         new("voltage boost", "set_voltage_boost", c => c.Boost == VoltBoostPath.None ? Capability.No("no boost path") : Capability.Yes($"the {c.Boost.ToString().ToLowerInvariant()} path"), null),
         new("clock lock", "set_clock_lock", c => c.BoostLock, Slot.PerfClientLimitsSetStatus, PerWrite: true),
-        new("clock propagation", null, c => c.PropagationRatio, Slot.ClockClkPropTopRelsSetControl, NotOffered: "its rule is unverified"),
+        new("XBAR/core clock ratio", "set_clock_ratio", c => c.PropagationRatio, Slot.ClockClkPropTopRelsSetControl, PerWrite: true),
         new("temperature input", null, c => c.ThermalInput, Slot.ThermChannelSetControl, NotOffered: "it would freeze a temperature the firmware trusts"),
         new("domain V/F points", null, c => c.DomainVf, Slot.ClockClkVfPointsSetControl, NotOffered: "its rule is unknown"),
     ];

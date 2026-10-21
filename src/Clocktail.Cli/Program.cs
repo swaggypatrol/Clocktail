@@ -31,6 +31,7 @@ internal static class Program
           --fan-policy             JSON: the firmware's own fan curves: per policy type, editable, three points (degC, duty %, rpm),
                                    and Status (temperatures, target rpm; inferred); the channels' modes and NVML temperature beside them
           --diagnose               JSON: GET-only sweep over every readable slot with a known size
+          --clock-ratio            JSON: the XBAR/core clock propagation ratio and its control block's non-zero words (GET only)
           --probe-size SLOT        JSON: which structure sizes the driver accepts for a readable slot
             --probe-max HEX        up to this size (default 2000; PerfPerfLimits needs ~12200)
             --probe-rev N          only this structure version (default 1..4)
@@ -226,7 +227,8 @@ internal static class Program
                 case "--profile": profileVerb = Next(); break;
                 case "--allow-power-write": break;   // scripts written before the power setter was enabled keep working
                 case "--version" or "--help" or "--list-gpus" or "--status" or "--probe-volt" or "--probe-rails"
-                    or "--capabilities" or "--rails" or "--pstates" or "--power" or "--fans" or "--fan-policy" or "--diagnose" or "--ownership" or "--recover":
+                    or "--capabilities" or "--rails" or "--pstates" or "--power" or "--fans" or "--fan-policy" or "--diagnose" or "--ownership" or "--recover"
+                    or "--clock-ratio":
                     cmd.Add(args[i]); break;
                 default:
                     throw new ArgumentException($"unknown option '{args[i]}'");
@@ -331,6 +333,17 @@ internal static class Program
 
         if (cmd.Contains("--fans")) return FanCommands.Read(ctx);
         if (cmd.Contains("--fan-policy")) return FanCommands.ReadPolicy(ctx);
+
+        if (cmd.Contains("--clock-ratio"))
+        {
+            var cr = Clocktail.Domain.Clocks.ClockRatio.Read(hw, session);
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                relations = $"0x{cr.Relations:x}", ratio = cr.Ratio, raw = $"0x{cr.Raw:x}",
+                non_zero = cr.NonZero.ToDictionary(kv => $"+0x{kv.Key:x}", kv => $"0x{kv.Value:x}"),
+            }, Json));
+            return 0;
+        }
 
         if (cmd.Contains("--diagnose"))
         {

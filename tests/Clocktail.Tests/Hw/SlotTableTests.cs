@@ -128,6 +128,8 @@ public class SlotTableTests
         Assert.Equal(new Versioned(0x928, 1), Slots.Info(Slot.FanPolicyGetInfo).Shape);      // the fan policies' sizes, live 2026-10-17
         Assert.Equal(new Versioned(0x8a8, 1), Slots.Info(Slot.FanPolicyGetStatus).Shape);
         Assert.Equal(new Versioned(0x14ac, 2), Slots.Info(Slot.FanPolicyGetControl).Shape);
-        Assert.Null(Slots.Info(Slot.ClockClkPropTopRelsGetControl).Shape);   // the driver wrote past 0x75c live
+        // The driver writes past 0x75c: the original's buffer is larger than the structure its word names (live 2026-10-21).
+        Assert.Equal((new Versioned(0x75c, 1), 0x2000), (Slots.Info(Slot.ClockClkPropTopRelsGetControl).Shape!.Value, Slots.Info(Slot.ClockClkPropTopRelsGetControl).Buffer!.Value));
+        Assert.Equal((new Versioned(0x5798, 1), 0x8000), (Slots.Info(Slot.ClockClkPropTopRelsGetInfo).Shape!.Value, Slots.Info(Slot.ClockClkPropTopRelsGetInfo).Buffer!.Value));
     }
 }

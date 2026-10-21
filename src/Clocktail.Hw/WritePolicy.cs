@@ -307,9 +307,11 @@ public static class WritePolicies
                 return inRange ? null : $"value {value} is outside entry {dom}'s range";
             })),
 
-        Off(Slot.ClockClkPropTopRelsSetControl, "kind 9 (inferred)", "unverified; off by design", complete: false,
-            new ExactSize(0x75c), new Dword(0, 0x1075c), new Dword(4, 0x3fff),
-            new Dword(0x64, 0), new DwordNonZero(0x68),
+        // The block as read (0x75c r1 in the original's 0x2000 buffer, 14 relations on the 5090) with relation 0's ratio
+        // at +0x68 changed; +4 is the relation mask the read asked with. Off by default: a clock-ratio write enables it.
+        Off(Slot.ClockClkPropTopRelsSetControl, "kind 9", "enabled per write (clockratio)", complete: true,
+            new ExactSize(0x2000), new Dword(0, 0x1075c), new DwordNonZero(4), new DwordMax(4, 0x3fff),
+            new Dword(0x64, 0), new DwordNonZero(0x68), new DwordMax(0x68, 0x10000),
             new Dword(0x170, 0), new Dword(0x278, 0), new Dword(0x380, 0), new Dword(0x488, 0), new Dword(0x590, 0)),
 
         // Fan control (kind 16): the whole 0x5ac block, read-modify-written. These are the structure's invariants. The

@@ -122,7 +122,11 @@ public sealed record SlotInfo(
     Versioned? Shape,
     Signature Signature,
     Evidence Evidence,
-    string Notes)
+    string Notes,
+    /// <summary>The buffer a call hands the driver, when larger than <see cref="Shape"/>'s size: the version word says the
+    /// structure's size and the driver writes past it (the clock propagation family; the original gave 0x2000 / 0x8000).
+    /// Null: the buffer is the structure.</summary>
+    int? Buffer = null)
 {
     public string Name => Slot.ToString();
     public bool IsWrite => Access == SlotAccess.Write;

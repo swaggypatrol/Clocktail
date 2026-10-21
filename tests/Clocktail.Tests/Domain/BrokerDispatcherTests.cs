@@ -318,7 +318,7 @@ public class BrokerDispatcherTests : IDisposable
     {
         var d = Power();
         var paths = d.Dispatch(new BrokerRequest(BrokerRequest.OpPing)).Result!.Value.GetProperty("paths");
-        Assert.Equal(11, paths.GetArrayLength());
+        Assert.Equal(12, paths.GetArrayLength());
         Assert.Contains(paths.EnumerateArray(), p => p.GetProperty("kind").GetString() == "rails" && p.GetProperty("checks_after_write").GetString()!.Contains("MAX"));
         Assert.Contains(paths.EnumerateArray(), p => p.GetProperty("kind").GetString() == "fan" && p.GetProperty("checks_after_write").ValueKind == JsonValueKind.Null);
     }

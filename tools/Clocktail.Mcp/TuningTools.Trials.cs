@@ -321,6 +321,30 @@ public sealed partial class TuningTools
             new() { ["writes"] = items.Select(i => TrialWrite(ClockLimitWrites.Kind, i.Key, i.Value)).ToList() });
     });
 
+    /// <summary>set_clock_ratio: the largest change per call.</summary>
+    public const double RatioStep = 0.02;
+
+    [McpServerTool(Name = "set_clock_ratio", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Set XBAR's clock ratio to the core (the driver's NVVDD/MSVDD clock propagation ratio, the original's --xbar-ratio) " +
+        "as a new trial. 0.8999 on a 5090 (58976/65536): under load XBAR is held to about 0.9 x the core clock, which is " +
+        "why adjust_xbar stops paying past +250 MHz. A higher ratio lets XBAR follow the core closer (about +29 MHz of XBAR " +
+        "per +0.01 at a 2900 MHz core) and asks MSVDD for the voltage that clock needs, so adjust_xbar's demand rules apply " +
+        "to the clock it reaches. Not written on the reference card before its drill: watch XBAR's clock in gpu_status and " +
+        "judge by a benchmark that uses memory. 0.5..1.0, at most 0.02 per call. keep_as_daily keeps it; back_to_daily, " +
+        "end_session and a crash put the daily profile's back.")]
+    public string SetClockRatio(
+        [Description("The ratio to try, 0.5..1.0 (absolute).")] double ratio,
+        [Description("Why this step.")] string? reason = null) => Guard(() =>
+    {
+        if (ratio < 0.5 || ratio > 1.0) throw new ArgumentException("the ratio is 0.5..1.0");
+        var now = card.WithDriver(ClockRatio.Read);
+        uint raw = (uint)Math.Round(ratio * 65536);
+        if (raw == now.Raw) throw new ArgumentException($"the ratio is {ClockRatio.Words(now.Raw)} already: nothing to try");
+        if (Math.Abs(ratio - now.Ratio) > RatioStep + 1e-9) throw new ArgumentException($"a step is at most {RatioStep}; it is {ClockRatio.Words(now.Raw)} now");
+        return Trial($"XBAR/core clock ratio {ClockRatio.Words(now.Raw)} → {ClockRatio.Words(raw)}", reason,
+            new() { ["writes"] = new[] { TrialWrite(ClockRatio.Kind, ClockRatio.Key, raw) } });
+    });
+
     [McpServerTool(Name = "set_power_cap", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Set the additional board power request (F8, the CLI's --power-cap) as a new trial, beside the ordinary one " +
         "set_power_limit moves (FE). On a 5090 FE it does not exist until the first call creates it, and the driver offers " +
