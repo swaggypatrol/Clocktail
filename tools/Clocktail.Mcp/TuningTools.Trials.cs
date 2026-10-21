@@ -225,6 +225,7 @@ public sealed partial class TuningTools
             curve_point = point,
             limit_reasons = reasons,
             pstates = PStates(loaded),
+            curve_shift = CurveShift(curve, ReadCurveOrNull(), point?.index, loaded),
             fps = FrameFeed.Show(fps) ?? (object)new
             {
                 unavailable = noFrames ?? (process != null ? $"no frames from {process}: is that the game's process name?" : "no application drew frames: was the game running?"),

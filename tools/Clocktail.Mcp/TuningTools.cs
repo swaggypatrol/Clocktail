@@ -441,6 +441,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         double? p50MsMv = P(held.Select(s => s.MsvddUv / 1000.0), 0.5), p50MsW = P(held.Select(s => s.MsvddOut?.Mw / 1000.0), 0.5);
         var reasons = held.SelectMany(s => s.Telemetry?.ThrottleReasons ?? []).Distinct().ToList();
         int? pointIndex = p50Mv is { } mv && Nearest(before.Curve, (uint)(mv * 1000)) is { } pt ? pt.Index : null;
+        var shift = CurveShift(before.Curve, ReadCurveOrNull(), pointIndex, held);
 
         bool trial = TrialInForce(card.Broker(BrokerRequest.OpExperiment, "show")) == true;
         string summary = string.Create(CultureInfo.InvariantCulture,
@@ -474,6 +475,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             limit_reasons = reasons,
             pstates = PStates(held),
             curve_point = pointIndex,
+            curve_shift = shift,
             samples_csv = csv,
             trial_in_force = trial,
             crash_recorded = crashRecorded,
@@ -489,6 +491,41 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "the note: those are the points this trial proved, not the whole window.")]
     public string MarkStable([Description("What was played and seen.")] string note) => Guard(() =>
         Reply(card.Broker(BrokerRequest.OpExperiment, "stable", note + TrialStays(out _))));
+
+    /// <summary>The driver's temperature-compensation steps on the reference card (warming: ~57/62/72/82 °C; at 82 °C the
+    /// curve dropped 8-15 MHz at 940-990 mV, re/tuning-results §26). Two runs either side of one are not comparable.</summary>
+    public static readonly double[] ThermalStepsC = [57, 62, 72, 82];
+
+    /// <summary>The step a temperature sits within 2 °C of, or null.</summary>
+    public static double? NearThermalStep(double? tempC) =>
+        tempC is { } t && ThermalStepsC.FirstOrDefault(s => Math.Abs(s - t) <= 2) is var s && s > 0 ? s : null;
+
+    /// <summary>How far the curve moved at the point a run held, between the read before it and the read after (the card
+    /// still warm), with the temperatures it ran between: an A B B A comparison is only fair at one temperature.</summary>
+    public static object? CurveShift(VfCurveSnapshot before, VfCurveSnapshot? after, int? index, IReadOnlyList<Card.Sample> samples)
+    {
+        if (index is not { } i || after == null) return null;
+        var b = before.Points.FirstOrDefault(p => p.Index == i);
+        var a = after.Points.FirstOrDefault(p => p.Index == i);
+        if (b == null || a == null) return null;
+        var temps = samples.Select(s => s.Telemetry?.TemperatureC).OfType<double>().ToList();
+        double? start = temps.Count > 0 ? temps[0] : null, end = temps.Count > 0 ? temps[^1] : null;
+        double shift = (a.EffectiveKhz - (double)b.EffectiveKhz) / 1000.0;
+        double? step = NearThermalStep(end);
+        return new
+        {
+            point = i, before_mhz = b.EffectiveKhz / 1000.0, after_mhz = a.EffectiveKhz / 1000.0, shift_mhz = shift,
+            temp_start_c = start, temp_end_c = end,
+            note = shift != 0 ? $"the curve moved {shift:+0.#;-0.#} MHz at this point as the card warmed: compare runs at the same temperature"
+                : step is { } st ? $"ended within 2 °C of the {st:0} °C compensation step: a degree either way moves the curve" : null,
+        };
+    }
+
+    private VfCurveSnapshot? ReadCurveOrNull()
+    {
+        try { return card.Read().Curve; }
+        catch (Exception e) when (e is InvalidOperationException or InvalidDataException or IOException or Clocktail.Hw.NvApiException or DriverBusyException) { return null; }
+    }
 
     /// <summary>The performance states a stretch of samples ran in, most first ("P0 98 %, P2 2 %"); null when none was read.
     /// The memory offset acts in P0 only, so a compute load sitting in P2 does not test it.</summary>
