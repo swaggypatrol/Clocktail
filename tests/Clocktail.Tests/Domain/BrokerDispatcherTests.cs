@@ -1006,6 +1006,12 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal(0, NvvddRel());
         Assert.Empty(_journal.Inspect().Items);
 
+        // A boost (set_voltage_boost) through the same list: the legacy byte at the rails' control +8, kept from the card.
+        Assert.True(d.Dispatch(Exp("try", Try(new[] { new { kind = "boost", key = "legacy", value = "10" } }))).Ok);
+        Assert.Equal(10, FakeDriver.State[controlWord][8]);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily")).Ok);
+        Assert.Equal(0, FakeDriver.State[controlWord][8]);
+
         // adjust_nvvdd's offsets are kept from the card, as MSVDD's are.
         Assert.True(d.Dispatch(Exp("try", Try(new[] { new { kind = "rails", key = "nvvdd", value = "rel=-100000,alt=0,ov=0,vmin=0" } }))).Ok);
         var kept = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep"));

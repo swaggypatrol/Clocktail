@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
 using Clocktail.Domain;
+using Clocktail.Domain.Boost;
 using Clocktail.Domain.Broker;
 using Clocktail.Domain.Clocks;
 using Clocktail.Domain.Fan;
@@ -238,6 +239,30 @@ public sealed partial class TuningTools
         var t = ClockDomainsParser.Find(card.WithDriver(ClockDomainOffsets.ReadTopology), (uint)d);
         return (t.MinOffsetMhz, t.MaxOffsetMhz);
     }
+
+    /// <summary>set_voltage_boost: the largest change per call, %.</summary>
+    public const int BoostStepPct = 25;
+
+    [McpServerTool(Name = "set_voltage_boost", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Set the voltage boost percentage (0..100) as a new trial, on the path the card takes (legacy on a 5090, whose NVVDD " +
+        "is kind 3). The legacy byte and the independent interface are one driver variable. On the reference card 1 % and " +
+        "10 % changed nothing that could be seen: not a rail's MAX, the V/F table or where the card ran; 100 % was never " +
+        "tried. Every rail's MAX must stay within the 1.15 V standard ceiling after the write, or it is put back. At most " +
+        "25 % from where it is per call. keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily " +
+        "profile's back.")]
+    public string SetVoltageBoost(
+        [Description("The boost to try, percent 0..100 (absolute, not a delta).")] int percent,
+        [Description("Why this step.")] string? reason = null) => Guard(() =>
+    {
+        if (percent < 0 || percent > VoltBoost.MaxPercent) throw new ArgumentException($"the boost is 0..{VoltBoost.MaxPercent} %");
+        var o = card.WithDriver((hw, s) => BoostReader.Observe(hw, s));
+        var path = o.DefaultRule(railsWritable: true) ?? throw new InvalidOperationException("this card has no boost path");
+        uint now = path == BoostPath.Independent ? o.IndependentPercent ?? 0 : o.LegacyPercent;
+        if (percent == now) throw new ArgumentException($"the boost is {now} % already: nothing to try");
+        if (Math.Abs(percent - (int)now) > BoostStepPct) throw new ArgumentException($"a step is at most {BoostStepPct} %; it is {now} % now");
+        string key = path == BoostPath.Independent ? "independent" : "legacy";
+        return Trial($"voltage boost ({key}) {now} → {percent} %", reason, new() { ["writes"] = new[] { TrialWrite(VoltBoost.Kind, key, percent) } });
+    });
 
     [McpServerTool(Name = "set_daily_power_limit", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make this the daily power limit: it goes on now and at every start and after every driver reset. A trial's wall " +

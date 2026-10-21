@@ -78,7 +78,7 @@ public class CapabilitiesTests
         Assert.Null(clockLock.Tool);
         Assert.Contains("the driver has it", clockLock.Why);
         Assert.Contains("the setter is off (7-domain layout check unknown)", clockLock.Why);
-        Assert.Contains("only the CLI", Assert.Single(map, c => c.Name == "voltage boost").Why);
+        Assert.Equal("set_voltage_boost", Assert.Single(map, c => c.Name == "voltage boost").Tool);
         // adjust_xbar moves XBAR only: SYS and Video, NVVDD and F8 are the CLI's.
         Assert.Equal("adjust_xbar", Assert.Single(map, c => c.Name == "XBAR offset and voltage demand").Tool);
         Assert.Equal("set_core_offset", Assert.Single(map, c => c.Name == "core P0 offset").Tool);

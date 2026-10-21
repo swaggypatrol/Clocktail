@@ -41,6 +41,7 @@ public class DailyProfileTests : IDisposable
         Assert.True(DailyProfile.KeptFromCard("vdemand", "xbar"));
         Assert.False(DailyProfile.KeptFromCard("power", "fe"));
         Assert.True(DailyProfile.KeptFromCard("pstates20", "memory"));   // the agent tunes it now (2026-10-20)
+        Assert.True(DailyProfile.KeptFromCard("boost", "legacy"));     // set_voltage_boost tunes it (2026-10-21)
         Assert.True(DailyProfile.KeptFromCard("pstates20", "core"));    // set_core_offset tunes it (2026-10-21)
     }
 
