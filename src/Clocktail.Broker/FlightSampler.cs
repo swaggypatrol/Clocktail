@@ -32,11 +32,15 @@ internal sealed class FlightSampler(GpuManager mgr, NvClient hw, IReadOnlyList<(
                 var nvml = dev is { HasNvml: true } ? mgr.Nvml : null;
                 nint h = dev?.NvmlHandle ?? 0;
                 uint? uv = null;
+                bool railRead = true;
                 try { masks[id] ??= RailsReader.Mask(hw, session); if (masks[id] is { } m) uv = RailsReader.PresentUv(hw, session, m, Clocktail.Domain.Rails.Rail.Nvvdd); }
-                catch (Exception e) when (e is NvApiException or InvalidOperationException) { }
+                catch (Exception e) when (e is NvApiException or InvalidOperationException) { railRead = false; }
                 // The rail read comes first so that a handle NVAPI just found invalidated stops NVML before this look reads
                 // it through the same dead driver (NVML then answers "lost" without being called; the broker hands over).
+                // A rail read that failed any other way skips NVML for this look too: after a device restart (ST08,
+                // 2026-10-21) NVML read through the old handle crashed the worker with an access violation.
                 DriverLoss.Why(mgr.Nvml, [session]);
+                if (!railRead) nvml = null;
                 var s = new FlightSample(at, 0,
                     Try(() => nvml!.ClockMhz(h, NvmlClock.Graphics), nvml),
                     uv / 1000,
