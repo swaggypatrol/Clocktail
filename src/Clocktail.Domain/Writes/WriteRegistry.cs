@@ -139,7 +139,7 @@ public static class WriteRegistry
                 return new Prepared(cell, plan, plan == null ? $"'{value}' is not a number of kilohertz" : null);
             }),
 
-        new(ClockVdemand.Kind, "xbar | sys | video", "µV, signed integer, the standard range −25000..50000",
+        new(ClockVdemand.Kind, "graphics | xbar | sys | video", "µV, signed integer, the standard range −25000..50000",
             (hw, gpu, key, value, o) =>
             {
                 var (cell, plan) = ClockVdemand.Prepare(hw, gpu, key, value);

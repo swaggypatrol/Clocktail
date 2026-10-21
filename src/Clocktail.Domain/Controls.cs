@@ -26,6 +26,7 @@ public static class Controls
         new("core P0 offset", "set_core_offset", c => c.PstatesWrite, Slot.SetPstates20),
         new("XBAR offset and voltage demand", "adjust_xbar", c => c.ClockDomains, Slot.ClockClkDomainsSetControl),
         new("SYS and Video offsets and voltage demands", "adjust_clock_domain", c => c.ClockDomains, Slot.ClockClkDomainsSetControl),
+        new("core voltage demand", "adjust_clock_domain (core)", c => c.ClockDomains, Slot.ClockClkDomainsSetControl),
         new("MSVDD voltage", "adjust_msvdd", c => c.VoltWrite, Slot.VoltVoltRailsSetControl),
         new("NVVDD offsets", "adjust_nvvdd", c => c.VoltWrite, Slot.VoltVoltRailsSetControl),
         new("fan curve", "set_fan_curve", c => Present(c, "fan policy", Slot.FanPolicyGetInfo, Slot.FanPolicyGetControl, Slot.FanPolicySetControl), Slot.FanPolicySetControl),

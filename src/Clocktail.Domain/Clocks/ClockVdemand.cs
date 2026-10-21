@@ -10,8 +10,10 @@ namespace Clocktail.Domain.Clocks;
 /// A clock domain's voltage-demand offset (<c>--xbar/sys/video-vdemand MV</c>): µV added to what every
 /// point of the domain's V/F curve asks its rail for, so the domain runs the same clock at a higher (or lower) voltage.
 /// Not the rail's REL/ALT limits: those only move the ceiling. Two slots follow the clock offset in the domain's control
-/// entry, NVVDD's then MSVDD's; a domain uses the one its topology entry names. Core is left out: here the
-/// V/F points own the core's voltages.
+/// entry, NVVDD's then MSVDD's; a domain uses the one its topology entry names. The core's (graphics, NVVDD's slot of
+/// entry 0) moves every Core V/F point's voltage by the same µV: the reader shows it as the curve's demand shift
+/// (VfPoint.VoltageUv less its firmware voltage), so the same curve runs at a higher or lower voltage. XBAR's was written
+/// live on 2026-10-20 (+20 mV moved MSVDD 825 → 845 mV); the core's slot has the same layout and read 0 live.
 /// </summary>
 public static class ClockVdemand
 {
@@ -20,7 +22,7 @@ public static class ClockVdemand
     /// <summary>The standard range; an XOC mode would take any int32, and this program has no XOC.</summary>
     public const int MinUv = -25_000, MaxUv = 50_000;
 
-    public static bool Writable(ClockDomainId d) => d is ClockDomainId.Xbar or ClockDomainId.Sys or ClockDomainId.Video;
+    public static bool Writable(ClockDomainId d) => d is ClockDomainId.Graphics or ClockDomainId.Xbar or ClockDomainId.Sys or ClockDomainId.Video;
 
     public static string Key(ClockDomainId d) => d.ToString().ToLowerInvariant();
 
@@ -87,7 +89,7 @@ public static class ClockVdemand
     public static (OwnedCell Cell, Func<ReadOnlyMemory<byte>, Mutation>? Plan) Prepare(NvClient hw, GpuSession gpu, string key, string value)
     {
         var domain = Enum.GetValues<ClockDomainId>().Where(Writable).Cast<ClockDomainId?>().FirstOrDefault(d => Key(d!.Value) == key)
-            ?? throw new ArgumentException($"'{key}' is not a clock domain whose voltage demand is written here (xbar, sys, video)");
+            ?? throw new ArgumentException($"'{key}' is not a clock domain whose voltage demand is written here (graphics, xbar, sys, video)");
         var t = ClockDomainsParser.Find(ClockDomainOffsets.ReadTopology(hw, gpu), (uint)domain);
         int slot = Slot(t, RailInfo(RailsReader.Read(hw, gpu)));
         Func<ReadOnlyMemory<byte>, Mutation>? plan = int.TryParse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var uv)

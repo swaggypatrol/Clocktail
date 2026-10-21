@@ -187,7 +187,10 @@ public sealed partial class TuningTools
     });
 
     [McpServerTool(Name = "adjust_clock_domain", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Move SYS's or Video's clock offset and/or voltage demand as a new trial, as adjust_xbar does for XBAR. SYS is the " +
+        "Move SYS's or Video's clock offset and/or voltage demand, or the core's voltage demand, as a new trial, as " +
+        "adjust_xbar does for XBAR. The core's demand (domain 'core', on NVVDD) moves every V/F point's voltage by the same " +
+        "mV: the same curve at more voltage (margin) or less (an undervolt of the whole curve); card_settings vf_curve " +
+        "voltage_demand_mv reads it back, and the core's clock offset is set_core_offset's. SYS is the " +
         "system clock (it falls as XBAR's offset rises: XBAR 0/+200/+300/+400 gave SYS 2182/2017/1912/1830 MHz in the memory " +
         "phase, and SYS +150 back at XBAR +300 changed nothing in a Blender render); Video is the video engine (NVENC/NVDEC), " +
         "which games do not use. Neither was written on the reference card before: judge a step by its own clock in " +
@@ -195,7 +198,7 @@ public sealed partial class TuningTools
         "At most 50 MHz and 10 mV per call; offset within the driver's range, demand -25..+50 mV. keep_as_daily keeps it; " +
         "back_to_daily, end_session and a crash put the daily profile's back.")]
     public string AdjustClockDomain(
-        [Description("'sys' or 'video'.")] string domain,
+        [Description("'sys', 'video', or 'core' (voltage demand only).")] string domain,
         [Description("MHz to add to the domain's clock offset (negative lowers); default 0.")] double offsetDeltaMhz = 0,
         [Description("mV to add to the domain's voltage demand (negative lowers); default 0.")] double vdemandDeltaMv = 0,
         [Description("Why this step (what you saw, what you expect).")] string? reason = null) => Guard(() =>
@@ -204,20 +207,22 @@ public sealed partial class TuningTools
         {
             "sys" => ClockDomainId.Sys,
             "video" => ClockDomainId.Video,
+            "core" or "graphics" => ClockDomainId.Graphics,
             "xbar" => throw new ArgumentException("XBAR is adjust_xbar's: it carries the rules for the MSVDD-floor cliff"),
-            _ => throw new ArgumentException("domain is 'sys' or 'video'"),
+            _ => throw new ArgumentException("domain is 'sys', 'video' or 'core'"),
         };
         if (offsetDeltaMhz == 0 && vdemandDeltaMv == 0) throw new ArgumentException("both deltas are 0: nothing to try");
+        if (d == ClockDomainId.Graphics && offsetDeltaMhz != 0) throw new ArgumentException("the core's clock offset is set_core_offset's (P0); here only its voltage demand moves");
         if (Math.Abs(offsetDeltaMhz) > XbarStepMhz) throw new ArgumentException($"an offset step is at most {XbarStepMhz} MHz (CLOCKTAIL_MCP_XBAR_STEP_MHZ)");
         if (Math.Abs(vdemandDeltaMv) > VdemandStepMv) throw new ArgumentException($"a demand step is at most {VdemandStepMv} mV (CLOCKTAIL_MCP_VDEMAND_STEP_MV)");
         var (offNow, demandNow) = SettingsTools.Domain(card, d);
         int off = offNow + (int)Math.Round(offsetDeltaMhz * 1000), demand = demandNow + (int)Math.Round(vdemandDeltaMv * 1000);
         var (min, max) = OffsetRange(d);
-        if (off > max * 1000 || off < min * 1000)
+        if (off != offNow && (off > max * 1000 || off < min * 1000))
             throw new ArgumentException($"the {d} offset stays within the driver's {min}..+{max} MHz (it would be {off / 1000.0})");
         if (demand > MaxVdemandMv * 1000 || demand < MinVdemandMv * 1000)
             throw new ArgumentException($"the voltage demand stays within {MinVdemandMv}..+{MaxVdemandMv} mV (it would be {demand / 1000.0})");
-        string name = d == ClockDomainId.Sys ? "SYS" : "Video";
+        string name = d switch { ClockDomainId.Sys => "SYS", ClockDomainId.Video => "Video", _ => "core" };
         var writes = new List<object>();
         var parts = new List<string>();
         if (demand != demandNow)

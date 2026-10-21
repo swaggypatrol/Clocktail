@@ -54,6 +54,20 @@ public class ClockVdemandTests : IDisposable
         Assert.Throws<InvalidDataException>(() => ClockVdemand.Slot(Topo(ClockDomainId.Xbar), s => s == 0 ? (3u, 1u) : null));
     }
 
+    /// <summary>The core's demand (graphics, entry 0) lands in NVVDD's slot of its entry, and 0 releases it.</summary>
+    [Fact]
+    public void The_core_demand_lands_in_nvvdd_slot_of_the_graphics_entry()
+    {
+        ClockDomainsFixture.Seed();
+        Assert.True(ClockVdemand.Writable(ClockDomainId.Graphics));
+        var r = Apply(ClockDomainId.Graphics, -10_000);
+        Assert.Equal(TxOutcome.Applied, r.Tx.Outcome);
+        Assert.Equal(-10_000, Demand(0, 0));
+        Assert.Equal(0, Demand(0, 1));
+        Assert.Equal("0", _journal.Load()!.Items.Single(i => i.Kind == ClockVdemand.Kind && i.Key == "graphics").Original);
+        Assert.StartsWith("released", Apply(ClockDomainId.Graphics, 0).Ownership);
+    }
+
     /// <summary>+20 mV on XBAR lands in MSVDD's slot of XBAR's entry and nothing else moves; the XBAR clock offset
     /// written afterwards keeps it, and 0 puts it back and releases the record.</summary>
     [Fact]
