@@ -23,6 +23,7 @@ Blender Cycles (2560x1440, 384 spp, median of 7, lower is better), stock 6.774 s
 ## The cliff
 - With a large XBAR offset and no extra demand, memory-bound work lets MSVDD fall to its floor (825 mV). When it sits there, the **core is pinned near 1610 MHz and bandwidth drops 14-16 %** (1460 -> 1221-1259 GB/s). At demand 0: clean from +0 to +250, marginal at +300 (an occasional drop to 1687 MHz), the cliff at +350 and +400. No hysteresis: back down, back to normal.
 - Raising VMIN does not fix it (MSVDD then sits on the new floor, core still ~1620 MHz). **The voltage demand does**: at +400, demand +20 mV kept MSVDD at 845 mV and restored 1446 GB/s and a 2445 MHz core.
+- +20 mV holds only up to +300. At +400 the memory phase's P10 core still fell to 1942 MHz with +20 mV and 1830 MHz with +30; only +50 mV kept it clean (2392). So past +300 the demand must be +50 mV, and +400 was no faster than +300 in Blender anyway.
 - The firmware mechanism is unknown. Stay at +250-300 with +20 mV, which is what the founders preset holds (XBAR +300, +20 mV).
 - An overclocker reported +450 MHz without extra voltage giving a grey screen and artefacts.
 - **If anything is unstable with XBAR raised, step XBAR down 50 MHz at a time** before touching the curve.

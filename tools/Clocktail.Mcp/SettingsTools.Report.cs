@@ -176,7 +176,7 @@ public sealed partial class SettingsTools
             string mark = Safe, note;
             if (key != "xbar") { mark = Look; note = "not measured on the reference card"; }
             else if (off > MeasuredXbarMhz) { mark = Look; note = $"past the +{F(MeasuredXbarMhz)} MHz measured; +450 without voltage gave a grey screen elsewhere"; }
-            else if (off > XbarCliffMhz && dem < XbarCliffDemandMv) { mark = Look; note = $"the cliff: above +{F(XbarCliffMhz)} MHz it needs +{F(XbarCliffDemandMv)} mV of voltage demand"; }
+            else if (off is { } o && TuningTools.XbarDemandNeededMv(o) is { } need && dem < need) { mark = Look; note = $"the cliff: at {Sg(o)} MHz it needs +{need} mV of voltage demand (+{TuningTools.XbarCliffDemandMv} above +{TuningTools.XbarCliffMhz}, +{TuningTools.XbarHighDemandMv} above +{TuningTools.XbarHighMhz})"; }
             else note = off > XbarCliffMhz ? $"+{F(dem)} mV keeps MSVDD off its floor" : off > 0 ? "within the measured range" : "stock";
             string change = Join(off != offS ? $"{Arrow(off - offS)} {Sg(off - offS)} MHz" : null, dem != demS ? $"{Arrow(dem - demS)} {Sg(dem - demS)} mV" : null) is { Length: > 0 } c ? c : "—";
             rows.Add(new("🔀", name, $"{Sg(offS)} MHz, {Sg(demS)} mV", $"{Sg(off)} MHz, {Sg(dem)} mV", change, mark,

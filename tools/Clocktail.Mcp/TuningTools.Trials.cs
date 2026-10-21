@@ -34,6 +34,13 @@ public sealed partial class TuningTools
     /// 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand kept MSVDD off it.
     /// Above this offset the demand must be at least that.</summary>
     public const int XbarCliffMhz = 250, XbarCliffDemandMv = 20;
+    /// <summary>Past +300 MHz +20 mV is not enough (2026-10-20, re/tuning-results §28): at +400 the memory phase's P10 core
+    /// clock fell to 1942 MHz with +20 mV and 1830 with +30, and stayed clean (2392) only with +50.</summary>
+    public const int XbarHighMhz = 300, XbarHighDemandMv = 50;
+
+    /// <summary>The voltage demand an XBAR offset needs to stay off the MSVDD-floor cliff, mV; null below the cliff.</summary>
+    public static int? XbarDemandNeededMv(double offsetMhz) =>
+        offsetMhz > XbarHighMhz ? XbarHighDemandMv : offsetMhz > XbarCliffMhz ? XbarCliffDemandMv : null;
     /// <summary>set_fan_curve: full speed no later than the stock curve's (100 % at 88 °C), no duty under its 20 %.</summary>
     public const int FanFullByC = 88, FanMinCurvePct = 20;
     /// <summary>set_fan_speed: the firmware's floor while the fans spin.</summary>
@@ -118,7 +125,8 @@ public sealed partial class TuningTools
         "which more offset only lowers the MSVDD voltage it needs. On the reference card (MSVDD REL 0): +250 made Blender 6.3 % " +
         "faster than stock, +300 with +20 mV of demand 6-7 %. The cliff: above +250 with no demand, memory-bound work lets " +
         "MSVDD fall to its 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand keeps " +
-        "it off, so above +250 the demand must be +20 mV or more (raise the demand first). At most 50 MHz and 10 mV per call; " +
+        "it off up to +300, so above +250 the demand must be +20 mV or more, and above +300 +50 mV (at +400 the memory phase " +
+        "still dropped to ~1830-1940 MHz with +20/+30 mV; raise the demand first). At most 50 MHz and 10 mV per call; " +
         "offset -100..+400 MHz, demand -25..+50 mV. If anything is unstable with XBAR raised, step it down 50 MHz before " +
         "touching the curve. keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
     public string AdjustXbar(
@@ -135,9 +143,9 @@ public sealed partial class TuningTools
             throw new ArgumentException($"the XBAR offset stays within {MinXbarMhz}..+{MaxXbarMhz} MHz (it would be {off / 1000.0})");
         if (demand > MaxVdemandMv * 1000 || demand < MinVdemandMv * 1000)
             throw new ArgumentException($"the voltage demand stays within {MinVdemandMv}..+{MaxVdemandMv} mV (it would be {demand / 1000.0})");
-        if (off > XbarCliffMhz * 1000 && demand < XbarCliffDemandMv * 1000)
-            throw new ArgumentException($"XBAR above +{XbarCliffMhz} MHz needs at least +{XbarCliffDemandMv} mV of voltage demand: without it memory-bound " +
-                "work drops MSVDD to its floor and pins the core near 1610 MHz. Raise the demand first");
+        if (XbarDemandNeededMv(off / 1000.0) is { } need && demand < need * 1000)
+            throw new ArgumentException($"XBAR at {off / 1000.0:+0.#} MHz needs at least +{need} mV of voltage demand (above +{XbarCliffMhz}: +{XbarCliffDemandMv}; " +
+                $"above +{XbarHighMhz}: +{XbarHighDemandMv}): without it memory-bound work drops MSVDD to its floor and pins the core near 1610 MHz. Raise the demand first");
         var items = new Dictionary<string, object?>();
         var parts = new List<string>();
         if (off != offNow) { items["xbar_khz"] = off; parts.Add(string.Create(CultureInfo.InvariantCulture, $"XBAR offset {offNow / 1000.0:+0.#;-0.#;0} → {off / 1000.0:+0.#;-0.#;0} MHz")); }

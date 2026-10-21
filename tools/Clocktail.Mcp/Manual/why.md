@@ -54,7 +54,7 @@ It was carried over from an earlier hand tune and never searched. On the referen
 NVIDIA ships the 5090's MSVDD 50 mV inside its own reliability limit (REL -50). REL 0 is that limit itself, not past it. It made the crossbar faster and Blender ~2 % faster for ~2 W. REL +20, past NVIDIA's limit, bought ~1 % more; Clocktail goes no further.
 
 ## Why does XBAR need a voltage demand?
-Above about +250 MHz of XBAR offset, memory-bound work lets MSVDD fall to its 825 mV floor, and then the core is pinned near 1610 MHz with 14-16 % less bandwidth. The firmware's reason is unknown. +20 mV of demand keeps MSVDD off the floor; raising VMIN does not.
+Above about +250 MHz of XBAR offset, memory-bound work lets MSVDD fall to its 825 mV floor, and then the core is pinned near 1610 MHz with 14-16 % less bandwidth. The firmware's reason is unknown. +20 mV of demand keeps MSVDD off the floor up to +300; past +300 it takes +50 mV (at +400 with +20/+30 mV the memory phase still dropped to 1830-1940 MHz). Raising VMIN does not help.
 
 ## Why 600 W and not more?
 600 W is the board's own maximum power request on the 5090 FE. Going past it would need another VBIOS, which Clocktail does not touch.
