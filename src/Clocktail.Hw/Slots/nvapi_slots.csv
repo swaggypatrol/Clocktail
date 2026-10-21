@@ -41,8 +41,8 @@
 39,0x2eb3c140,RegisterOp,GPU register access,?,if real it is raw register read/write; highest risk; never called,Low / [unknown]
 40,0xc0599498,GetMemoryInfoEx(jNizM),memory info,R,read path unknown,Low
 41,0x7c955ac0,ClockPmumonClkDomainsGetSamples,clock samples,R,read path unknown,Low
-42,0x4d2c0a9c,PerfPerfLimitsGetInfo,perf limits,R,read path unknown,Low
-43,0x0b62b9e2,PerfPerfLimitsGetStatus,perf limits,R,same as above,Low
+42,0x4d2c0a9c,PerfPerfLimitsGetInfo,perf limits,R,0x12308 r2; +8 limit mask; names at 0x290 + i*0x90,Medium
+43,0x0b62b9e2,PerfPerfLimitsGetStatus,perf limits,R,"0x207d90 r2; ceilings at 0x2010, floors at 0x1ae8, {kHz, limit} per domain",Medium
 44,0xdcb616c3,GetAllClockFrequencies,clocks,R,public API,Medium
 45,0x31b7a4cd,PowerPolicyGetStatus,power policy,R,0xca8 r3(0x30ca8) candidate,Low
 46,0x54924bf5,ClientPwrPoliciesGetInfo,power (watts/board),R,0x728 r1 (617.42 size scan; the F8/FE watt request family lives here),High

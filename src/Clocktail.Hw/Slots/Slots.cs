@@ -96,8 +96,10 @@ public static class Slots
             "raw register access. Never implemented here.");
         R(Slot.GetMemoryInfoEx, 0xc0599498, "memory", null, Evidence.Low);
         R(Slot.ClockPmumonClkDomainsGetSamples, 0x7c955ac0, "clocks", null, Evidence.Low);
-        R(Slot.PerfPerfLimitsGetInfo, 0x4d2c0a9c, "perf-limits", null, Evidence.Low);
-        R(Slot.PerfPerfLimitsGetStatus, 0x0b62b9e2, "perf-limits", null, Evidence.Low);
+        // Live 617.42 (2026-10-21): the info's 242 limit names at 0x290 + i x 0x90; the status's arbitration as {kHz, limit}
+        // pairs per clock domain (PerfLimits). The status is 2 MB, nearly all zero.
+        R(Slot.PerfPerfLimitsGetInfo, 0x4d2c0a9c, "perf-limits", V(0x12308, 2), Evidence.Medium, "+8 limit mask; names at 0x290 + i*0x90");
+        R(Slot.PerfPerfLimitsGetStatus, 0x0b62b9e2, "perf-limits", V(0x207d90, 2), Evidence.Medium, "ceilings at 0x2010, floors at 0x1ae8, {kHz, limit} per domain");
         R(Slot.GetAllClockFrequencies, 0xdcb616c3, "clocks", null, Evidence.Medium, "public API");
         R(Slot.PowerPolicyGetStatus, 0x31b7a4cd, "power-policy", null, Evidence.Low, "0xca8 r3 is a candidate only");
         R(Slot.ClientPwrPoliciesGetInfo, 0x54924bf5, "power-watts", V(0x728, 1), Evidence.High, "live size probe: rev1 accepts only 0x728; 0x28 header + 32 x 0x38 board entries {flag, 0, min, default, max mW}; the F8/FE watt family is here");

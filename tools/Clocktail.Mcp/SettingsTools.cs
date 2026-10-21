@@ -98,6 +98,7 @@ public sealed partial class SettingsTools(Card card)
             rails = Section(() => Rails(c, rails ?? throw new InvalidOperationException(railsError))),
             clock_domains = Section(() => ClockDomains(c, rails, sample)),
             voltage_boost = Section(() => Boost(c)),
+            perf_limits = Section(() => PerfLimitsView(card.WithDriver(PerfLimits.Read))),
             clock_ratio = Section(() =>
             {
                 var cr = card.WithDriver(ClockRatio.Read);
@@ -135,7 +136,10 @@ public sealed partial class SettingsTools(Card card)
         "below MAX: the curve's own top), thermal and hardware_slowdown (NVML's own reasons), idle (under 120 W, or gpu_idle " +
         "at under 10 % utilization) or no_limit (loaded, nothing reached: the load asks for less). Several can hold at once " +
         "(limiters, the wall first). readings are the medians of the samples behind the verdict, with the margins that " +
-        "decided it. Run it with the game or stress test loaded: at idle the answer is idle.")]
+        "decided it. perf_limits is the driver's own arbitration for GPC, XBAR and memory: the ceiling it allows and the " +
+        "floor it holds, each with the limit that set it (a clock lock, the reliability voltage limit at the curve's top, a " +
+        "thermal policy…); the power wall acts below these, so a card at its wall runs under its ceiling. Run it with the " +
+        "game or stress test loaded: at idle the answer is idle.")]
     public string WhatLimits() => Guard(() =>
     {
         // The ceilings do not move in a second: the curve and MAX once, then the light sample five times.
@@ -158,11 +162,16 @@ public sealed partial class SettingsTools(Card card)
         double? board = Median(behind.Select(x => x.R.BoardW)), limit = Median(behind.Select(x => x.R.LimitW));
         double? nvvdd = Median(behind.Select(x => x.R.NvvddUv / 1000.0)), clock = Median(behind.Select(x => (double?)x.R.ClockMhz));
         double? maxMv = max / 1000.0, topMhz = top?.EffectiveKhz / 1000.0;
+        IReadOnlyList<DomainLimits>? arbitration = null;
+        try { arbitration = card.WithDriver(PerfLimits.Read); } catch (Exception e) when (Soft(e)) { }
+        string? lockNote = arbitration?.FirstOrDefault()?.Ceiling is { } gc && gc.By.StartsWith("CLIENT_", StringComparison.Ordinal)
+            ? string.Create(CultureInfo.InvariantCulture, $"A clock lock caps the core at {gc.Mhz:0} MHz ({gc.By}).") : null;
         return Out(new
         {
             limiter = Limiter.Id(verdict.Held[0]),
             limiters = verdict.Held.Select(Limiter.Id),
-            explanation = string.Join(" ", verdict.Held.Select(Limiter.Explain)),
+            explanation = string.Join(" ", [.. verdict.Held.Select(Limiter.Explain), .. lockNote is null ? [] : new[] { lockNote }]),
+            perf_limits = arbitration is null ? null : PerfLimitsView(arbitration),
             votes = $"{verdict.Votes}/{samples.Count}",
             readings = new
             {
@@ -414,6 +423,14 @@ public sealed partial class SettingsTools(Card card)
             };
         }).ToList();
     }
+
+    /// <summary>The driver's arbitration per domain, in MHz, with the limit that set each bound and what it is.</summary>
+    public static object PerfLimitsView(IReadOnlyList<DomainLimits> domains) => domains.Select(d => new
+    {
+        domain = d.Domain,
+        ceiling_mhz = d.Ceiling?.Mhz, ceiling_by = d.Ceiling?.By, ceiling_means = d.Ceiling is { } c ? PerfLimits.Means(c.By) : null,
+        floor_mhz = d.Floor?.Mhz, floor_by = d.Floor?.By,
+    }).ToList();
 
     private object Limits(Context c)
     {
