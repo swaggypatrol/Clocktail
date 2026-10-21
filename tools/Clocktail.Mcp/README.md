@@ -15,6 +15,7 @@ What the agent starts is a relay that loads no driver library and runs the same 
 | `install_service` | Install or update the service (one UAC prompt). Every write tool needs it. |
 | `gpu_status` | Where the card runs now: voltages (and what each GPC measures), clock, the curve point, power vs limit, temperature headroom, VRAM. |
 | `card_settings` | Everything set on the card, next to stock and the daily profile. |
+| `diagnostic_report` | A plain-JSON file for a bug report: versions, the card, what each control can do, how the driver answered every read. GET only. |
 | `limiter` | What holds the clock back right now. |
 | `curve_around` | Curve points near a voltage. |
 | `watch` | Sample one stretch of play: p10/p50/p90 of clock, voltage, XBAR, power, temperature, VRAM; time on the wall; the game's fps and its 1 % and 0.1 % lows (PresentMon, run by the service). |

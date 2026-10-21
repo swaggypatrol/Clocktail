@@ -36,7 +36,7 @@ public static class Diagnostics
                 case Slot.ClockAdcDevicesGetStatus: BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), adcMask); break;
                 case Slot.ClockClkDomainsGetControl: BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(8), 2); break;
                 case Slot.ClockClkPropTopRelsGetControl: BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), 0x3fff); break;
-                case Slot.ThermChannelGetControl: BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(8), 0xffff); break;
+                case Slot.ThermChannelGetControl or Slot.ThermChannelGetStatus: BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(8), 0xffff); break;
                 case Slot.ClientPwrPoliciesGetControl:   // board 0, ordinary request: the usual query shape
                     BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), 1); BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(0x28 + 4), 0xfe); break;
             }
