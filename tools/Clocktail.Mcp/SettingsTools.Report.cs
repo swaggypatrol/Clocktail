@@ -97,6 +97,10 @@ public sealed partial class SettingsTools
     public static string TemperatureMark(double tempC, double? marginC) =>
         tempC >= HotC || marginC <= 0 ? Act : tempC >= WarmC || marginC <= 5 ? Look : Safe;
 
+    /// <summary>card_report's rows (settings, then live) as name, mark and note, from card_settings and limiter answers.</summary>
+    public static IReadOnlyList<(string Name, string Mark, string Note)> ReportRows(JsonElement settings, JsonElement limiter) =>
+        [.. SettingRows(settings).Concat(LiveRows(settings, limiter)).Select(r => (r.Name, r.Mark, r.Note))];
+
     private static object Plain(ReportRow r) => new { setting = r.Name, original = r.Original, now = r.Now, change = r.Change, safe = r.Mark, note = r.Note };
 
     private static List<ReportRow> SettingRows(JsonElement s)
@@ -107,10 +111,13 @@ public sealed partial class SettingsTools
         var pw = Obj(s, "power");
         double? limitW = Num(pw, "limit_w"), stockW = Num(pw, "stock_w"), maxW = Num(pw, "board_max_w"), minW = Num(pw, "board_min_w"), dailyW = Num(pw, "daily_w");
         bool powerOk = limitW is { } lw && (maxW is not { } mx || lw <= mx + 0.5) && (minW is not { } mn || lw >= mn - 0.5);
-        rows.Add(new("⚡", "Power limit", V(stockW, "W"), V(limitW, "W"), Change(limitW, stockW, "W"), powerOk ? Safe : Look,
-            Join(maxW is { } bm ? $"board max {F(bm)} W" : null,
-                 dailyW is { } dw && limitW is { } lwNow && Math.Abs(dw - lwNow) > 0.5 ? $"daily {F(dw)} W; a trial set this one" : null,
-                 powerOk ? null : "outside the board's own range")));
+        if (Unread(pw) is { } pwErr)
+            rows.Add(new("⚡", "Power limit", "?", "?", "?", Look, pwErr));
+        else
+            rows.Add(new("⚡", "Power limit", V(stockW, "W"), V(limitW, "W"), Change(limitW, stockW, "W"), powerOk ? Safe : Look,
+                Join(maxW is { } bm ? $"board max {F(bm)} W" : null,
+                     dailyW is { } dw && limitW is { } lwNow && Math.Abs(dw - lwNow) > 0.5 ? $"daily {F(dw)} W; a trial set this one" : null,
+                     powerOk ? null : "outside the board's own range")));
 
         // The V/F curve: offsets move clocks along the curve, never the voltage past MAX (the rails row has MAX).
         var vf = Obj(s, "vf_curve");
@@ -120,12 +127,16 @@ public sealed partial class SettingsTools
         string curveNow = points is null or 0 ? "stock"
             : (minOff < 0 && maxOff > 0 ? $"{Sg(minOff)} to {Sg(maxOff)} MHz" : $"up to {Sg(maxOff > 0 ? maxOff : minOff)} MHz") + $" on {F(points)} points";
         string curveChange = maxOff > 0 ? $"⬆️ up to {Sg(maxOff)} MHz" : minOff < 0 ? $"⬇️ {Sg(minOff)} MHz" : "—";
-        rows.Add(new("📈", "V/F curve", "stock", curveNow, curveChange, vf == null ? Look : Safe,
-            vf == null ? "unreadable" : Join(topMhz is { } tm && topMv is { } tv ? $"tops out at {F(tm)} MHz @ {F(tv)} mV{(flat ? " (flat top)" : "")}" : null,
+        string? vfErr = Unread(vf);
+        if (vfErr != null) (curveNow, curveChange) = ("?", "?");
+        rows.Add(new("📈", "V/F curve", "stock", curveNow, curveChange, vfErr != null ? Look : Safe,
+            vfErr ?? Join(topMhz is { } tm && topMv is { } tv ? $"tops out at {F(tm)} MHz @ {F(tv)} mV{(flat ? " (flat top)" : "")}" : null,
                 "offsets move clocks, never the voltage limit")));
 
         // The P0 offsets: the core's only when set (the curve is the tool), memory always.
-        foreach (var (key, icon, name) in new[] { ("core", "🎯", "Core offset (P0)"), ("memory", "🧠", "Memory offset") })
+        if (Unread(Obj(s, "clock_offsets")) is { } offErr)
+            rows.Add(new("🧠", "Memory offset", "?", "?", "?", Look, offErr));
+        else foreach (var (key, icon, name) in new[] { ("core", "🎯", "Core offset (P0)"), ("memory", "🧠", "Memory offset") })
         {
             var o = Obj(s, "clock_offsets", key);
             double? now = Num(o, "offset_mhz"), stock = Num(o, "stock_mhz") ?? 0, min = Num(o, "min_mhz"), max = Num(o, "max_mhz");
@@ -172,6 +183,11 @@ public sealed partial class SettingsTools
         {
             var d = Obj(s, "clock_domains", key);
             double? off = Num(d, "offset_mhz"), offS = Num(d, "stock_offset_mhz") ?? 0, dem = Num(d, "vdemand_mv") ?? 0, demS = Num(d, "stock_vdemand_mv") ?? 0, clk = Num(d, "clock_mhz");
+            if (key == "xbar" && (Unread(Obj(s, "clock_domains")) ?? (off == null ? "unreadable" : null)) is { } domErr)
+            {
+                rows.Add(new("🔀", name, "?", "?", "?", Look, domErr));
+                continue;
+            }
             if (key != "xbar" && off == offS && dem == demS) continue;
             string mark = Safe, note;
             if (key != "xbar") { mark = Look; note = "not measured on the reference card"; }
@@ -233,6 +249,9 @@ public sealed partial class SettingsTools
     {
         var rows = new List<ReportRow>();
         var rd = Obj(l, "readings");
+        // No readings (NVML unreadable, the driver busy): say so, or the verdict could call an unread card healthy.
+        if (rd == null)
+            rows.Add(new("🌡️", "Live readings", "", "?", "", Look, Str(l, "error") is { } le ? $"unavailable: {le}" : "unavailable"));
         double? temp = Num(rd, "temp_c"), board = Num(rd, "board_w"), limit = Num(rd, "power_limit_w"), clock = Num(rd, "clock_mhz"),
             mv = Num(rd, "nvvdd_mv"), max = Num(rd, "nvvdd_max_mv"), util = Num(rd, "util_pct");
         // NVIDIA's own margin to the temperature where the GPU slows down, where the driver gives it; the fixed marks else.
@@ -402,6 +421,11 @@ public sealed partial class SettingsTools
                  "Whether it holds in every game is a separate question: stress tests and play answer that._");
         return b.ToString();
     }
+
+    /// <summary>Why a card_settings section cannot be judged: missing, or its read failed ({"error": ...}); null when it
+    /// can. A failed section is a JSON object too, so without this its rows read as stock and ✅.</summary>
+    private static string? Unread(JsonElement? section) =>
+        section is not { } x ? "unreadable" : Str(x, "error") is { } e ? $"unreadable: {e}" : null;
 
     private static JsonElement? Obj(JsonElement? e, params string[] path)
     {
