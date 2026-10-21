@@ -32,6 +32,8 @@ internal static class Program
                                    and Status (temperatures, target rpm; inferred); the channels' modes and NVML temperature beside them
           --diagnose               JSON: GET-only sweep over every readable slot with a known size
           --probe-size SLOT        JSON: which structure sizes the driver accepts for a readable slot
+            --probe-max HEX        up to this size (default 2000; PerfPerfLimits needs ~12200)
+            --probe-rev N          only this structure version (default 1..4)
           --version                print version and exit
           --help                   this text
 
@@ -186,6 +188,7 @@ internal static class Program
         int? gpuIndex = null; string? gpuId = null;
         var rails = new List<(Clocktail.Domain.Rails.Rail Rail, List<RailEdit> Edits)>();
         string? probeSize = null;
+        int probeMax = 0x2000, probeMinRev = 1, probeMaxRev = 4;
         var clocks = new List<(ClockDomain Domain, int Khz)>();
         var power = new List<(PowerRequestKind Kind, uint Mw)>();
         var fans = new List<(uint? Id, FanState State)>();
@@ -206,6 +209,13 @@ internal static class Program
                 case "--fan": fans.Add(FanCommands.ParseRequest(Next())); break;
                 case "--fan-curve": fanCurve = FanCommands.ParseCurve(Next()); break;
                 case "--probe-size": probeSize = Next(); break;
+                case "--probe-max":
+                    // A structure larger than 0x2000 (PerfPerfLimits' names run to ~0x12200): every size up to it, 4 bytes apart.
+                    probeMax = int.TryParse(Next().Replace("0x", "", StringComparison.OrdinalIgnoreCase), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var pm) && pm is >= 8 and <= 0x40000
+                        ? pm : throw new ArgumentException("--probe-max is a hex size, 8..40000."); break;
+                case "--probe-rev":
+                    probeMinRev = probeMaxRev = int.TryParse(Next(), NumberStyles.None, CultureInfo.InvariantCulture, out var pr) && pr is >= 1 and <= 15
+                        ? pr : throw new ArgumentException("--probe-rev is a version 1..15."); break;
                 case "--core-offset": clocks.Add((ClockDomain.Core, ParseKilohertz(Next()))); break;
                 case "--memory-offset": clocks.Add((ClockDomain.Memory, ParseKilohertz(Next()))); break;
                 case "--take-over": takeOver = true; break;
@@ -367,7 +377,7 @@ internal static class Program
         {
             if (!Enum.TryParse<Slot>(probeSize, ignoreCase: true, out var slot))
                 throw new ArgumentException($"'{probeSize}' is not a slot name; see nvapi_slots.csv.");
-            var probes = Diagnostics.ProbeSize(hw, session, slot);
+            var probes = Diagnostics.ProbeSize(hw, session, slot, probeMax, probeMinRev, probeMaxRev);
             Console.WriteLine(JsonSerializer.Serialize(probes.Select(p => new
             {
                 slot = p.Slot.ToString(), rev = p.Rev, accepted_sizes = p.AcceptedSizes.Select(x => $"0x{x:x}").ToArray(), tried = p.Tried, guard_broken = p.GuardBroken,
