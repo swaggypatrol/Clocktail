@@ -187,6 +187,13 @@ public static class WriteRegistry
                 return new Prepared(cell, plan, cannot);
             }),
 
+        new(ClockLimitWrites.Kind, "max | min | voltage", "kHz for the maximum and minimum clock, µV for the voltage lock (1500000 = Boost Lock); 0 or 'off' releases",
+            (hw, gpu, key, value, o) =>
+            {
+                var (cell, plan, cannot) = ClockLimitWrites.Prepare(key, value);
+                return new Prepared(cell, plan, cannot);
+            }),
+
         new(CurrentLimitWrites.Kind, "nvvdd | msvdd", "mA; the driver's range",
             (hw, gpu, key, value, o) =>
             {

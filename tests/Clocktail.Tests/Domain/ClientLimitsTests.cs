@@ -54,5 +54,11 @@ public class ClientLimitsTests
         var s = JsonDocument.Parse("""{"clock_locks":[{"entry":0,"mode":2,"value":2400000,"what":"maximum clock 2400 MHz"}]}""").RootElement;
         var row = Assert.Single(SettingsTools.ReportRows(s, JsonDocument.Parse("{}").RootElement), r => r.Name == "Clock lock");
         Assert.Equal(SettingsTools.Look, row.Mark);
+
+        // One Clocktail holds (set_clock_lock) is its own: information, not a stranger's lock.
+        var own = JsonDocument.Parse("""{"clock_locks":[{"entry":6,"mode":3,"value":1500000,"what":"Boost Lock: the card held at its top boost"}],"journal_holds":["clocklimit/voltage"]}""").RootElement;
+        var mine = Assert.Single(SettingsTools.ReportRows(own, JsonDocument.Parse("{}").RootElement), r => r.Name == "Clock lock");
+        Assert.Equal(SettingsTools.Info, mine.Mark);
+        Assert.Contains("set_clock_lock", mine.Note);
     }
 }

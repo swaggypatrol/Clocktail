@@ -75,9 +75,9 @@ public class CapabilitiesTests
         Assert.Contains("does not have it: missing", fans.Why);
 
         var clockLock = Assert.Single(map, c => c.Name == "clock lock");
-        Assert.Null(clockLock.Tool);
-        Assert.Contains("the driver has it", clockLock.Why);
-        Assert.Contains("the setter is off (7-domain layout check unknown)", clockLock.Why);
+        Assert.Equal("set_clock_lock", clockLock.Tool);
+        Assert.True(clockLock.Can, clockLock.Why);
+        Assert.Contains("for each write the tool makes", clockLock.Why);
         Assert.Equal("set_voltage_boost", Assert.Single(map, c => c.Name == "voltage boost").Tool);
         // adjust_xbar moves XBAR only: SYS and Video, NVVDD and F8 are the CLI's.
         Assert.Equal("adjust_xbar", Assert.Single(map, c => c.Name == "XBAR offset and voltage demand").Tool);

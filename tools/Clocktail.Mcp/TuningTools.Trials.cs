@@ -264,6 +264,58 @@ public sealed partial class TuningTools
         return Trial($"voltage boost ({key}) {now} → {percent} %", reason, new() { ["writes"] = new[] { TrialWrite(VoltBoost.Kind, key, percent) } });
     });
 
+    [McpServerTool(Name = "set_clock_lock", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Cap, hold or pin the core clock as a new trial, through the driver's client clock-limit record (the one nvidia-smi " +
+        "-lgc, a V/F point lock and Boost Lock all use): maxMhz caps the clock, minMhz holds it at least there (both: the " +
+        "range nvidia-smi -lgc sets), lockMv pins the core to the V/F point at that voltage, boostLock holds it at the " +
+        "curve's top even at idle. 0 (or boostLock false) releases that one; one left out stays as it is. A point lock and a " +
+        "clock range cannot be in force together. Uses: hold one point of the curve for a stress run (lockMv), or keep a test " +
+        "in one band while the wall would move it (minMhz/maxMhz). The lock outlives the trial only as the daily profile " +
+        "keeps it; card_settings clock_locks shows what is in force. On the reference card -lgc 1200,2400 held the clock at " +
+        "most 2392 MHz under load. back_to_daily, end_session and a crash put the daily profile's back (none: released); " +
+        "keep_as_daily keeps it.")]
+    public string SetClockLock(
+        [Description("Maximum core clock, MHz; 0 releases.")] double? maxMhz = null,
+        [Description("Minimum core clock, MHz; 0 releases.")] double? minMhz = null,
+        [Description("Pin the core to the V/F point at this voltage, mV (the nearest point); 0 releases.")] double? lockMv = null,
+        [Description("true holds the clock at the curve's top (Boost Lock); false releases it.")] bool? boostLock = null,
+        [Description("Why (what the lock is for).")] string? reason = null) => Guard(() =>
+    {
+        if (maxMhz is null && minMhz is null && lockMv is null && boostLock is null) throw new ArgumentException("nothing to set: give maxMhz, minMhz, lockMv or boostLock");
+        if (lockMv is > 0 && boostLock == true) throw new ArgumentException("a point lock and Boost Lock are the same entry: give one");
+        if (new[] { maxMhz, minMhz, lockMv }.Any(v => v < 0)) throw new ArgumentException("a value is positive, or 0 to release");
+        var now = card.WithDriver(ClientLimitsLayout.Read);
+        uint Held(int entry) => now.FirstOrDefault(l => l.Domain == entry)?.Value ?? 0;
+        uint max = maxMhz is { } a ? (uint)Math.Round(a * 1000) : Held(0), min = minMhz is { } b ? (uint)Math.Round(b * 1000) : Held(1);
+        uint voltage = Held(6);
+        string? point = null;
+        if (boostLock is { } bl) voltage = bl ? ClientLimitsLayout.BoostLockUv : voltage == ClientLimitsLayout.BoostLockUv ? 0 : voltage;
+        if (lockMv is { } mv)
+        {
+            if (mv == 0) voltage = 0;
+            else
+            {
+                var p = card.Read().Curve.Points.MinBy(x => Math.Abs((double)x.VoltageUv - mv * 1000)) ?? throw new InvalidOperationException("the V/F curve is unreadable");
+                voltage = p.VoltageUv;
+                point = string.Create(CultureInfo.InvariantCulture, $"point {p.Index}, {p.VoltageUv / 1000.0} mV, {p.EffectiveKhz / 1000.0} MHz");
+            }
+        }
+        if (voltage is > 0 and not ClientLimitsLayout.BoostLockUv && (max > 0 || min > 0))
+            throw new ArgumentException("a point lock and a clock range cannot be in force together: release the range (maxMhz 0, minMhz 0) or give no lockMv");
+        if (max > 0 && min > max) throw new ArgumentException(string.Create(CultureInfo.InvariantCulture, $"the minimum ({min / 1000.0} MHz) is above the maximum ({max / 1000.0} MHz)"));
+        // Releases first, then the side that moves away from the other: raising both, the maximum first.
+        var items = new List<(string Key, uint Value, uint Was)> { (ClockLimitWrites.MaxKey, max, Held(0)), (ClockLimitWrites.MinKey, min, Held(1)), (ClockLimitWrites.VoltageKey, voltage, Held(6)) }
+            .Where(i => i.Value != i.Was)
+            .OrderBy(i => i.Value == 0 ? 0 : 1).ThenBy(i => i.Key == ClockLimitWrites.MaxKey ? (max > Held(0) ? 0 : 1) : i.Key == ClockLimitWrites.MinKey ? (max > Held(0) ? 1 : 0) : 2)
+            .ToList();
+        if (items.Count == 0) throw new ArgumentException("that is what is in force already: nothing to try");
+        string Words(string key, uint v) => v == 0 ? $"{key} off" : key == ClockLimitWrites.VoltageKey
+            ? (v == ClientLimitsLayout.BoostLockUv ? "Boost Lock" : $"voltage locked at {v / 1000.0} mV ({point})")
+            : string.Create(CultureInfo.InvariantCulture, $"{key} clock {v / 1000.0} MHz");
+        return Trial("clock lock: " + string.Join(", ", items.Select(i => Words(i.Key, i.Value))), reason,
+            new() { ["writes"] = items.Select(i => TrialWrite(ClockLimitWrites.Kind, i.Key, i.Value)).ToList() });
+    });
+
     [McpServerTool(Name = "set_power_cap", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Set the additional board power request (F8, the CLI's --power-cap) as a new trial, beside the ordinary one " +
         "set_power_limit moves (FE). On a 5090 FE it does not exist until the first call creates it, and the driver offers " +

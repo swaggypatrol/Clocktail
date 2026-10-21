@@ -272,10 +272,14 @@ public sealed partial class SettingsTools
             rows.Add(new("💥", "Last crash", "", Str(crash, "found_at") is { } fa && DateTimeOffset.TryParse(fa, CultureInfo.InvariantCulture, out var when) ? when.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture) : "?", "", Look,
                 Join(Str(crash, "what"), Num(crash, "held") is { } n && n > 0 ? $"{F(n)} setting(s) were held; they were given back" : null, "data_points and read_log have the trial it happened in")));
         var locks = Arr(s, "clock_locks").Select(x => Str(x, "what")).OfType<string>().ToList();
+        bool ownLock = Arr(s, "journal_holds").Any(h => h.ValueKind == JsonValueKind.String && h.GetString()!.StartsWith(Clocktail.Domain.Clocks.ClockLimitWrites.Kind + "/", StringComparison.Ordinal));
         if (locks.Count > 0)
-            rows.Add(new("🔒", "Clock lock", "", string.Join("; ", locks), "", Look,
-                "set by another tool, not Clocktail, and still in force: a stress run or a curve test measures the lock, not the curve. " +
-                "`nvidia-smi -rgc` releases NVML's locked clocks; a point lock or Boost Lock, the tool that set it"));
+            rows.Add(ownLock
+                ? new("🔒", "Clock lock", "", string.Join("; ", locks), "", Info,
+                    "set by Clocktail (set_clock_lock): a stress run or a curve test measures the lock, not the curve; back_to_daily releases it unless the daily profile keeps it")
+                : new("🔒", "Clock lock", "", string.Join("; ", locks), "", Look,
+                    "set by another tool, not Clocktail, and still in force: a stress run or a curve test measures the lock, not the curve. " +
+                    "`nvidia-smi -rgc` releases NVML's locked clocks; a point lock or Boost Lock, the tool that set it"));
         var rd = Obj(l, "readings");
         // No readings (NVML unreadable, the driver busy): say so, or the verdict could call an unread card healthy.
         if (rd == null)

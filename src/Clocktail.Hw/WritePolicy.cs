@@ -288,8 +288,24 @@ public static class WritePolicies
                 return i >= 0 ? $"+0x{e + 0x304 + i:x} must be zero (outside the selected entry)" : null;
             })),
 
-        Off(Slot.PerfClientLimitsSetStatus, "kind 8", "7-domain layout check unknown", complete: false,
-            new ExactSize(0x30c), new Dword(0, 0x2030c)),
+        // The original's one-entry request (FUN_1401b6d50): the record cleared, +8 = 1, one entry at +0xc. Entry 0/1 are the
+        // maximum/minimum clock (mode 2, kHz), entry 6 the voltage lock (mode 3, µV; 1.5 V is Boost Lock); mode 0 with
+        // value 0 releases. Off by default: a clock-limit write enables it for itself.
+        Off(Slot.PerfClientLimitsSetStatus, "kind 8", "enabled per write (clocklimit)", complete: true,
+            new ExactSize(0x30c), new Dword(0, 0x2030c), new Dword(4, 0), new Dword(8, 1),
+            new Custom("one entry: the max/min clock (0/1, mode 2, at most 5 GHz) or the voltage lock (6, mode 3, 450 mV..1.5 V), or mode 0 with value 0 to release; every other byte zero", b =>
+            {
+                static uint U(ReadOnlySpan<byte> s, int o) => BinaryPrimitives.ReadUInt32LittleEndian(s[o..]);
+                int rest = b[0x24..].IndexOfAnyExcept((byte)0);
+                if (rest >= 0) return $"+0x{0x24 + rest:x} must be zero (one entry only)";
+                if (U(b, 0x10) != 0 || U(b, 0x18) != 0 || U(b, 0x20) != 0) return "the entry's reserved words must be zero";
+                uint dom = U(b, 0xc), mode = U(b, 0x14), value = U(b, 0x1c);
+                if (dom is not (0 or 1 or 6)) return $"entry {dom} is not a clock limit Clocktail writes";
+                if (mode == 0) return value == 0 ? null : "mode 0 releases an entry, with value 0";
+                if (mode != (dom == 6 ? 3u : 2u)) return $"entry {dom} takes mode {(dom == 6 ? 3 : 2)}, not {mode}";
+                bool inRange = dom == 6 ? value is >= 450_000 and <= 1_500_000 : value is > 0 and <= 5_000_000;
+                return inRange ? null : $"value {value} is outside entry {dom}'s range";
+            })),
 
         Off(Slot.ClockClkPropTopRelsSetControl, "kind 9 (inferred)", "unverified; off by design", complete: false,
             new ExactSize(0x75c), new Dword(0, 0x1075c), new Dword(4, 0x3fff),
