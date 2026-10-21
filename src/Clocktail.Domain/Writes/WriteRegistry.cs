@@ -27,7 +27,9 @@ namespace Clocktail.Domain.Writes;
 /// recovery exists to undo. A path that takes an origin gets the value itself as the origin.</item>
 /// </list>
 /// </summary>
-public sealed record WriteOptions(bool AllowCreate = false, bool IsRecovery = false, string? Original = null)
+/// <param name="CurveFollows">A P0 offset write whose caller gives the curve back right after it (recovery with the
+/// curve in its set): the wipe a Pstates20 write does to the V/F points is then not a reason to refuse it.</param>
+public sealed record WriteOptions(bool AllowCreate = false, bool IsRecovery = false, string? Original = null, bool CurveFollows = false)
 {
     public static readonly WriteOptions None = new();
     public static readonly WriteOptions Recovery = new(AllowCreate: true, IsRecovery: true);
@@ -99,8 +101,8 @@ public static class WriteRegistry
                 if (!int.TryParse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var khz))
                     return new Prepared(cell, null, $"'{value}' is not a number of kilohertz");
                 // The points are read here: the core offset spends one firmware budget with them, and any Pstates20
-                // write resets them. Recovery too: see ClockOffsets.Plan.
-                return new Prepared(cell, ClockOffsets.Plan(domain, khz, ClockOffsets.Curve(hw, gpu)));
+                // write resets them. Recovery too: see ClockOffsets.Plan. Not when the curve is given back right after.
+                return new Prepared(cell, ClockOffsets.Plan(domain, khz, o.CurveFollows ? null : ClockOffsets.Curve(hw, gpu)));
             }),
 
         new(PowerCap.Kind, "fe | f8", "mW, or 'absent'",

@@ -1,5 +1,6 @@
 using Clocktail.Domain.Clocks;
 using Clocktail.Domain.Ownership;
+using Clocktail.Domain.Vf;
 using Clocktail.Domain.Writes;
 using Clocktail.Hw;
 
@@ -91,11 +92,15 @@ public sealed class Recovery(NvClient hw, OwnershipJournal journal, ApplySentine
         if (!blocked) sentinel.Begin("recovery", takeOver: false, string.Join("; ", plan.Items.Select(i => $"{i.Id} <- {i.Original}")));
         var writer = new OwnedWriter(hw, journal, sentinel, host);
         bool needsWrite = false;
-        // P0 offsets last: a Pstates20 write resets the V/F point offsets, so the curve is given back first and the P0
-        // write then finds it at 0 (or, with a curve that was there before us, is refused rather than wiping it).
-        foreach (var i in plan.Items.OrderBy(i => i.Kind == ClockOffsets.Kind ? 1 : 0))
+        // P0 offsets first: a Pstates20 write resets the V/F point offsets, so with the curve in the set the P0 offsets go
+        // back first, wiping the curve this broker holds, and the curve's original goes back after them. Giving the curve
+        // back first stranded a P0 offset whenever the curve's original was not all zero: the ST08 drill of 2026-10-21 (an
+        // original of +15 MHz on every point, from before Clocktail's first write) left the memory offset refused, and the
+        // daily profile after it. Without the curve in the set a P0 write over a curve that is not ours is still refused.
+        bool curveFollows = plan.Items.Any(i => i.Kind == VfWrites.Kind);
+        foreach (var i in plan.Items.OrderBy(i => i.Kind == ClockOffsets.Kind ? 0 : 1))
         {
-            var (item, needsAdmin) = GiveBack(gpu, writer, i, canWrite);
+            var (item, needsAdmin) = GiveBack(gpu, writer, i, canWrite, curveFollows);
             items.Add(item);
             needsWrite |= needsAdmin;
         }
@@ -107,7 +112,7 @@ public sealed class Recovery(NvClient hw, OwnershipJournal journal, ApplySentine
         return new RecoveryResult(plan.Reason, plan.Detail, items, journalCleared, !sentinel.IsBlocked(out _), needsWrite);
     }
 
-    private (RecoveredItem Item, bool NeedsAdmin) GiveBack(GpuSession gpu, OwnedWriter writer, OwnedItem item, bool canWrite)
+    private (RecoveredItem Item, bool NeedsAdmin) GiveBack(GpuSession gpu, OwnedWriter writer, OwnedItem item, bool canWrite, bool curveFollows)
     {
         RecoveredItem Item(string? current, RecoveryAction action, string detail, TxResult? tx, bool known) =>
             new(item.Kind, item.Key, item.Original, current, action, detail, tx, known);
@@ -119,7 +124,7 @@ public sealed class Recovery(NvClient hw, OwnershipJournal journal, ApplySentine
         if (path == null)
             return (Item(null, RecoveryAction.Refused, $"this version cannot give back '{item.Kind}/{item.Key}'", null, false), false);
         Prepared prepared;
-        try { prepared = path.Prepare(hw, gpu, item.Key, item.Original, WriteOptions.Recovery); }
+        try { prepared = path.Prepare(hw, gpu, item.Key, item.Original, WriteOptions.Recovery with { CurveFollows = curveFollows && item.Kind == ClockOffsets.Kind }); }
         catch (Exception e) when (e is ArgumentException or FormatException or OverflowException or InvalidDataException or InvalidOperationException)
         {
             return (Item(null, RecoveryAction.Refused, $"the record or the driver could not be read: {e.Message}", null, false), false);

@@ -1276,6 +1276,60 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Empty(_journal.Inspect().Items);
     }
 
+    /// <summary>
+    /// The ST08 drill (2026-10-21): the curve's original was +15 MHz on every point (left by another tool before
+    /// Clocktail's first write). Recovery gave that curve back first and then refused the memory offset (a P0 write over
+    /// a curve not ours), and after a device restart the daily profile's memory offset was refused the same way, so the
+    /// profile did not go back on. Now recovery gives the P0 offsets back first, the curve after them, and the profile
+    /// sets a curve it does not hold aside when it writes its own right after.
+    /// </summary>
+    [Fact]
+    public void A_curve_original_that_is_not_zero_strands_neither_recovery_nor_the_profile()
+    {
+        new FakeVf().Install();
+        var table = FakeDriver.State[FakeVf.PstatesWord];
+        int mem = Clocktail.Domain.Clocks.Pstates20Layout.Clock(0, 1);
+        W(table, 0xc, 2);
+        W(table, mem, (uint)Clocktail.Domain.Clocks.ClockDomain.Memory); W(table, mem + 8, 1);
+        BinaryPrimitives.WriteInt32LittleEndian(table.AsSpan(mem + 0x10), -1_000_000);
+        BinaryPrimitives.WriteInt32LittleEndian(table.AsSpan(mem + 0x14), 3_000_000);
+        var vfApplier = FakeDriver.RequestApplier!;
+        FakeDriver.RequestApplier = (state, req) =>
+        {
+            if (BitConverter.ToUInt32(req) != FakeVf.PstatesWord) return vfApplier(state, req);
+            var next = (byte[])state.Clone();
+            int entry = BinaryPrimitives.ReadUInt32LittleEndian(req.AsSpan(0x1c)) == (uint)Clocktail.Domain.Clocks.ClockDomain.Memory ? mem : Clocktail.Domain.Clocks.Pstates20Layout.Clock(0, 0);
+            req.AsSpan(0x28, 4).CopyTo(next.AsSpan(entry + 0xc));
+            var control = FakeDriver.State[FakeVf.ControlWord];
+            for (int i = 0; i < 127; i++) control.AsSpan(VfLayout.OffsetField(i), 4).Clear();
+            return next;
+        };
+        var hw = new NvClient(FakeDriver.ApiFor(
+            [Slot.ClockClientClkVfPointsGetInfo, Slot.ClockClientClkVfPointsGetStatus, Slot.ClockClientClkVfPointsGetControl, Slot.GetPstates20],
+            [Slot.ClockClientClkVfPointsSetControl, Slot.SetPstates20]), WritePolicySet.Default.WithEnabled(Slot.ClockClientClkVfPointsSetControl));
+        int MemoryKhz() => BinaryPrimitives.ReadInt32LittleEndian(FakeDriver.State[FakeVf.PstatesWord].AsSpan(mem + 0xc));
+        var d = new BrokerDispatcher(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true);
+
+        const string other = "15000*127", daily = "0*60,30000*67";
+        Assert.True(d.Dispatch(Curve(other)).Ok);
+        _journal.Release(VfWrites.Kind, VfWrites.CoreKey);                 // another tool's curve, on before Clocktail's first write
+        Assert.True(d.Dispatch(Curve(daily)).Ok);                          // the journal's original for the curve: +15 everywhere
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"drill"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = daily, change = "memory +358", memory_khz = 358_000, keep_curve = true }))).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep")).Ok);
+
+        var rec = d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover));
+        Assert.True(rec.Ok, rec.Error);
+        Assert.Equal(0, MemoryKhz());
+        Assert.Equal(VfOffsets.Decode(other), FakeVf.Offsets());           // every original back, the memory offset too
+        Assert.Empty(_journal.Inspect().Items);
+
+        var apply = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "the broker started"));
+        Assert.True(apply.Ok, apply.Error);
+        Assert.Equal(358_000, MemoryKhz());
+        Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());
+    }
+
     [Fact]
     public void Recover_says_per_item_whether_the_hardware_state_is_known()
     {

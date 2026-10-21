@@ -897,16 +897,17 @@ public sealed class BrokerDispatcher
     /// write changes the P0 offset and the curve on the card is one this broker holds, the curve goes to 0 first; the
     /// caller writes it back after it in the same run (the trial's curve, the profile's, or the held original: a P0
     /// write ranks before the curve). Null when nothing needs setting aside. A curve this broker does not hold stays,
-    /// and the path's refusal stands: it is not ours to wipe.
+    /// and the path's refusal stands: it is not ours to wipe, unless <paramref name="curveFollows"/> says the caller
+    /// writes a curve of its own right after (the daily profile with its curve, after a reset left another one on).
     /// </summary>
-    private BrokerResponse? CurveAside(IGpuTarget target, string key, string value)
+    private BrokerResponse? CurveAside(IGpuTarget target, string key, string value, bool curveFollows = false)
     {
         if (!int.TryParse(value, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var khz)) return null;
         var domain = key == ClockOffsets.Key(ClockDomain.Memory) ? ClockDomain.Memory : ClockDomain.Core;
         if (Pstates20Reader.Read(_hw, target.Session).P0(domain)?.DeltaKhz == khz) return null;   // no change: nothing is reset
         var offsets = VfReader.Read(_hw, target.Session).Offsets();
         if (offsets.All(o => o == 0)) return null;
-        if (!target.Journal.Inspect().Items.Any(i => i.Kind == VfWrites.Kind)) return null;
+        if (!curveFollows && !target.Journal.Inspect().Items.Any(i => i.Kind == VfWrites.Kind)) return null;
         return Dispatch(new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: VfWrites.Kind, Key: VfWrites.CoreKey,
             Value: VfOffsets.Encode(new int[offsets.Length]), EnableSlots: [nameof(Slot.ClockClientClkVfPointsSetControl)]));
     }
@@ -982,10 +983,11 @@ public sealed class BrokerDispatcher
             if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
             if (!r.Ok) return new BrokerResponse(false, r.Error ?? $"{held.Id} did not go back", Element(new { success = false, path, profile, applied }), r.Code);
         }
+        bool curveFollows = writing is { Suspended: false } && writing.Writes.Where(only ?? (_ => true)).Any(w => w.Kind == VfWrites.Kind);
         if (writing is { Suspended: false })
             foreach (var w in writing.Writes.Where(only ?? (_ => true)))
             {
-                if (w.Kind == ClockOffsets.Kind && CurveAside(target, w.Key, w.Value) is { } aside)
+                if (w.Kind == ClockOffsets.Kind && CurveAside(target, w.Key, w.Value, curveFollows) is { } aside)
                 {
                     if (aside.Result is { } ar && ar.TryGetProperty("applied", out var aa)) applied.Add(aa[0]);
                     if (!aside.Ok) return new BrokerResponse(false, aside.Error ?? "the curve could not be set aside for a P0 write", Element(new { success = false, path, profile, applied }), aside.Code);
