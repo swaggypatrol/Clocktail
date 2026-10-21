@@ -233,8 +233,13 @@ public sealed partial class SettingsTools
             bool ours = holds.Any(h => h?.StartsWith("fan/", StringComparison.Ordinal) == true);
             string fanNote = !manual ? "" : !known ? "held at a fixed duty; whether Clocktail set it is unknown (the journal could not be read)"
                 : ours ? "a trial holds them; back_to_daily gives them back" : "held at a fixed duty by something other than Clocktail: back_to_daily will not give them back; the tool that set it, or its 'auto', does";
-            rows.Add(new("🌀", "Fans", "auto", manual ? $"held at {F(duty)} %" : "auto", manual ? "held" : "—", manual && !ours ? Look : Safe,
-                Join(rpm is { } r ? (r == 0 ? "stopped (idle, normal)" : $"{F(rpm)} rpm, {F(duty)} %") : null, fanNote is { Length: > 0 } fn ? fn : null)));
+            // The tachometers against the rpm the firmware's curve asks for (the highest editable policy's target).
+            uint? target = Arr(s, "fans", "curves").Where(c => Bool(c, "editable") == true).Select(c => Num(c, "target_rpm")).Max() is { } tr ? (uint)tr : null;
+            var health = Clocktail.Domain.Fan.FanHealth.Check(
+                [.. channels.Select(c => ((uint)(Num(c, "id") ?? 0), (uint)(Num(c, "rpm") ?? 0), Str(c, "mode") == "manual"))], target);
+            string mark = health is { Stopped: true } ? Act : health != null || manual && !ours ? Look : Safe;
+            rows.Add(new("🌀", "Fans", "auto", manual ? $"held at {F(duty)} %" : "auto", manual ? "held" : "—", mark,
+                Join(rpm is { } r ? (r == 0 ? "stopped (idle, normal)" : $"{F(rpm)} rpm, {F(duty)} %") : null, fanNote is { Length: > 0 } fn ? fn : null, health?.Note)));
         }
 
         // Current limits: never above the VBIOS default.

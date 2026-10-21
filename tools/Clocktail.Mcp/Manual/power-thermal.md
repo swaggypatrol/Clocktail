@@ -26,3 +26,4 @@ The wall, what a watt buys, current limits, the fan curve and what temperature c
 - The fan curve follows a temperature 1.5-2.5 C under NVML's while heating.
 - Do not stress at 600 W with fans held at 45 % or less.
 - `set_fan_curve` changes the curve (a trial, kept by `keep_as_daily`); `set_fan_speed` holds a fixed duty for a test (never kept). Set the curve before tuning the V/F curve: `manual method`, phase 2.
+- **Fan health:** under the firmware's curve each fan's tachometer follows the target rpm to ±5 rpm, so card_report flags a fan more than 25 % (and 300 rpm) off the target as ⚠️, and a fan at 0 rpm while the curve asks for more than 1000 as ⛔ (stopped or disconnected). NVML's fan % is the PWM the firmware gives to reach that rpm, not the curve's duty column (65 % against 59.6 % at 79 °C on the reference card). With the fans stopped at idle the card warms by itself until the curve temperature reaches 50 °C, then they start (43 °C stops them again): normal.
