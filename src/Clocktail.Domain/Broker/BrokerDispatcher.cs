@@ -221,27 +221,30 @@ public sealed class BrokerDispatcher
         {
             case "show":
                 return Ok(new { success = true, path, profile });
+            case "preview":
+            {
+                // What keep, or a preset or saved profile (Value: its name), would make the daily profile, against the daily
+                // profile and the card: nothing is written or saved. The agent shows it before asking.
+                var (writes, left) = req.Value is { Length: > 0 } name ? (PresetWrites(target, name), []) : KeepWrites(target, profile);
+                var cardNow = CardValues(target, writes);
+                return Ok(new
+                {
+                    success = true,
+                    source = req.Value is { Length: > 0 } n ? $"'{n}'" : "keep_as_daily",
+                    changes = DailyProfile.InWriteOrder(writes).Select(w => new
+                    {
+                        kind = w.Kind, key = w.Key, becomes = w.Value,
+                        daily_now = profile?.Writes.FirstOrDefault(d => d.Kind == w.Kind && d.Key == w.Key)?.Value,
+                        card_now = cardNow.GetValueOrDefault($"{w.Kind}/{w.Key}"),
+                    }).Where(c => c.becomes != c.daily_now),
+                    dropped = profile?.Writes.Where(d => !writes.Any(w => w.Kind == d.Kind && w.Key == d.Key)).Select(d => $"{d.Kind}/{d.Key} = {d.Value}"),
+                    not_kept = left,
+                });
+            }
             case "keep":
             {
-                var writes = new List<ProfileWrite>();
-                var writer = new OwnedWriter(_hw, target.Journal, target.Sentinel, _host);
-                // A wall a trial set was lowered to sample the curve lower down: never the daily one, with a profile kept
-                // or not (the daily wall is set on its own: "wall").
+                var (writes, _) = KeepWrites(target, profile);
                 bool trialWall = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial?.PowerMw != null;
-                foreach (var item in target.Journal.Inspect().Items)
-                {
-                    if (TrialOnly(item)) continue;   // a trial's current limit or fixed fan duty, never the daily profile's
-                    if (trialWall && item.Kind == PowerCap.Kind) continue;
-                    var wp = WriteRegistry.Find(item.Kind) ?? throw new InvalidOperationException($"this version cannot keep '{item.Id}'");
-                    var cell = wp.Prepare(_hw, target.Session, item.Key, item.Original, WriteOptions.Recovery).Cell;
-                    var now = writer.Look(target.Session, cell) ?? throw new InvalidOperationException($"{cell.Id} could not be read; nothing kept");
-                    if (now != item.Original) writes.Add(new ProfileWrite(item.Kind, item.Key, now));
-                }
-                // Once a profile is kept, what an agent tunes is taken from the card (DailyProfile.KeptFromCard): the curves,
-                // the memory offset, MSVDD, XBAR/SYS/Video. The wall stays as kept, so a wall lowered to sample the curve
-                // lower down never becomes the daily one.
-                if (profile != null)
-                    writes = [.. profile.Writes.Where(w => !DailyProfile.KeptFromCard(w.Kind, w.Key)), .. writes.Where(w => DailyProfile.KeptFromCard(w.Kind, w.Key))];
                 if (writes.Count == 0) return Fail("nothing this broker holds differs from stock; nothing to keep", BrokerCode.CannotWrite);
                 var trialKept = CloseTrial(target, Experiment.Stable, "kept as the daily profile");
                 string listed = string.Join("; ", writes.Select(w => $"{w.Kind}/{w.Key}={w.Value}"));
@@ -421,7 +424,7 @@ public sealed class BrokerDispatcher
                 return r;
             }
             default:
-                return Fail($"profile needs show, keep, off, apply, resume, load, preset, save, saved, forget, wall, apply-power, crashed or after-reset, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"profile needs show, preview, keep, off, apply, resume, load, preset, save, saved, forget, wall, apply-power, crashed or after-reset, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 
@@ -668,6 +671,64 @@ public sealed class BrokerDispatcher
     /// the memory offset, XBAR, MSVDD), so the card is the profile and stock everywhere else. Part of it (the wall alone,
     /// right after a driver reset or at a keep): only the trial-only cells, a wall and MSVDD's offsets the profile does
     /// not hold, nothing that needs an idle GPU.</summary>
+    /// <summary>
+    /// What "keep" would save: every cell this broker holds, at its value on the card, but not a trial's current limits or
+    /// fixed fan duty, nor a wall a trial lowered; once a profile is kept, only what an agent tunes is taken from the card
+    /// (DailyProfile.KeptFromCard) and the wall stays as kept. The second list says what is held and not kept, and why.
+    /// </summary>
+    private (List<ProfileWrite> Writes, List<string> NotKept) KeepWrites(IGpuTarget target, DailyProfile? profile)
+    {
+        var writes = new List<ProfileWrite>();
+        var notKept = new List<string>();
+        var writer = new OwnedWriter(_hw, target.Journal, target.Sentinel, _host);
+        // A wall a trial set was lowered to sample the curve lower down: never the daily one, with a profile kept
+        // or not (the daily wall is set on its own: "wall").
+        bool trialWall = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial?.PowerMw != null;
+        foreach (var item in target.Journal.Inspect().Items)
+        {
+            if (TrialOnly(item)) { notKept.Add($"{item.Id}: trial-only (a current limit or a fixed fan duty)"); continue; }
+            if (trialWall && item.Kind == PowerCap.Kind) { notKept.Add($"{item.Id}: a trial's wall; the daily wall is set with set_daily_power_limit"); continue; }
+            var wp = WriteRegistry.Find(item.Kind) ?? throw new InvalidOperationException($"this version cannot keep '{item.Id}'");
+            var cell = wp.Prepare(_hw, target.Session, item.Key, item.Original, WriteOptions.Recovery).Cell;
+            var now = writer.Look(target.Session, cell) ?? throw new InvalidOperationException($"{cell.Id} could not be read; nothing kept");
+            if (now != item.Original) writes.Add(new ProfileWrite(item.Kind, item.Key, now));
+        }
+        // Once a profile is kept, what an agent tunes is taken from the card (DailyProfile.KeptFromCard): the curves,
+        // the memory offset, MSVDD, XBAR/SYS/Video. The wall stays as kept, so a wall lowered to sample the curve
+        // lower down never becomes the daily one.
+        if (profile != null)
+        {
+            notKept.AddRange(writes.Where(w => !DailyProfile.KeptFromCard(w.Kind, w.Key)).Select(w => $"{w.Kind}/{w.Key}: stays as the daily profile keeps it"));
+            writes = [.. profile.Writes.Where(w => !DailyProfile.KeptFromCard(w.Kind, w.Key)), .. writes.Where(w => DailyProfile.KeptFromCard(w.Kind, w.Key))];
+        }
+        return (writes, notKept);
+    }
+
+    /// <summary>A preset's writes, or a saved profile's, by name; throws when there is neither, or the preset is another model's.</summary>
+    private static List<ProfileWrite> PresetWrites(IGpuTarget target, string name)
+    {
+        if (Presets.Find(name) is { } preset)
+            return preset.Fits(target.Name) ? [.. preset.Writes] : throw new ArgumentException($"'{preset.Name}' was tuned on an {preset.Gpu}; this card is {target.Name}");
+        return SavedProfiles.Find(SavedProfiles.PathBeside(target.Journal.Path), name) is var (_, saved)
+            ? [.. saved.Writes] : throw new ArgumentException($"no preset or saved profile named '{name}'");
+    }
+
+    /// <summary>Each written cell's value on the card now, by "kind/key"; a cell that cannot be read is left out.</summary>
+    private Dictionary<string, string> CardValues(IGpuTarget target, IEnumerable<ProfileWrite> writes)
+    {
+        var writer = new OwnedWriter(_hw, target.Journal, target.Sentinel, _host);
+        var values = new Dictionary<string, string>();
+        foreach (var w in writes)
+            try
+            {
+                if (WriteRegistry.Find(w.Kind) is not { } wp) continue;
+                var cell = wp.Prepare(_hw, target.Session, w.Key, w.Value, WriteOptions.Recovery).Cell;
+                if (writer.Look(target.Session, cell) is { } now) values[$"{w.Kind}/{w.Key}"] = now;
+            }
+            catch (Exception e) when (e is ArgumentException or InvalidOperationException or InvalidDataException or FormatException) { }
+        return values;
+    }
+
     /// <summary>"preset" with a saved profile's name: it becomes the daily profile and goes on, as a preset does.</summary>
     private BrokerResponse LoadSaved(IGpuTarget target, string? value, DailyProfile? profile, string path)
     {

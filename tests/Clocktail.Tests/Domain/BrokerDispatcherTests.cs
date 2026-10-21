@@ -782,6 +782,28 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("Trial-only settings handed back", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
+    /// <summary>preview: what keep would save, against the daily profile and the card, with what is held and not kept;
+    /// nothing is written or saved.</summary>
+    [Fact]
+    public void A_preview_lists_what_keep_would_save_and_writes_nothing()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 560_000)).Ok);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"x"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "NVVDD 350 A", nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+        int sets = FakeDriver.Sets;
+
+        var p = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preview"));
+        Assert.True(p.Ok, p.Error);
+        var change = Assert.Single(p.Result!.Value.GetProperty("changes").EnumerateArray());
+        Assert.Equal(("power", "560000", "560000"), (change.GetProperty("kind").GetString(), change.GetProperty("becomes").GetString(), change.GetProperty("card_now").GetString()));
+        Assert.Contains("trial-only", p.Result!.Value.GetProperty("not_kept")[0].GetString());
+        Assert.Equal(sets, FakeDriver.Sets);
+        Assert.False(File.Exists(DailyProfile.PathBeside(_journal.Path)));
+        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preview", Value: "founders")).Ok);   // another model
+    }
+
     /// <summary>The fan guard's "fans-back" hands back a fixed fan duty only: a lowered current limit lowers power, so it
     /// stays, and with no fan duty held nothing is written or recorded.</summary>
     [Fact]

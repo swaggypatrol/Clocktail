@@ -662,9 +662,17 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "every driver reset again. Fails when no daily profile is kept (a fresh install: offer a preset instead).")]
     public string LoadDaily() => Applied(card.Broker(BrokerRequest.OpProfile, "load"), null);
 
+    [McpServerTool(Name = "preview_daily", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description(
+        "What the daily profile would become, before asking the person: with no name, what keep_as_daily would keep (every " +
+        "cell on the card this trial and the ones before it touched, not only the last step), and what it would not keep and " +
+        "why; with a preset's or saved profile's name, what load_preset would load. Each change is daily now → becomes, with " +
+        "the card's value now. Writes nothing. Show it, then ask.")]
+    public string PreviewDaily([Description("A preset's or saved profile's name; omit for keep_as_daily.")] string? name = null) =>
+        Reply(card.Broker(BrokerRequest.OpProfile, "preview", name));
+
     [McpServerTool(Name = "keep_as_daily", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make what the trials set on the card the new daily profile, permanently: it goes on at every start and after " +
-        "every driver reset from then on. Kept from the card: the V/F curve, the fan curve, the memory offset, MSVDD's offsets, " +
+        "every driver reset from then on. Show preview_daily first: it lists exactly what would be kept. Kept from the card: the V/F curve, the fan curve, the memory offset, MSVDD's offsets, " +
         "XBAR's offset and voltage demand. Not kept: the power limit (it stays the daily profile's; set_daily_power_limit " +
         "changes it), current limits and fixed fan duties; a trial's lowered wall, limit or fixed fans go back at once. " +
         "Everything a trial set is kept, not just the last change: call back_to_daily first if only the curve should be. " +
@@ -717,7 +725,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "Make a preset, or a profile saved with save_profile, the daily profile and put it on the card now: it replaces the " +
         "daily profile (the old one goes into the tuning log; save_profile it first if the person may want it back) and goes on " +
         "at every start from then on. A preset only loads on the card model it was tuned on, and another card of that model " +
-        "is still other silicon: after loading one, run stress_test before trusting it. Ask the person before calling this.")]
+        "is still other silicon: after loading one, run stress_test before trusting it. Show preview_daily with the name " +
+        "first, then ask the person before calling this.")]
     public string LoadPreset([Description("The preset's or saved profile's name, from list_presets.")] string name) =>
         Applied(card.Broker(BrokerRequest.OpProfile, "preset", name), null);
 
