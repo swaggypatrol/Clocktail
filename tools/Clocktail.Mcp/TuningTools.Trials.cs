@@ -119,6 +119,36 @@ public sealed partial class TuningTools
             reason, new() { ["memory_khz"] = khz });
     });
 
+    [McpServerTool(Name = "set_core_offset", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Set the core's P0 clock offset as a new trial: MHz added to every point of the V/F curve at once (stock curve + N), " +
+        "beside the point offsets adjust_curve moves. The two spend one firmware offset budget, and a P0 write zeroes the " +
+        "curve's point offsets, so the curve on the card is written again right after it in the same trial. At most 15 MHz " +
+        "from where it is per call (CLOCKTAIL_MCP_STEP_MHZ), at most 200 MHz above the daily profile's " +
+        "(CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ), within the driver's range. On the reference card +15 gave +15/+22/+15 MHz at " +
+        "the same voltage. The edge differs by voltage, so a band is adjust_curve's; this shifts the whole curve. " +
+        "keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
+    public string SetCoreOffset(
+        [Description("The core P0 offset to try, MHz (absolute, not a delta).")] double mhz,
+        [Description("Why this step.")] string? reason = null) => Guard(() =>
+    {
+        var p0 = card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Core) ?? throw new InvalidOperationException("the core offset is unreadable");
+        int khz = (int)Math.Round(mhz * 1000), now = p0.DeltaKhz;
+        if (khz == now) throw new ArgumentException($"the core offset is {now / 1000.0} MHz already: nothing to try");
+        if (Math.Abs(khz - now) > StepMhz * 1000)
+            throw new ArgumentException($"a step is at most {StepMhz} MHz (CLOCKTAIL_MCP_STEP_MHZ); it is {now / 1000.0} MHz now");
+        if (khz < p0.MinKhz || khz > p0.MaxKhz)
+            throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000.0}..{p0.MaxKhz / 1000.0} MHz");
+        int daily = int.TryParse(DailyWrite(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Core)), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var d) ? d : 0;
+        if (khz > daily + MaxAboveDailyMhz * 1000)
+            throw new ArgumentException($"at most {MaxAboveDailyMhz} MHz above the daily profile's {daily / 1000.0:+0.#;-0.#;0} MHz (CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ)");
+        return Trial(string.Create(CultureInfo.InvariantCulture, $"core offset {now / 1000.0:+0.#;-0.#;0} → {khz / 1000.0:+0.#;-0.#;0} MHz"),
+            reason, new() { ["writes"] = new[] { TrialWrite(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Core), khz) } });
+    });
+
+    /// <summary>One item of a trial's "writes": any registry write, through its own path and rules.</summary>
+    private static object TrialWrite(string kind, string key, object value) =>
+        new { kind, key, value = Convert.ToString(value, CultureInfo.InvariantCulture) };
+
     [McpServerTool(Name = "adjust_xbar", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Move XBAR's clock offset and/or its voltage demand (on MSVDD) as a new trial. XBAR is the crossbar between the GPCs, " +
         "L2 and memory; under load it is held to about 0.9 x the core clock, and about +250 MHz of offset reaches that, after " +

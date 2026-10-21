@@ -1052,6 +1052,17 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         return now;
     }
 
+    /// <summary>The value the daily profile keeps for one cell; null when it keeps none, is suspended or cannot be read.</summary>
+    private string? DailyWrite(string kind, string key)
+    {
+        var r = card.Broker(BrokerRequest.OpProfile, "show");
+        if (!r.Ok || r.Result is not { } res || res.GetProperty("profile") is not { ValueKind: JsonValueKind.Object } p || p.GetProperty("Suspended").GetBoolean()) return null;
+        foreach (var w in p.GetProperty("Writes").EnumerateArray())
+            if (w.GetProperty("Kind").GetString() == kind && w.GetProperty("Key").GetString() == key)
+                return w.GetProperty("Value").GetString();
+        return null;
+    }
+
     /// <summary>The MSVDD offsets the daily profile keeps; null when it keeps none, is suspended or cannot be read.</summary>
     private RailOffsets? DailyMsvdd()
     {

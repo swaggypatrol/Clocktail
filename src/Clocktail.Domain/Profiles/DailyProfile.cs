@@ -64,13 +64,12 @@ public sealed record DailyProfile(
     };
 
     /// <summary>What keep takes from the card even when a profile is kept already: everything an agent tunes in a trial,
-    /// the curves (V/F, fan), the memory offset, the MSVDD rail's offsets and the XBAR/SYS/Video clock offsets and
-    /// voltage demands (the user, 2026-10-20: the agent does everything we did by hand). The wall stays as kept, so a
+    /// the curves (V/F, fan), the P0 core and memory offsets, the MSVDD rail's offsets and the XBAR/SYS/Video clock offsets
+    /// and voltage demands (the user, 2026-10-20: the agent does everything we did by hand). The wall stays as kept, so a
     /// wall lowered in a trial to sample the curve never becomes the daily one; the daily wall is set on its own
-    /// ("wall"). The core P0 offset stays as kept too: nothing here tunes with it.</summary>
+    /// ("wall").</summary>
     public static bool KeptFromCard(string kind, string key) =>
-        kind is VfWrites.Kind or FanPolicyWrites.Kind or ClockDomainOffsets.Kind or ClockVdemand.Kind
-        || (kind == ClockOffsets.Kind && key == ClockOffsets.Key(ClockDomain.Memory))
+        kind is VfWrites.Kind or FanPolicyWrites.Kind or ClockDomainOffsets.Kind or ClockVdemand.Kind or ClockOffsets.Kind
         || (kind == RailWrites.Kind && key == RailWrites.Key(Rail.Msvdd));
 
     /// <summary>The profile bound to the card it is kept or loaded on now; an unknown VBIOS or driver leaves the old one.</summary>

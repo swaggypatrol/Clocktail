@@ -23,7 +23,7 @@ public static class Controls
         new("additional power request (F8)", null, c => c.PwrPolicies, Slot.ClientPwrPoliciesSetControl, NotOffered: "only the CLI sets it (clocktail --power-cap)"),
         new("current limits", "set_current_limit", c => c.PowerPolicy, Slot.PowerPolicySetControl, PerWrite: true),
         new("memory offset", "set_memory_offset", c => c.PstatesWrite, Slot.SetPstates20),
-        new("core P0 offset", null, c => c.PstatesWrite, Slot.SetPstates20, NotOffered: "only the CLI sets it (clocktail --core-offset); the agent tunes the core through the V/F curve"),
+        new("core P0 offset", "set_core_offset", c => c.PstatesWrite, Slot.SetPstates20),
         new("XBAR offset and voltage demand", "adjust_xbar", c => c.ClockDomains, Slot.ClockClkDomainsSetControl),
         new("SYS and Video offsets and voltage demands", null, c => c.ClockDomains, Slot.ClockClkDomainsSetControl,
             NotOffered: "only the CLI sets them (clocktail --sys-offset / --video-offset / --sys-vdemand / --video-vdemand)"),

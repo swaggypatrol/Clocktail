@@ -41,7 +41,7 @@ public class DailyProfileTests : IDisposable
         Assert.True(DailyProfile.KeptFromCard("vdemand", "xbar"));
         Assert.False(DailyProfile.KeptFromCard("power", "fe"));
         Assert.True(DailyProfile.KeptFromCard("pstates20", "memory"));   // the agent tunes it now (2026-10-20)
-        Assert.False(DailyProfile.KeptFromCard("pstates20", "core"));
+        Assert.True(DailyProfile.KeptFromCard("pstates20", "core"));    // set_core_offset tunes it (2026-10-21)
     }
 
     /// <summary>The profile on this machine was kept by a build with the step-down: its Down and LastResetAt must not

@@ -79,11 +79,12 @@ public class CapabilitiesTests
         Assert.Contains("the driver has it", clockLock.Why);
         Assert.Contains("the setter is off (7-domain layout check unknown)", clockLock.Why);
         Assert.Contains("only the CLI", Assert.Single(map, c => c.Name == "voltage boost").Why);
-        // adjust_xbar moves XBAR only: SYS and Video, the core P0 offset, NVVDD and F8 are the CLI's.
+        // adjust_xbar moves XBAR only: SYS and Video, NVVDD and F8 are the CLI's.
         Assert.Equal("adjust_xbar", Assert.Single(map, c => c.Name == "XBAR offset and voltage demand").Tool);
-        Assert.All(map.Where(c => c.Name is "SYS and Video offsets and voltage demands" or "core P0 offset" or "NVVDD offsets" or "additional power request (F8)"),
+        Assert.Equal("set_core_offset", Assert.Single(map, c => c.Name == "core P0 offset").Tool);
+        Assert.All(map.Where(c => c.Name is "SYS and Video offsets and voltage demands" or "NVVDD offsets" or "additional power request (F8)"),
             c => Assert.Equal((null, false), (c.Tool, c.Can)));
-        Assert.Equal(4, map.Count(c => c.Why.StartsWith("not offered: only the CLI") && c.Name != "voltage boost"));
+        Assert.Equal(3, map.Count(c => c.Why.StartsWith("not offered: only the CLI") && c.Name != "voltage boost"));
     }
 
     [Fact]

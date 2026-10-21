@@ -1125,6 +1125,50 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());
     }
 
+    /// <summary>The core P0 offset as a trial write (set_core_offset): the held curve is set aside for it and written back,
+    /// keep takes it from the card even with a profile kept, and back_to_daily puts the kept one back.</summary>
+    [Fact]
+    public void A_core_offset_trial_writes_the_curve_back_and_keep_takes_it_from_the_card()
+    {
+        new FakeVf().Install();
+        int core = Clocktail.Domain.Clocks.Pstates20Layout.Clock(0, 0);
+        var vfApplier = FakeDriver.RequestApplier!;
+        FakeDriver.RequestApplier = (state, req) =>
+        {
+            if (BitConverter.ToUInt32(req) != FakeVf.PstatesWord) return vfApplier(state, req);
+            var next = (byte[])state.Clone();
+            req.AsSpan(0x28, 4).CopyTo(next.AsSpan(core + 0xc));
+            var control = FakeDriver.State[FakeVf.ControlWord];
+            for (int i = 0; i < 127; i++) control.AsSpan(VfLayout.OffsetField(i), 4).Clear();   // a P0 write resets the points
+            return next;
+        };
+        var hw = new NvClient(FakeDriver.ApiFor(
+            [Slot.ClockClientClkVfPointsGetInfo, Slot.ClockClientClkVfPointsGetStatus, Slot.ClockClientClkVfPointsGetControl, Slot.GetPstates20],
+            [Slot.ClockClientClkVfPointsSetControl, Slot.SetPstates20]), WritePolicySet.Default.WithEnabled(Slot.ClockClientClkVfPointsSetControl));
+        int CoreKhz() => BinaryPrimitives.ReadInt32LittleEndian(FakeDriver.State[FakeVf.PstatesWord].AsSpan(core + 0xc));
+        var d = new BrokerDispatcher(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true);
+        const string daily = "0*60,30000*67";
+        Assert.True(d.Dispatch(Curve(daily)).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep")).Ok);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"drill"}""")).Ok);
+
+        var t = d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = daily, change = "core 0 → +15 MHz", keep_curve = true,
+            writes = new[] { new { kind = Clocktail.Domain.Clocks.ClockOffsets.Kind, key = "core", value = "15000" } } })));
+        Assert.True(t.Ok, t.Error);
+        Assert.Equal(15_000, CoreKhz());
+        Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());   // written back after the P0 write reset it
+
+        var kept = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep"));
+        Assert.True(kept.Ok, kept.Error);
+        Assert.Contains(kept.Result!.Value.GetProperty("profile").GetProperty("Writes").EnumerateArray(),
+            w => w.GetProperty("Kind").GetString() == Clocktail.Domain.Clocks.ClockOffsets.Kind && w.GetProperty("Key").GetString() == "core" && w.GetProperty("Value").GetString() == "15000");
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover)).Ok);
+        Assert.Equal(0, CoreKhz());
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply")).Ok);
+        Assert.Equal(15_000, CoreKhz());
+        Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());
+    }
+
     [Fact]
     public void Recover_says_per_item_whether_the_hardware_state_is_known()
     {
