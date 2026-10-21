@@ -59,9 +59,26 @@ test('the entry is in each dialect, next to what was there', () => {
   assert.deepStrictEqual(z.mcp.servers.clocktail, { command: SERVER, args: [] });
   const toml = fs.readFileSync(byId('codex').file, 'utf8');
   assert.match(toml, /\[mcp_servers\.theirs\]\ncommand = "x"/);
-  assert.ok(!toml.includes('"old"') && !toml.includes('[mcp_servers.clocktail.env]'), 'the old table and its subtable are replaced');
+  assert.ok(!toml.includes('"old"'), 'the old command is replaced');
   assert.ok(toml.includes(`[mcp_servers.clocktail]\ncommand = '${SERVER}'\nargs = []`));
+  assert.ok(!toml.includes('[mcp_servers.clocktail.env]'), 'removing the entry removed its env too');
   assert.ok(fs.existsSync(byId('cursor').file + '.clocktail.bak'), 'a backup is kept');
+});
+
+test('an update keeps the env the person gave the entry (the CLOCKTAIL_MCP_* caps)', () => {
+  const f = byId('cursor').file;
+  const d = read(f);
+  d.mcpServers.clocktail = { command: 'old.exe', args: [], env: { CLOCKTAIL_MCP_MIN_MV: '800' } };
+  fs.writeFileSync(f, JSON.stringify(d));
+  byId('cursor').add();
+  assert.deepStrictEqual(read(f).mcpServers.clocktail, { command: SERVER, args: [], env: { CLOCKTAIL_MCP_MIN_MV: '800' } });
+  const t = byId('codex').file;
+  fs.writeFileSync(t, 'model = "o"\n\n[mcp_servers.clocktail]\ncommand = "old"\n\n[mcp_servers.clocktail.env]\nA = "1"\n\n[other]\nx = 1\n');
+  byId('codex').add();
+  byId('codex').add();   // twice: still one env table, still the person's
+  const toml = fs.readFileSync(t, 'utf8');
+  assert.strictEqual(toml.split('[mcp_servers.clocktail.env]').length, 2);
+  assert.match(toml, /A = "1"/);
 });
 
 test('a V1 OpenCode file gets a V1 entry', () => {

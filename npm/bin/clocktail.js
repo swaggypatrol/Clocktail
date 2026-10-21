@@ -64,7 +64,8 @@ function jsonClient(id, label, file, o = {}) {
     add() {
       const d = readJson(file, true) || {};
       const { keys, dialect } = locate(d);
-      digCreate(d, keys)[NAME] = entry(dialect);
+      const table = digCreate(d, keys);
+      table[NAME] = { ...entry(dialect), ...keptEnv(table[NAME]) };
       writeJson(file, d);
     },
     remove() {
@@ -86,10 +87,16 @@ function tomlClient(id, label, file) {
     present: () => fs.existsSync(path.dirname(file)),
     connected: () => readText(file).includes(header),
     add() {
-      const kept = withoutTomlTable(readText(file), `mcp_servers.${NAME}`).trimEnd();
+      const text = readText(file);
+      const kept = withoutTomlTable(text, `mcp_servers.${NAME}`).trimEnd();
+      // The person's own variables (the CLOCKTAIL_MCP_* caps) survive an update: an env line, or the env subtable.
+      const envLine = tomlTableLines(text, `mcp_servers.${NAME}`).slice(1).filter(l => /^\s*env\s*=/.test(l));
+      const envTable = tomlTableLines(text, `mcp_servers.${NAME}.env`);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       backup(file);
-      fs.writeFileSync(file, `${kept}${kept ? '\n\n' : ''}${header}\ncommand = '${SERVER}'\nargs = []\n`);
+      fs.writeFileSync(file, `${kept}${kept ? '\n\n' : ''}${header}\ncommand = '${SERVER}'\nargs = []\n`
+        + envLine.map(l => l.trim() + '\n').join('')
+        + (envTable.length ? `\n${envTable.join('\n').trimEnd()}\n` : ''));
     },
     remove() {
       const text = readText(file);
@@ -145,6 +152,10 @@ const CLIENTS = [
     connected: () => run('claude', ['mcp', 'get', NAME], { quiet: true }).status === 0,
     add() {
       if (!which('claude')) throw new Error(`the claude command is not on PATH; run: claude mcp add ${NAME} -s user -- "${SERVER}"`);
+      // Already pointing at the server: left as it is, with any -e variables the person gave it (an update replaces the
+      // exe in place, so the entry needs no change).
+      const now = run('claude', ['mcp', 'get', NAME], { quiet: true });
+      if (now.status === 0 && (now.stdout || '').toLowerCase().includes(SERVER.toLowerCase())) return;
       run('claude', ['mcp', 'remove', NAME, '-s', 'user'], { quiet: true });
       const r = run('claude', ['mcp', 'add', NAME, '-s', 'user', '--', SERVER], { quiet: true });
       if (r.status !== 0) throw new Error(`claude mcp add failed: ${(r.stderr || r.stdout || '').trim()}`);
@@ -481,6 +492,27 @@ function sameFile(src, dst) {
 }
 
 /** The TOML text without the table `[name]` and its keys (up to the next table header). */
+/** The lines of exactly one TOML table, its header first; none when it is not there. */
+function tomlTableLines(text, name) {
+  const out = [];
+  let inside = false;
+  for (const line of text.split(/\r?\n/)) {
+    const header = line.match(/^\s*\[([^\]]+)\]\s*$/);
+    if (header) inside = header[1].trim() === name;
+    if (inside) out.push(line);
+  }
+  return out;
+}
+
+/** What of an existing entry the person set themselves and an update keeps: its environment ("environment" in
+ * OpenCode), where the CLOCKTAIL_MCP_* caps live. */
+function keptEnv(old) {
+  if (!old || typeof old !== 'object') return {};
+  const keep = {};
+  for (const k of ['env', 'environment']) if (old[k] && typeof old[k] === 'object') keep[k] = old[k];
+  return keep;
+}
+
 function withoutTomlTable(text, name) {
   const out = [];
   let skipping = false;
