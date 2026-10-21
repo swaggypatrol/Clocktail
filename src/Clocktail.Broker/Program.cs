@@ -149,6 +149,7 @@ static int Run()
     // A reset the worker before this one never answered (it died in the hang, or handed over) is answered at start.
     static int? ResetsSince(DateTime sinceUtc)
     {
+        if (!OperatingSystem.IsWindows()) return null;
         try { return SystemLog.Count(SystemLog.DriverResetFilter, sinceUtc); }
         catch (InvalidOperationException) { return null; }
     }
