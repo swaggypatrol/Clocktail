@@ -174,6 +174,66 @@ public static class CurrentLimitsParser
     private static uint U(ReadOnlySpan<byte> b, int o) => o + 4 <= b.Length ? BinaryPrimitives.ReadUInt32LittleEndian(b[o..]) : 0;
 }
 
+/// <summary>
+/// One record of the policy table as the inspector shows it: what it limits (named only for the classes measured on the
+/// 5090 FE), the monitor channel it watches, the limit in force (CONTROL; null when the driver did not answer for it) and
+/// that channel's reading now, both in the record's unit. There is no "binding now" flag in the table: a record whose
+/// reading sits at its limit under load is one that can hold the clock.
+/// </summary>
+public sealed record PolicyRow(PolicyRecord Record, string What, string Watches, uint? Limit, long? Now)
+{
+    public bool Milliamps => Record.Unit == PolicyTableLayout.UnitMilliamps;
+
+    /// <summary>The reading as a share of the limit in force, %; null without both.</summary>
+    public double? UsePct => Limit is > 0 && Now is { } n ? Math.Round(100.0 * n / Limit.Value, 1) : null;
+}
+
+public static class PolicyTable
+{
+    /// <summary>The records measured on the 5090 FE (617.42): class 0x13 in mA the regulator current limits, 0x18 the board
+    /// power limit (400 / 575 / 600 W), 0x19 the board input current (60 A). 0x00, 0x03, 0x12, 0x15, 0x17 and the two 0x13
+    /// records in mW (on the 12 V inputs) are not identified.</summary>
+    public static string? ClassName(PolicyRecord r) => r.Class switch
+    {
+        PolicyTableLayout.CurrentLimitClass when r.Unit == PolicyTableLayout.UnitMilliamps => "current limit",
+        0x18 => "power limit",
+        0x19 => "input current limit",
+        _ => null,
+    };
+
+    /// <summary>CONTROL for every record INFO lists, in one GET: the mask picks the records the driver fills in.</summary>
+    public static byte[] Control(NvClient hw, GpuSession gpu, IReadOnlyList<PolicyRecord> records)
+    {
+        var b = NvClient.NewBuffer(Slot.PowerPolicyGetControl);
+        uint mask = 0;
+        foreach (var r in records) mask |= 1u << r.Index;
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(PolicyTableLayout.Mask), mask);
+        var res = hw.Call(gpu, Slot.PowerPolicyGetControl, b);
+        if (!res.IsOk) throw new InvalidOperationException(res.ToString());
+        return b;
+    }
+
+    /// <summary>Every record with bounds (an empty one, all zero, is left out). A CONTROL record whose class is not the
+    /// INFO record's has no limit here: the two do not describe the same policy.</summary>
+    public static IReadOnlyList<PolicyRow> Rows(CurrentLimits limits, ReadOnlySpan<byte> control, IReadOnlyList<MonitorReading> readings)
+    {
+        uint answered = control.Length >= PolicyTableLayout.Mask + 4 ? BinaryPrimitives.ReadUInt32LittleEndian(control[PolicyTableLayout.Mask..]) : 0;
+        var rows = new List<PolicyRow>();
+        foreach (var r in limits.Records)
+        {
+            if (r.Max == 0) continue;
+            var ch = limits.Channels.FirstOrDefault(c => c.Index == r.Channel);
+            string watches = ch == null ? $"channel {r.Channel}" : $"channel {r.Channel}, {PowerMonitorLayout.Name(ch.Type)}";
+            uint? limit = (answered >> r.Index & 1) != 0 && CurrentLimitsParser.ControlClass(control, r.Index) == r.Class
+                ? CurrentLimitsParser.ControlLimit(control, r.Index) : null;
+            var reading = readings.FirstOrDefault(x => x.Channel == r.Channel);
+            long? now = reading == null ? null : r.Unit == PolicyTableLayout.UnitMilliamps ? (reading.Ma < 0 ? null : reading.Ma) : reading.Mw;
+            rows.Add(new PolicyRow(r, ClassName(r) ?? $"class 0x{r.Class:x}, not identified", watches, limit, now));
+        }
+        return rows;
+    }
+}
+
 /// <summary>Read-only: every call here is a GET, takes no write window and no lock.</summary>
 public static class CurrentLimitsReader
 {

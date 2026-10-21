@@ -57,7 +57,11 @@ internal static class CurrentLimitCommands
         var limits = CurrentLimitsReader.Read(ctx.Hw, ctx.Session);
         if (writes.Count == 0)
         {
-            Console.WriteLine(JsonSerializer.Serialize(Describe(limits, CurrentLimitsReader.Monitor(ctx.Hw, ctx.Session, limits.Channels)), CliContext.Json));
+            var readings = CurrentLimitsReader.Monitor(ctx.Hw, ctx.Session, limits.Channels);
+            IReadOnlyList<PolicyRow>? policies = null;
+            try { policies = PolicyTable.Rows(limits, PolicyTable.Control(ctx.Hw, ctx.Session, limits.Records), readings); }
+            catch (InvalidOperationException) { }   // the table's CONTROL refused: the rails still answer
+            Console.WriteLine(JsonSerializer.Serialize(Describe(limits, readings, policies), CliContext.Json));
             return true;
         }
 
@@ -78,7 +82,7 @@ internal static class CurrentLimitCommands
         return true;
     }
 
-    public static object Describe(CurrentLimits limits, IReadOnlyList<MonitorReading> readings)
+    public static object Describe(CurrentLimits limits, IReadOnlyList<MonitorReading> readings, IReadOnlyList<PolicyRow>? policies = null)
     {
         object Rail(Rail r)
         {
@@ -104,6 +108,11 @@ internal static class CurrentLimitCommands
             {
                 channel = x.Channel, type = $"0x{x.Type:x}", name = PowerMonitorLayout.Name(x.Type),
                 w = x.Mw / 1000.0, a = x.Ma < 0 ? (double?)null : x.Ma / 1000.0, v = x.Uv == 0 ? (double?)null : x.Uv / 1e6,
+            }),
+            policies = policies?.Select(p => new
+            {
+                record = p.Record.Index, what = p.What, watches = p.Watches, unit = p.Milliamps ? "mA" : "mW",
+                min = p.Record.Min, stock = p.Record.Default, max = p.Record.Max, limit = p.Limit, now = p.Now, use_pct = p.UsePct,
             }),
         };
     }

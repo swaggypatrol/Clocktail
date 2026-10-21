@@ -47,7 +47,9 @@ public sealed partial class SettingsTools(Card card)
         "keeps none. journal_holds names the settings Clocktail has written and gives back on recovery; daily_profile is " +
         "absent when none is kept, session when none is open. daily_differs_on_card lists what the daily profile keeps that " +
         "the card does not hold now ([] = the card is on it; absent when none is kept, it is suspended or a trial is in " +
-        "force). controls is the capability map: each control, the MCP tool that sets it (null: none does), whether it can " +
+        "force). current_limits.policies is the driver's whole power-policy table: what each record limits (named only " +
+        "where measured), the channel it watches, its range, the limit in force and the reading now with use_pct; one near " +
+        "100 % under load is one that can hold the clock. controls is the capability map: each control, the MCP tool that sets it (null: none does), whether it can " +
         "be set on this card and driver, and why not. A section that cannot be read is {\"error\"} and the rest still answer. Read-only.")]
     public string CardSettings() => Guard(() =>
     {
@@ -405,10 +407,12 @@ public sealed partial class SettingsTools(Card card)
 
     private object Limits(Context c)
     {
-        var (limits, readings) = card.WithDriver((hw, s) =>
+        var (limits, readings, control) = card.WithDriver((hw, s) =>
         {
             var l = CurrentLimitsReader.Read(hw, s);
-            return (l, CurrentLimitsReader.Monitor(hw, s, l.Channels));
+            byte[]? all = null;
+            try { all = PolicyTable.Control(hw, s, l.Records); } catch (InvalidOperationException) { }
+            return (l, CurrentLimitsReader.Monitor(hw, s, l.Channels), all);
         });
         object One(Rail r)
         {
@@ -434,8 +438,21 @@ public sealed partial class SettingsTools(Card card)
                 connector_w = Round1(input.ConnectorW), pcie_slot_w = Round1(input.PcieSlotW), input_a = Round1(input.InputA),
                 input_limit_a = input.InputLimitA, concern = input.Concern(),
             },
+            policies = control == null ? null : Policies(PolicyTable.Rows(limits, control, readings)),
         };
     }
+
+    /// <summary>The driver's whole power-policy table, in W or A: what each record limits, the channel it watches, its
+    /// bounds, the limit in force and the reading now.</summary>
+    public static object Policies(IReadOnlyList<PolicyRow> rows) => rows.Select(p =>
+    {
+        double? U(long? v) => v is { } x ? Math.Round(x / 1000.0, 1) : null;
+        return new
+        {
+            record = p.Record.Index, what = p.What, watches = p.Watches, unit = p.Milliamps ? "A" : "W",
+            min = U(p.Record.Min), stock = U(p.Record.Default), max = U(p.Record.Max), limit = U(p.Limit), now = U(p.Now), use_pct = p.UsePct,
+        };
+    }).ToList();
 
     private static double? Round1(double? v) => v is { } x ? Math.Round(x, 1) : null;
 
