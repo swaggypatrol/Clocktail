@@ -12,7 +12,7 @@ namespace Clocktail.Mcp;
 /// </summary>
 public sealed class FrameFeed
 {
-    private readonly Card _card;
+    private readonly Card? _card;
     private readonly string? _process;
     private long _offset;
     private string _partial = "";
@@ -20,7 +20,10 @@ public sealed class FrameFeed
 
     public string Path { get; }
 
-    private FrameFeed(Card card, string path, string? process) { _card = card; Path = path; _process = process; }
+    private FrameFeed(Card? card, string path, string? process) { _card = card; Path = path; _process = process; }
+
+    /// <summary>A feed on a capture file someone else runs (or one that has ended): it reads, it never stops anything.</summary>
+    public static FrameFeed OnFile(string path, string? process) => new(null, path, process);
 
     /// <summary>Starts a capture for <paramref name="seconds"/>; null with the reason when it cannot.</summary>
     public static FrameFeed? Start(Card card, int seconds, string? process, out string? why)
@@ -66,6 +69,14 @@ public sealed class FrameFeed
         return game;
     }
 
+    /// <summary>A new window from here, dropping what came since the last one: the frames of a pause in load (a menu, a
+    /// loading screen, an alt-tab) belong to no window.</summary>
+    public void StartWindow()
+    {
+        Poll();
+        _window = _total.Next();
+    }
+
     /// <summary>Waits up to <paramref name="wait"/> for a capture that ends by itself to finish writing.</summary>
     public void Settle(TimeSpan wait)
     {
@@ -76,7 +87,7 @@ public sealed class FrameFeed
 
     public void Stop()
     {
-        try { _card.Broker(BrokerRequest.OpFps, "stop"); } catch (Exception e) when (e is IOException or InvalidOperationException) { }
+        try { _card?.Broker(BrokerRequest.OpFps, "stop"); } catch (Exception e) when (e is IOException or InvalidOperationException) { }
     }
 
     /// <summary>One frame-rate result as the tools show it.</summary>

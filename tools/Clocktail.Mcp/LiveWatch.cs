@@ -256,6 +256,8 @@ public sealed class LiveWatch(Card card) : IDisposable
                             inLoad = true;
                             loadSince = windowStart = now;
                             window.Clear();
+                            // The frames start with the clocks: not the menu or loading screen before this stretch.
+                            try { run.Frames?.StartWindow(); } catch (IOException) { }
                             lock (run) run.Stretches++;
                             Emit(run, "🎮 load started");
                         }
