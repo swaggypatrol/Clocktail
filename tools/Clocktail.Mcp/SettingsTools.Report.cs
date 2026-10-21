@@ -248,6 +248,11 @@ public sealed partial class SettingsTools
     private static List<ReportRow> LiveRows(JsonElement s, JsonElement l)
     {
         var rows = new List<ReportRow>();
+        var locks = Arr(s, "clock_locks").Select(x => Str(x, "what")).OfType<string>().ToList();
+        if (locks.Count > 0)
+            rows.Add(new("🔒", "Clock lock", "", string.Join("; ", locks), "", Look,
+                "set by another tool, not Clocktail, and still in force: a stress run or a curve test measures the lock, not the curve. " +
+                "`nvidia-smi -rgc` releases NVML's locked clocks; a point lock or Boost Lock, the tool that set it"));
         var rd = Obj(l, "readings");
         // No readings (NVML unreadable, the driver busy): say so, or the verdict could call an unread card healthy.
         if (rd == null)

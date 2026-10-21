@@ -74,6 +74,9 @@ public sealed partial class SettingsTools(Card card)
             tested_on = VerifiedOn.Describe(card.DriverVersion, card.Name, card.Vbios),
             other_gpus = card.OtherGpus.Count == 0 ? null : card.OtherGpus,
             at = DateTimeOffset.Now,
+            // Locks in the driver's client clock-limit record: NVML's locked clocks, a V/F point lock, Boost Lock. Clocktail
+            // sets none, so any one here was set by another tool and outlives it.
+            clock_locks = Section(() => card.WithDriver(ClientLimitsLayout.Read).Select(h => new { entry = h.Domain, mode = h.Mode, value = h.Value, what = h.Describe() }).ToList()),
             perf_decrease = Section(() => card.PerfDecrease() is { } bits
                 ? new { bits = $"0x{bits:x}", reasons = Card.PerfDecreaseReasons(bits) }
                 : throw new InvalidOperationException("GetPerfDecreaseInfo did not answer")),
