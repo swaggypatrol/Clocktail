@@ -32,8 +32,8 @@ public sealed class ManualTools
     [McpServerTool(Name = "manual", ReadOnly = true, OpenWorld = false), Description(
         "The Clocktail manual for the agent: the tuning method phase by phase and why each step comes where it does, " +
         "answers to the questions people ask, Blackwell (voltage rails, clock domains, the V/F curve, what limits the clock), " +
-        "how to read every status field, stability testing, presets and troubleshooting. Call it with no topic for the index. " +
-        "Read 'start' and 'method' before the first tuning session, 'why' before answering a why, and the matching topic " +
+        "how to read every status field, every control and how to combine them, stability testing, presets and troubleshooting. " +
+        "Call it with no topic for the index. Read 'start', 'method' and 'controls' before the first tuning session, 'why' before answering a why, and the matching topic " +
         "before answering a question about the card you are not sure of.")]
     public static string Manual([Description("The topic, from the index; omit for the index.")] string? topic = null)
     {
@@ -47,7 +47,7 @@ public sealed class ManualTools
         return $"{head}# Clocktail manual\n\nCall manual with one of these topics:\n\n{string.Join("\n", index)}\n";
     }
 
-    private static readonly string[] Ordered = ["start", "method", "why", "blackwell", "status", "tuning", "stability", "memory", "xbar-msvdd", "power-thermal", "presets", "troubleshooting"];
+    private static readonly string[] Ordered = ["start", "method", "controls", "why", "blackwell", "status", "tuning", "stability", "memory", "xbar-msvdd", "power-thermal", "presets", "troubleshooting"];
     private static int Order(string key) { int i = Array.IndexOf(Ordered, key.ToLowerInvariant()); return i < 0 ? Ordered.Length : i; }
 
     private static string Summary(string text) =>

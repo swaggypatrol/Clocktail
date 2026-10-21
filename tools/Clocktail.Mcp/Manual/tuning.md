@@ -27,39 +27,10 @@ Under the wall, a game runs a narrow band of the curve. To test lower points:
 Stock up to 800 mV; +30 MHz per point to +210 by ~840 mV; +405 to +510 through 850-885 mV (the knee is where an RTX 5090 gains most); then a straight line of about +2 MHz per mV from 2775 MHz at 885 mV to 3071 MHz at 1035 mV, flat above. Under the 600 W wall that is roughly +200 MHz over stock at the same power (+195 to +221 measured).
 
 ## Goals other than maximum clock
-- **Undervolt / same clock for less power**: lower the curve's top half or shift it left; at the same wall the saved power turns into clock. Shifting the curve left 25/50/75 mV from the knee gave +30/+60/+97 MHz under a 575 W wall. Do not shift the whole curve left by 250 mV: that once crashed the whole system (bug check 0x133).
+- **Undervolt / same clock for less power**: lower the curve's top half (`adjust_curve` down, `flatten_curve`) or shift it left (`shift_curve`, 25 mV per call); at the same wall the saved power turns into clock. Shifting the curve left 25/50/75 mV from the knee gave +30/+60/+97 MHz under a 575 W wall. Do not shift the whole curve left by 250 mV: that once crashed the whole system (bug check 0x133).
 - **Efficiency**: board MHz/W peaks at 250-300 W (6.05 MHz/W) and is 4.74 at 600 W. Cutting the wall 600 -> 500 W cost GTA V only 9 % frames (86 -> 78 fps) for 17 % less power. Offer this when they care about heat or noise.
 - **MSVDD undervolt** (`adjust_msvdd`): saves a few watts the wall gives back to the core, but slows XBAR; see `manual xbar-msvdd`.
 
 ## What each tool changes, and what is kept
-| Tool | Changes | Kept by keep_as_daily |
-|---|---|---|
-| `adjust_curve` | the V/F curve around the operating point | yes |
-| `flatten_curve` | the curve flat from a voltage up (only lowers) | yes |
-| `set_curve` | the whole curve, every point's offset | yes |
-| `shift_curve` | the curve on the card moved left by N mV (from the knee up) | yes |
-| `set_core_offset` | the core P0 offset: every point at once (the curve is written again after it) | yes |
-| `set_fan_curve` | the firmware fan curve | yes |
-| `set_memory_offset` | the memory offset (the curve is written again after it) | yes |
-| `adjust_msvdd` | MSVDD's REL and VMIN offsets, up or down | yes |
-| `adjust_nvvdd` | NVVDD's REL, ALT, OV and VMIN offsets | yes |
-| `adjust_xbar` | XBAR's clock offset and voltage demand | yes |
-| `adjust_clock_domain` | SYS's or Video's clock offset and voltage demand; the core's voltage demand | yes |
-| `set_clock_ratio` | XBAR's clock ratio to the core | yes |
-| `set_voltage_boost` | the voltage boost percentage | yes |
-| `set_clock_lock` | a clock cap, a clock floor, a V/F point lock or Boost Lock | yes |
-| `set_power_limit` | the wall, for the session (to reach other points) | no: `set_daily_power_limit` sets the daily wall |
-| `set_power_cap` | the F8 power request, for the session (ask first: it cannot be deleted) | never |
-| `set_current_limit` | a rail's current limit, for the session | never |
-| `set_fan_start` | the temperature the stopped fans start at (and stop under) | yes |
-| `set_fan_speed` | a fixed fan duty, for the session | never |
-
-`keep_as_daily` keeps everything a trial set, not just the last change. Call `back_to_daily` first if only some of it should stay.
-
-What the newer controls did on the reference card (5090 FE, 617.42, 2026-10-21; each written at idle, read back exactly and put back by `back_to_daily`):
-- `set_clock_lock`: Boost Lock held 3052 MHz in P0 at idle; a 2000 MHz cap held 1980 MHz at full load; a 900 mV point lock held 2775 MHz at 890 mV at load 50. A lock changes what a stress run measures: release it before mapping the curve.
-- `set_clock_ratio`: stock 0.8999. At 0.92 XBAR ran 2595 MHz against a 2850 MHz core (0.911) at the 600 W wall, against 2535 / 2865 (0.885) at stock; MSVDD rose 980 → 1005 mV and the core gave 15 MHz back.
-- `adjust_clock_domain` core: +5 mV read back as the curve's `voltage_demand_mv` +5.
-- `set_power_cap`: the lower of FE and F8 holds (F8 500 W under FE 600 W held the board at 500 W), so F8 at the board maximum limits nothing. NVML's enforced limit in `gpu_status` shows a change a few seconds late.
-- `set_current_limit` 650 A on NVVDD (above the 600 A default) and `set_voltage_boost` 1 % landed and changed nothing visible at idle.
+Every write tool, what it writes, how far one call goes, whether `keep_as_daily` keeps it, how they combine, and what the newer controls did on the reference card: `manual controls`. `keep_as_daily` keeps everything a trial set, not just the last change (a clock lock too): `preview_daily` shows it, and `back_to_daily` first if only some of it should stay.
 The order the phases go in, and why, is `manual method`.

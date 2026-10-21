@@ -40,9 +40,12 @@ public sealed partial class SettingsTools(Card card)
         "Every setting Clocktail can write, as it is on the card now: the power limit (the FE request) and the board's " +
         "range, the P0 core/memory offsets, the Core V/F curve (offsets in kHz as runs offset*count, how many points are " +
         "offset, its top below NVVDD MAX and its knee), NVVDD/MSVDD offsets per slot and the limits they give, XBAR/SYS/" +
-        "Video clock offsets and voltage demands with each domain's live clock, voltage boost, fans (each channel's mode, " +
-        "duty and rpm; the firmware fan curves as degC:duty%:rpm), the NVVDD/MSVDD current limits, the daily profile and the " +
-        "experiment session. stock_* is what the card held before Clocktail first wrote the setting (the ownership " +
+        "Video clock offsets and voltage demands with each domain's live clock, voltage boost, the XBAR/core clock ratio " +
+        "(clock_ratio), fans (each channel's mode, duty and rpm; the firmware fan curves as degC:duty%:rpm and the zero-RPM " +
+        "band as stop_start_c), the NVVDD/MSVDD current limits, the daily profile and the experiment session; beside them " +
+        "clock_locks (any lock in the driver's clock-limit record: set_clock_lock's, nvidia-smi -lgc's, Boost Lock), " +
+        "perf_limits (the driver's ceiling and floor per clock domain and the limit that set each), tdr (Windows' driver " +
+        "timeout) and the VBIOS and driver the daily profile is bound to. stock_* is what the card held before Clocktail first wrote the setting (the ownership " +
         "journal), or the value now where Clocktail holds nothing; daily_* is the daily profile's value, absent where it " +
         "keeps none. journal_holds names the settings Clocktail has written and gives back on recovery; daily_profile is " +
         "absent when none is kept, session when none is open. daily_differs_on_card lists what the daily profile keeps that " +
@@ -78,8 +81,8 @@ public sealed partial class SettingsTools(Card card)
             tested_on = VerifiedOn.Describe(card.DriverVersion, card.Name, card.Vbios),
             other_gpus = card.OtherGpus.Count == 0 ? null : card.OtherGpus,
             at = DateTimeOffset.Now,
-            // Locks in the driver's client clock-limit record: NVML's locked clocks, a V/F point lock, Boost Lock. Clocktail
-            // sets none, so any one here was set by another tool and outlives it.
+            // Locks in the driver's client clock-limit record: NVML's locked clocks, a V/F point lock, Boost Lock. One the
+            // journal does not hold was set by another tool and outlives it.
             clock_locks = Section(() => card.WithDriver(ClientLimitsLayout.Read).Select(h => new { entry = h.Domain, mode = h.Mode, value = h.Value, what = h.Describe() }).ToList()),
             tdr = Section(() => (OperatingSystem.IsWindows() ? Clocktail.Domain.Platform.TdrSettings.Read() : null) is { } tdr
                 ? new { delay_s = tdr.Delay, level = tdr.LevelOrDefault, set_delay = tdr.DelayS != null, what = tdr.Describe(), safe_to_map = !tdr.Unsafe }

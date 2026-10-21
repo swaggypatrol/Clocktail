@@ -11,7 +11,7 @@ What the agent starts is a relay that loads no driver library and runs the same 
 | Tool | What |
 |---|---|
 | `card_report` | 🩺 How's my card doing: every setting as original → now, the change and a ✅ / ⚠️ / ⛔ safety mark, live readings, one verdict; between the tables the V/F curve drawn in Braille dots (now, stock, and ● where the card runs). |
-| `manual` | The agent's manual: the method phase by phase and why, Blackwell, reading the card, stability, presets, troubleshooting. Its short version is the server's instructions. |
+| `manual` | The agent's manual: the method phase by phase and why, every control and how to combine them, Blackwell, reading the card, stability, presets, troubleshooting. Its short version is the server's instructions. |
 | `install_service` | Install or update the service (one UAC prompt). Every write tool needs it. |
 | `gpu_status` | Where the card runs now: voltages (and what each GPC measures), clock, the curve point, power vs limit, temperature headroom, VRAM. |
 | `card_settings` | Everything set on the card, next to stock and the daily profile. |
@@ -24,19 +24,31 @@ What the agent starts is a relay that loads no driver library and runs the same 
 | `save_profile` / `delete_profile` | Save the daily profile under a name ("quiet", "games") to switch back to later; delete a saved one. |
 | `set_daily_power_limit` | The daily power limit. Ask the person first. |
 | `begin_session` / `end_session` | Start a session for a game / end it and go back to the daily profile. |
-| `adjust_curve` | Raise or lower the V/F points around the working point (one trial). |
+| `preview_daily` | What `keep_as_daily` (or `load_preset`) would make the daily profile, before asking. Writes nothing. |
+| `adjust_curve` | Raise or lower the V/F points in a voltage band around the working point (one trial). |
+| `flatten_curve` | The curve flat from a voltage up; only lowers (one trial). |
+| `set_curve` | The whole V/F curve at once, every point's offset (one trial). |
+| `shift_curve` | The curve on the card moved left by N mV: the same clocks at less voltage (one trial). |
+| `set_core_offset` | The core P0 offset, every point at once; the curve is written back right after (one trial). |
+| `adjust_nvvdd` | NVVDD's REL, ALT, OV and VMIN offsets, within the 1.15 V ceiling (one trial). |
+| `set_clock_lock` | A core clock cap, floor, V/F point lock or Boost Lock (the record `nvidia-smi -lgc` sets; one trial). |
+| `set_voltage_boost` | The voltage boost percentage (one trial). |
 | `set_fan_curve` | The firmware fan curve (one trial). |
+| `set_fan_start` | The temperature the stopped fans start at; only earlier (one trial). |
 | `set_memory_offset` | The memory offset; the curve is written back right after (one trial). |
 | `adjust_msvdd` | Raise or lower MSVDD's REL and VMIN offsets (one trial). |
 | `adjust_xbar` | XBAR's clock offset and voltage demand (one trial). |
+| `set_clock_ratio` | XBAR's clock ratio to the core, 0.8999 stock (one trial). |
+| `adjust_clock_domain` | SYS's or Video's clock offset and voltage demand, or the core's voltage demand (one trial). |
 | `set_power_limit` | Move the power limit for a trial, to run the curve lower down. Never kept. |
-| `set_current_limit` | Lower the NVVDD or MSVDD current limit for a trial. Never kept. |
+| `set_current_limit` | Set the NVVDD or MSVDD current limit for a trial, up to the driver's maximum. Never kept. |
+| `set_power_cap` | The second board power request (F8) for a trial; it cannot be deleted once made. Never kept. Ask the person first. |
 | `set_fan_speed` | Hold the fans at a fixed duty for a trial (thermal tests). Never kept. |
 | `stress_test` | Run NVIDIA's `nvgwls.exe` on what is on the card; a failure is recorded as the trial's crash. |
 | `mark_stable` / `mark_crash` | Record the trial's outcome. |
 | `back_to_daily` | Put the daily profile back now. |
 | `stock` / `load_daily` | The card to stock and kept there (the daily profile suspended) / the daily profile back on. |
-| `keep_as_daily` | Keep what the trials set as the daily profile (not the trial wall, current limits or fixed fans). Ask the person first. |
+| `keep_as_daily` | Keep what the trials set as the daily profile (not the trial wall, the F8 request, current limits or fixed fans). Ask the person first. |
 | `data_points` | Every trial so far, summarized per curve point. |
 | `log_note` / `read_log` | The tuning log. |
 

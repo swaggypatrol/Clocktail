@@ -9,8 +9,8 @@ The interconnect rail and the crossbar clock: the free +2 %, the +6-7 % with XBA
 
 ## XBAR clock offset and voltage demand
 - The XBAR offset raises XBAR at the same voltage (+75 MHz moved XBAR 2340 -> 2422 MHz with nothing else changing).
-- Under load XBAR is held to **about 0.9 x the core clock**. About +250 MHz of offset reaches that; more only lowers the MSVDD voltage XBAR needs.
-- **The XBAR offset pulls the SYS clock down** in the memory phase: XBAR 0 / +200 / +300 / +400 gave SYS 2182 / 2017 / 1912 / 1830 MHz. Giving SYS +150 back at XBAR +300 changed nothing in a Blender render (A B B A, 5.846 / 5.846 / 5.832 / 5.834 s, 2026-10-21); its effect on games is not measured. Read `sys_mhz` in stress_test and watch when judging an XBAR step.
+- Under load XBAR is held to **about 0.9 x the core clock**: the driver's clock ratio (0.8999 stock). About +250 MHz of offset reaches that; more only lowers the MSVDD voltage XBAR needs.
+- **The XBAR offset pulls the SYS clock down** in the memory phase: XBAR 0 / +200 / +300 / +400 gave SYS 2182 / 2017 / 1912 / 1830 MHz. Giving SYS +150 back (`adjust_clock_domain sys`) at XBAR +300 changed nothing in a Blender render (A B B A, 5.846 / 5.846 / 5.832 / 5.834 s, 2026-10-21); its effect on games is not measured. Read `sys_mhz` in stress_test and watch when judging an XBAR step.
 - The **voltage demand** (-25..+50 mV) raises MSVDD for XBAR's points. It is what keeps MSVDD off its floor at large offsets.
 
 Blender Cycles (2560x1440, 384 spp, median of 7, lower is better), stock 6.774 s:
@@ -21,6 +21,11 @@ Blender Cycles (2560x1440, 384 spp, median of 7, lower is better), stock 6.774 s
 | REL 0, XBAR +300, demand +20 mV | 6.33-6.39 s | -6 to -7 % |
 | REL 0, XBAR +400, demand +30 mV | 6.322 s | -6.7 % |
 
+## The ratio: XBAR's ceiling
+- `set_clock_ratio` moves the 0.9: the driver's clock propagation ratio from the core (NVVDD) to XBAR (MSVDD). A higher ratio lets XBAR follow the core closer, about +29 MHz of XBAR per +0.01 at a 2900 MHz core, and asks MSVDD for the voltage that clock needs.
+- On the reference card at the 600 W wall: 0.92 ran XBAR 2595 MHz against a 2850 MHz core (0.911); stock ran 2535 / 2865 (0.885). MSVDD rose 980 → 1005 mV and the core gave 15 MHz back to the wall. Its gain in frames or Blender is not measured.
+- When: after MSVDD REL 0 and XBAR +250..+300 with its demand, if XBAR under load still sits at 0.9 x the core. 0.025 per call. The demand rules below apply to the clock XBAR then reaches; judge each step A B B A with a benchmark that uses memory.
+
 ## The cliff
 - With a large XBAR offset and no extra demand, memory-bound work lets MSVDD fall to its floor (825 mV). When it sits there, the **core is pinned near 1610 MHz and bandwidth drops 14-16 %** (1460 -> 1221-1259 GB/s). At demand 0: clean from +0 to +250, marginal at +300 (an occasional drop to 1687 MHz), the cliff at +350 and +400. No hysteresis: back down, back to normal.
 - Raising VMIN does not fix it (MSVDD then sits on the new floor, core still ~1620 MHz). **The voltage demand does**: at +400, demand +20 mV kept MSVDD at 845 mV and restored 1446 GB/s and a 2445 MHz core.
@@ -30,4 +35,4 @@ Blender Cycles (2560x1440, 384 spp, median of 7, lower is better), stock 6.774 s
 - **If anything is unstable with XBAR raised, step XBAR down 50 MHz at a time** before touching the curve.
 
 ## Reading it
-`card_settings` shows each domain's offset and demand and MSVDD's REL/ALT/OV/VMIN offsets and limits; `gpu_status` shows MSVDD's mV, amps and watts; `stress_test` and `watch` report the XBAR clock under load. `adjust_msvdd` and `adjust_xbar` change them (`manual method`, phase 7). A memory-bound game on a large XBAR offset with MSVDD at exactly 825 mV and the core stuck near 1600 MHz is the cliff.
+`card_settings` shows each domain's offset and demand and MSVDD's REL/ALT/OV/VMIN offsets and limits; `gpu_status` shows MSVDD's mV, amps and watts; `stress_test` and `watch` report the XBAR clock under load. `card_settings` `clock_ratio` shows the ratio. `adjust_msvdd`, `adjust_xbar`, `set_clock_ratio` and `adjust_clock_domain` change them (`manual method`, phase 7). A memory-bound game on a large XBAR offset with MSVDD at exactly 825 mV and the core stuck near 1600 MHz is the cliff.

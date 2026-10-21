@@ -8,13 +8,22 @@ What each status field means, what is normal, how to name the limiter, and the t
 - `temp_c`, `util_pct`, `limit_reasons`: NVML's own (see the quirks below before trusting `limit_reasons`).
 - `temp_margin_c`: NVIDIA's own headroom (nvidia-smi's "T.Limit"): how many °C until the GPU slows itself down, at 90 °C on a 5090 (hardware slowdown 93, shutdown 96; `card_settings` has all three). It is the number to watch, not a fixed temperature.
 - `vram_used_gib` of `vram_total_gib` (31.8 on a 5090; the driver's reservation left out, as nvidia-smi does) and `memory_controller_pct` (how busy the memory bus is). A game near the total starts swapping over PCIe, which shows as stutter no clock fixes. `stress_test` and `watch` give its P10/P50/P90, the CSVs every sample.
+- `memory_c`: the memory chip temperature (`manual memory`).
 - `rails`: per-rail amps and watts from the power monitor, with the current limit in force.
+- `input`: the 16-pin connector's watts, the PCIe slot's, and the board's input current against its limit, with a `concern` when the connector passes 600 W or the current comes within 10 % of the limit (`manual power-thermal`).
 - `gpc_mv`: the voltage the 11 GPCs measure at their own sensors (mean, min, max, and the mean against NVVDD). On the reference card the mean sits 3-9 mV above NVVDD and the lowest GPC within 7 mV below it, at idle and at the wall: the core gets what the rail is asked for, so a crash is the point's frequency, not a sagging rail. `stress_test` gives its P10/P50/P90, the CSVs every sample. Read only on the layout verified on an RTX 5090; absent elsewhere.
 - `point`: the V/F point the card sits on: index, mV, stock MHz, current offset, the daily profile's offset.
 - `session`: the experiment in force, if any.
 
 ## card_settings
-Everything Clocktail can write, as it is on the card now, next to stock and the daily profile: power limit, core and memory P0 offsets, the V/F curve (as offsets), each rail's REL/ALT/OV/VMIN offsets and the resulting limits, XBAR/SYS/Video clock offsets and voltage demands, fans and the fan curve, rail current limits, and the daily profile itself. Use it for "what is set on my card", "what is different from stock", and before any change.
+Everything Clocktail can write, as it is on the card now, next to stock and the daily profile: power limit, core and memory P0 offsets, the V/F curve (as offsets, with the core's voltage demand), each rail's REL/ALT/OV/VMIN offsets and the resulting limits, XBAR/SYS/Video clock offsets and voltage demands, the voltage boost, the XBAR/core clock ratio, fans, the fan curve and the zero-RPM band, rail current limits, and the daily profile itself. Use it for "what is set on my card", "what is different from stock", and before any change. Beside the settings:
+- `power.firmware_w`: the board limit the firmware enforces; it must equal `limit_w`, the request (`manual power-thermal`).
+- `current_limits.policies`: the driver's whole power-policy table, each record's limit and reading now; one near 100 % under load can hold the clock.
+- `clock_locks`: locks in the driver's clock-limit record (`set_clock_lock`, `nvidia-smi -lgc`, Boost Lock), whoever set them.
+- `perf_limits`: the driver's ceiling and floor per clock domain and the limit that set each (`manual blackwell`).
+- `controls`: the capability map: each control, the tool that sets it, whether it can be set on this card and driver, and why not.
+- `tdr`: Windows' driver timeout (`manual stability`); `vbios` and `driver`, which the daily profile is bound to (`manual blackwell`).
+- `daily_differs_on_card`: what the daily profile keeps that the card does not hold now.
 
 ## limiter: naming what holds the clock
 The firmware climbs the curve and stops at the first limit; each leaves a trace:
@@ -27,6 +36,7 @@ The firmware climbs the curve and stops at the first limit; each leaves a trace:
 - **Thermal / hardware slowdown**: only from NVML's own reasons. Never seen on the reference card.
 - **Idle**: under 120 W, or `gpu_idle` with utilization under 10 %.
 - **No limit reached**: loaded, nothing hit (often a CPU-bound or frame-capped game).
+- `perf_limits` beside the verdict: the driver's own ceiling and floor for GPC, XBAR and memory, each with the limit that set it. A CLIENT_ limit is a clock lock; RELIABILITY_ at the top is the curve under NVVDD's MAX. The wall acts below these, so a card at its wall runs under its ceiling.
 
 ## Quirks that mislead
 - **`gpu_idle` at full load**: on a curve with a flat top, NVML reports `gpu_idle` on almost every sample at 280-410 W and 100 % utilization. Never call a card idle from that bit alone. A hung GPU also reports it.

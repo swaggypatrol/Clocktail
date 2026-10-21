@@ -21,6 +21,7 @@ Why first: every later gain is measured against this, at the same load and tempe
 Do: ask what they want, then `set_daily_power_limit`. Maximum performance: the board's maximum (600 W on a 5090). Quieter, cooler, more efficient: 475-500 W.
 Why before the curve: under heavy load the wall decides where on the curve the card sits. A higher wall moves heavy load up to higher voltages. A curve tested at 575 W and then run at 600 W runs points it was never tested at.
 Data: GTA V 86 fps at 600 W, 78 at 500 W, 67 at 400 W. The last 100 W buy about 10 % frames for 17 % more power.
+Check: under full load board power reaches the wall. `card_report`'s power row marks a firmware limit that differs from the request (575 W held under a 600 W request); `back_to_daily` writes it again.
 
 ## Phase 2: fans and temperature
 Do: pick the temperature to hold at the wall, `set_fan_curve`, then `stress_test load=100 seconds=240`: steady means the last minute moves less than 1 C. Optionally show the trade first with a fan sweep: `set_fan_speed` 100 / 75 / 60, `stress_test` 150 s each (never hold 45 % or less at 600 W), then `set_fan_speed auto`.
@@ -40,7 +41,7 @@ Three loads reach three regions of the curve:
 |---|---|---|
 | Knee, 850-900 mV | `set_power_limit` 450-550 W + `stress_test load=100` (or `set_current_limit` nvvdd 300-350 A for lower) | 2415 MHz at 855 mV, 2745 at 870-875 (stock ~2230 at 870) |
 | Middle, 900-950 mV | the daily wall + `stress_test load=100` | 2850 MHz at 900 mV, 2880 at 910 |
-| Top, 950-1035 mV | `stress_test load=30-50` (light load climbs to the top of the curve) | 3015 at 955 mV, 3105 at 975-985 |
+| Top, 950-1035 mV | `stress_test load=30-50` (light load climbs to the top of the curve); `set_clock_lock` minMhz = maxMhz holds one clock there | 3015 at 955 mV, 3105 at 975-985 |
 Per region:
 1. `begin_session` ("stress").
 2. Bring the card to temperature.
@@ -54,13 +55,14 @@ What the reference showed:
 - Above ~980-1035 mV it stops scaling at all.
 Why a curve, not a core offset: an offset raises every point by the same MHz. The knee could take +500 while the top takes almost nothing. An offset big enough for the knee crashes the top; one safe for the top wastes the knee. The curve lets every voltage go to its own edge.
 Why small steps at temperature: the edge moves with temperature (6 C moved a 450 W landing by a full point), and 2 of 3 hangs on the reference began right after a write under full load.
-Note: `adjust_curve` goes at most 200 MHz above the daily profile. From stock, map in rounds: raise, test, `keep_as_daily` (ask) a margin below the last pass, continue.
+Note: `adjust_curve` goes at most 200 MHz above the daily profile. From stock, map in rounds: raise, test, `keep_as_daily` (ask) a margin below the last pass, continue. Release any clock lock before `keep_as_daily`: it would be kept. For a run nobody watches (overnight), `begin_session unattended=true`: after `maxCrashes` crashes (2 by default) it writes no new trial.
 
 ## Phase 4: shape the daily curve
 - At each voltage: the boundary minus 30-60 MHz, the game margin.
 - Smooth and rising. On the reference: stock to 800 mV; +30 MHz per point to the knee; +405..+510 at 850-885 mV; then a straight line of ~+2 MHz per mV (2775 MHz at 885 mV to 3071 at 1035 mV); flat above.
 - A flat top where the chip stops scaling: voltage there buys no clock, only power and heat. Under the wall it even costs clock, because the watts spent on voltage are taken from frequency. `flatten_curve fromMv` does it in one trial at idle (it only lowers): every point from that voltage up runs at most what the point there runs now, less `marginMhz`.
 - Leave points under ~800 mV stock: the card only runs there idle.
+- Write it in one trial at idle with `set_curve` (every point's offset, as `card_settings` shows them), or reach it with `adjust_curve` down in bands; then `flatten_curve` for the top. `shift_curve` moves the curve on the card left (the same clocks at less voltage): a raise everywhere, tested like one.
 Why the margin: games are stricter than the stressor. On the reference, "boundary -15" crashed a game and "boundary -30" held. Kingdom Come: Deliverance II crashed at least 37 MHz under an nvgwls pass at the same voltage, temperature and power.
 The margin depends on where the game runs: 15-30 MHz under the wall, 37 MHz or more at 970 mV in the middle band on the reference card. To measure this card's own: hold the game in one voltage band (the wall, or `set_power_limit` / `set_current_limit` for the middle), play it with `live_start`, and on each crash lower that band 15 MHz (`adjust_curve -15` with fromMv/toMv around the crash voltage); the total lowered until it holds is the margin there. Do it once at the wall and once in the middle band; the daily curve is then the boundary minus the larger margin, minus another 15.
 
@@ -81,6 +83,7 @@ Do, in order:
 1. `adjust_msvdd` REL +25, then +25 again (stock -50 → 0, NVIDIA's own limit).
 2. `adjust_xbar` demand +10, then +10 again (+20 mV).
 3. `adjust_xbar` offset +50 per call, up to +250..+300.
+4. Optionally, `set_clock_ratio` +0.025 per call (0.8999 stock), if XBAR under load still sits at 0.9 x the core: it lets XBAR follow the core closer. Its gain is not measured on the reference card; judge it the same way.
 Judge each step with a render or compute benchmark (Blender), a memory-heavy game, and `stress_test` at load 100 and 50, A B B A at one temperature (see 'Comparing two settings').
 Reference: REL 0 made Blender ~2 % faster. XBAR +300 with +20 mV made it 6-7 % faster.
 Why it works: the crossbar between the GPCs, L2 and memory runs off MSVDD, and NVIDIA ships MSVDD 50 mV inside its own limit. Under load XBAR is held to ~0.9 x the core clock, and +250 reaches that.
@@ -100,7 +103,8 @@ Use `log_note` for each step's number and temperature as you go, so the comparis
 ## Phase 8: keep it, live with it
 - `keep_as_daily` (ask). The service puts it back after every boot and driver reset.
 - A new game crashes later: `data_points`, lower that region 15-30 MHz in a session, keep again.
-- After a driver update: `stress_test` 60 s at load 100 and at load 50. The driver owns the stock curve and the temperature compensation.
+- After a driver update: `stress_test` 60 s at load 100 and at load 50. The driver owns the stock curve and the temperature compensation; `card_report` says when the driver is not the one the profile was kept on.
+- After a VBIOS flash: the daily profile does not go on by itself (its offsets were found on the old stock curve). `load_daily` puts it on and binds it to the new VBIOS; `stress_test` at load 100 and 50 right after, and lower in a session where it fails.
 - They want stock for a while: `stock`. Back: `load_daily`.
 
 ## Guiding the person

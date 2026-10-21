@@ -65,7 +65,9 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
 
     [McpServerTool(Name = "gpu_status", ReadOnly = true, OpenWorld = false), Description(
         "Where the card runs right now: NVVDD/MSVDD, core clock, the V/F point it sits on (stock, current and daily offset), " +
-        "power, temperature, utilization, NVML limit reasons, and the experiment session. NVML on this card sets gpu_idle at " +
+        "power, temperature and its margin, the memory temperature (memory_c), utilization, VRAM, NVML limit reasons, each " +
+        "rail's amps and watts against its current limit, the 16-pin input (connector and slot watts, input current against " +
+        "its limit, with a concern near it), what each GPC measures, and the experiment session. NVML on this card sets gpu_idle at " +
         "full load when the clock sits at the top of a curve cut flat, and sw_power_cap at ~340 W far under the 598 W wall: " +
         "read power against power_limit_w, not the reason bits.")]
     public string GpuStatus() => Guard(() =>
@@ -137,7 +139,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     });
 
     [McpServerTool(Name = "begin_session", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Start an experiment session for a game. Every adjust_curve after this is a trial; its outcome becomes a data point " +
+        "Start an experiment session for a game. Every write after this (adjust_curve, set_fan_curve, set_clock_lock...) is a trial; its outcome becomes a data point " +
         "(stable, survived until replaced, or crash). A crash during a trial does not step the daily profile down. A trial " +
         "still in force from an earlier session ends first and the daily profile goes back on, as end_session does. " +
         "unattended=true when the person is away (an overnight stress mapping): after maxCrashes crashes (default 2) no " +
@@ -821,7 +823,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
 
     [McpServerTool(Name = "load_daily", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
         "End a suspension (after stock) and put the kept daily profile on the card now; it goes on at every start and after " +
-        "every driver reset again. A profile kept on another VBIOS goes on too and is bound to this one: stress_test it first. " +
+        "every driver reset again. A profile kept on another VBIOS goes on too and is bound to this one: stress_test it right after (load 100 and 50). " +
         "Fails when no daily profile is kept (a fresh install: offer a preset instead).")]
     public string LoadDaily() => Applied(card.Broker(BrokerRequest.OpProfile, "load"), null);
 
@@ -835,9 +837,11 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
 
     [McpServerTool(Name = "keep_as_daily", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make what the trials set on the card the new daily profile, permanently: it goes on at every start and after " +
-        "every driver reset from then on. Show preview_daily first: it lists exactly what would be kept. Kept from the card: the V/F curve, the fan curve, the memory offset, MSVDD's offsets, " +
-        "XBAR's offset and voltage demand. Not kept: the power limit (it stays the daily profile's; set_daily_power_limit " +
-        "changes it), current limits and fixed fan duties; a trial's lowered wall, limit or fixed fans go back at once. " +
+        "every driver reset from then on. Show preview_daily first: it lists exactly what would be kept. Kept from the card: the V/F curve, the core and memory P0 " +
+        "offsets, NVVDD's and MSVDD's offsets, the XBAR/SYS/Video clock offsets and voltage demands and the core's voltage " +
+        "demand, the XBAR/core clock ratio, the voltage boost, a clock lock (release one set only for a test first), the fan " +
+        "curve and the fans' zero-RPM band. Not kept: the power limit (it stays the daily profile's; set_daily_power_limit " +
+        "changes it), the F8 power request, current limits and fixed fan duties; a trial's lowered wall, limit or fixed fans go back at once. " +
         "Everything a trial set is kept, not just the last change: call back_to_daily first if only the curve should be. " +
         "The curve kept is the one on the card: if the trial ran under a lowered wall or limit, the curve is what matters, " +
         "not the wall it was found under. The trial in force (if any) " +

@@ -21,7 +21,7 @@ Same reason. A curve that runs each clock at a lower voltage uses fewer watts pe
 They decide where on the curve the card runs and what the curve looks like at that moment. The wall sets which voltage heavy load sits at. The temperature shifts the whole curve. A curve tested at another wall or temperature was tested on points or clocks the card will not actually run.
 
 ## Why tune the curve instead of a core offset?
-A core offset adds the same MHz everywhere, but this chip's headroom is not the same everywhere: +400-500 MHz at the knee (850-885 mV), almost nothing at the top. An offset large enough for the knee crashes the top; one safe for the top wastes the knee. The curve lets each voltage go to its own edge.
+A core offset (`set_core_offset`) adds the same MHz everywhere, but this chip's headroom is not the same everywhere: +400-500 MHz at the knee (850-885 mV), almost nothing at the top. An offset large enough for the knee crashes the top; one safe for the top wastes the knee. The curve lets each voltage go to its own edge.
 
 ## Why is the top of my curve flat?
 Above ~1035 mV the reference chip gained no clock: more voltage there only adds power and heat, and under the wall it takes watts from the clock. A flat top stops the card from climbing into voltage that buys nothing.
@@ -56,13 +56,19 @@ NVIDIA ships the 5090's MSVDD 50 mV inside its own reliability limit (REL -50). 
 ## Why does XBAR need a voltage demand?
 Above about +250 MHz of XBAR offset, memory-bound work lets MSVDD fall to its 825 mV floor, and then the core is pinned near 1610 MHz with 14-16 % less bandwidth. The firmware's reason is unknown. +20 mV of demand keeps MSVDD off the floor up to +300; past +300 it takes +50 mV (at +400 with +20/+30 mV the memory phase still dropped to 1830-1940 MHz). Raising VMIN does not help.
 
+## Why does XBAR stay at 0.9 x the core clock?
+The driver holds XBAR to the core clock times a ratio, 0.8999 stock. Past about +250 MHz the XBAR offset runs into it and stops paying. `set_clock_ratio` raises the ratio: on the reference card 0.92 ran XBAR 60 MHz higher at the 600 W wall, for 25 mV more MSVDD and 15 MHz of core. Whether that buys frames is not measured.
+
+## Why does my card stop at 575 W when the limit says 600?
+The firmware's own board limit did not follow the request. It happened on the reference card after the service started and found the request already at 600 W: NVML said 600, the card held 575 (its VBIOS default) for hours. Every write of the request moves the firmware's limit, so the service checks the two whenever it puts the daily profile on and writes it again if they differ; `card_report` marks it, `back_to_daily` fixes it.
+
 ## Why 600 W and not more?
 600 W is the board's own maximum power request on the 5090 FE. Going past it would need another VBIOS, which Clocktail does not touch.
 
 ## Will this damage my card?
 The limits hold:
 - Voltage never goes past NVIDIA's own ceilings (1150 mV at most; MSVDD at most 20 mV past its reliability limit).
-- Power never goes past the board's own maximum.
+- Power never goes past the board's own maximum. A rail's current limit may go above its VBIOS default for a trial (up to the driver's maximum, marked ⚠️), but on a 5090 the 600 W wall binds long before.
 - The fans never go to full later than on the stock curve.
 Most of the gain comes from running each clock at less voltage, which is gentler on the chip, not harsher. The real risk is a crash, which the service undoes. Warranty terms on overclocking vary by card maker; say so if asked.
 

@@ -177,7 +177,7 @@ public sealed partial class TuningTools
 
     [McpServerTool(Name = "adjust_xbar", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Move XBAR's clock offset and/or its voltage demand (on MSVDD) as a new trial. XBAR is the crossbar between the GPCs, " +
-        "L2 and memory; under load it is held to about 0.9 x the core clock, and about +250 MHz of offset reaches that, after " +
+        "L2 and memory; under load it is held to about 0.9 x the core clock (set_clock_ratio moves that ratio), and about +250 MHz of offset reaches that, after " +
         "which more offset only lowers the MSVDD voltage it needs. On the reference card (MSVDD REL 0): +250 made Blender 6.3 % " +
         "faster than stock, +300 with +20 mV of demand 6-7 %. The cliff: above +250 with no demand, memory-bound work lets " +
         "MSVDD fall to its 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand keeps " +

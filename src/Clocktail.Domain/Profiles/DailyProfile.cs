@@ -81,7 +81,7 @@ public sealed record DailyProfile(
     /// another VBIOS (a flash changes the stock curve under the offsets). Null when it goes on, also when either is unknown.</summary>
     public string? OtherVbios(string? vbiosNow) =>
         Known(Vbios) is { } kept && Known(vbiosNow) is { } now && !string.Equals(kept, now, StringComparison.OrdinalIgnoreCase)
-            ? $"the daily profile was kept on VBIOS {kept} and the card now runs {now}: its offsets were measured on the other firmware's curve, so it does not go on by itself (the card stays at stock); stress_test it, then load_daily puts it on and binds it to this VBIOS"
+            ? $"the daily profile was kept on VBIOS {kept} and the card now runs {now}: its offsets were measured on the other firmware's curve, so it does not go on by itself (the card stays at stock); load_daily puts it on and binds it to this VBIOS, then stress_test it at load 100 and 50"
             : null;
 
     private static string? Known(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();

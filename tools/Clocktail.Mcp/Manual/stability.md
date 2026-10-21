@@ -40,5 +40,11 @@ Which nvgwls load reaches which voltage on the founders curve at 600 W: load 30 
 ## Durations
 A 60 s `stress_test` at load 100 catches a bad curve fast; 120-300 s before keeping something. Games: at least 5-10 minutes in the heaviest scene they know, per change.
 
+## Guards that hold by themselves
+- `stress_test` stops at 85 C (`maxTempC`, at most 88): a stop is neither a pass nor a crash. Cool the card (fans, case air) and run again.
+- No trial is written while the GPU looks hung (frozen readings, reads that block): the write is refused (`gpu_hung`) and the driver reset that usually follows is recorded by the service.
+- A failed run reports what it ran at before the failure, not the frozen readings after it.
+- `begin_session unattended=true` for a mapping run nobody watches: after `maxCrashes` crashes (2 by default, 1..10) no new trial is written until a new session (`crash_budget`), so the card is not hung over and over with nobody there. The daily profile stays on.
+
 ## Windows' timeout (TDR)
 card_report's "Driver timeout (TDR)" row reads Windows' own settings, never writes them. With TdrLevel 3 (the default) a hung GPU is reset after TdrDelay seconds (2 by default, 30 on the reference machine); until then the readings freeze at the curve's top, which is why a crash's frozen tail lasts that long. stress_test waits TdrDelay + 15 s (at least 30) past its run time before it calls a run hung. With TdrLevel 0 or 1 a hang does not recover by itself (the PC freezes, or bug-checks): do not map the curve's edge until it is 3.
