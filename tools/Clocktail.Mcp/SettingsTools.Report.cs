@@ -324,12 +324,19 @@ public sealed partial class SettingsTools
         string profile = daily == null ? "none: the card runs stock" : Bool(daily, "suspended") == true ? "suspended: stock until load_daily"
             : Str(daily.Value, "kept_at") is { Length: >= 10 } kept ? $"kept {kept[..10]}" : "kept";
         var off = DailyOffCard(s);
-        if (off is { Count: > 0 })
+        // A profile kept on another VBIOS stays off the card (the service leaves it at stock); a new driver only asks for a test.
+        if (daily is { } bound && Bool(bound, "suspended") != true && Str(bound, "vbios_now") is { } vbios)
+            rows.Add(new("💾", "Daily profile", "", $"{profile} on VBIOS {Str(bound, "kept_on_vbios")}, not on the card", "", Look,
+                $"the card now runs VBIOS {vbios}: the offsets were measured on the old firmware's curve, so the service leaves the card at stock. stress_test the curve on this VBIOS, then load_daily (it binds the profile to it) or keep_as_daily a new one"));
+        else if (off is { Count: > 0 })
             rows.Add(new("💾", "Daily profile", "", $"{profile}, not on the card", "", Look,
                 $"the card differs from it: {string.Join(", ", off)}. The service puts it on after a start or a driver reset once the GPU has idled a few seconds; if this stays, back_to_daily puts it on now"));
         else
             rows.Add(new("💾", "Daily profile", "", off != null ? $"{profile}, on the card" : profile, "", Info,
                 daily != null && Bool(daily, "suspended") != true ? "the service puts it back after every boot and driver reset" : ""));
+        if (daily is { } dr && Str(dr, "driver_now") is { } driver && Str(dr, "vbios_now") == null)
+            rows.Add(new("💾", "Kept on driver", "", $"{Str(dr, "kept_on_driver")}, now {driver}", "", Look,
+                "the profile still goes on; a new driver can move where the card runs at the same settings, so re-run stress_test on the daily curve before trusting it in games"));
         if (Bool(s, "trial_in_force") == true)
             rows.Add(new("🧪", "Trial on the card", "", Str(s, "session", "trial", "change") ?? "a trial", "", Info, "not kept yet: keep_as_daily or back_to_daily"));
         return rows;

@@ -43,6 +43,8 @@ public class BrokerDispatcherTests : IDisposable
         public GpuSession Session => g;
         public OwnershipJournal Journal => j;
         public ApplySentinel Sentinel => s;
+        public string? Vbios { get; init; }
+        public string? Driver { get; init; }
         public IReadOnlyList<string> Ids => ["gpu-A"];
         public IGpuTarget? Resolve(string? id) => id == null || id == "gpu-A" ? this : null;
     }
@@ -60,7 +62,7 @@ public class BrokerDispatcherTests : IDisposable
     }
 
     /// <summary>A dispatcher wired to the power fake (the 5090's live table: FE 575 W, F8 absent).</summary>
-    private BrokerDispatcher Power(bool canWrite = true, Func<string?>? judge = null, ApplySentinel? sentinel = null)
+    private BrokerDispatcher Power(bool canWrite = true, Func<string?>? judge = null, ApplySentinel? sentinel = null, string? vbios = null, string? driver = null)
     {
         FakeDriver.Reset();
         FakeDriver.State[Slots.Info(Slot.ClientPwrPoliciesGetInfo).Shape!.Value.Word] = Info();
@@ -84,7 +86,7 @@ public class BrokerDispatcherTests : IDisposable
         var hw = new NvClient(FakeDriver.ApiFor(
             [Slot.ClientPwrPoliciesGetInfo, Slot.ClientPwrPoliciesGetControl, Slot.PowerPolicyGetInfo, Slot.PowerPolicyGetControl, Slot.PowerMonitorGetInfo],
             [Slot.ClientPwrPoliciesSetControl, Slot.PowerPolicySetControl]));
-        var t = new Target(_journal, sentinel ?? _sentinel, _gpu);
+        var t = new Target(_journal, sentinel ?? _sentinel, _gpu) { Vbios = vbios, Driver = driver };
         return new BrokerDispatcher(hw, t, _host, canWrite, judge);
     }
 
@@ -476,6 +478,40 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal(575_000u, _requests[0xfe]);   // a suspended profile writes nothing
         Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "load")).Ok);
         Assert.Equal(560_000u, _requests[0xfe]);   // until the person loads it again
+    }
+
+    /// <summary>S14: after a VBIOS flash the daily profile (offsets measured on the old firmware's curve) does not go on by
+    /// itself: a start, a driver reset and back_to_daily leave the card at stock and say why, until the person loads it,
+    /// which binds it to the new VBIOS.</summary>
+    [Fact]
+    public void A_profile_kept_on_another_vbios_does_not_go_on_by_itself()
+    {
+        var d = Power(vbios: "98.02.2E.00.0A", driver: "617.42");
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 560_000)).Ok);
+        var kept = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep"));
+        Assert.Equal("98.02.2E.00.0A", kept.Result!.Value.GetProperty("profile").GetProperty("Vbios").GetString());
+        Assert.Equal("617.42", kept.Result!.Value.GetProperty("profile").GetProperty("Driver").GetString());
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover)).Ok);
+
+        var flashed = Power(vbios: "98.02.30.00.01", driver: "617.42");
+        var show = flashed.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "show"));
+        Assert.Equal("98.02.30.00.01", show.Result!.Value.GetProperty("card").GetProperty("vbios").GetString());
+        foreach (var kind in new[] { "apply", "apply-power", "after-reset" })
+        {
+            var r = flashed.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: kind, Value: "the broker started"));
+            Assert.True(r.Ok, r.Error);
+            Assert.Contains("kept on VBIOS 98.02.2E.00.0A", r.Result!.Value.GetProperty("skipped").GetString());
+            Assert.Equal(575_000u, _requests[0xfe]);   // stock
+        }
+
+        var load = flashed.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "load"));
+        Assert.True(load.Ok, load.Error);
+        Assert.Equal(560_000u, _requests[0xfe]);
+        Assert.Equal("98.02.30.00.01", load.Result!.Value.GetProperty("profile").GetProperty("Vbios").GetString());
+        Assert.True(flashed.Dispatch(new BrokerRequest(BrokerRequest.OpRecover)).Ok);
+        var apply = flashed.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply"));
+        Assert.Equal(JsonValueKind.Null, apply.Result!.Value.GetProperty("skipped").ValueKind);
+        Assert.Equal(560_000u, _requests[0xfe]);   // bound to this VBIOS now: it goes on at every start again
     }
 
     private static BrokerRequest Exp(string kind, string? value = null) => new(BrokerRequest.OpExperiment, Kind: kind, Value: value);

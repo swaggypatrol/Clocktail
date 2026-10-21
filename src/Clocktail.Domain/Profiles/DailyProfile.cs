@@ -17,13 +17,17 @@ public sealed record ProfileWrite(string Kind, string Key, string Value);
 /// It changes only when someone keeps a new one: the person, or an agent through the MCP server. There is no automatic
 /// step-down (the user, 2026-10-19: a crash happens with the person at the machine, and the agent adjusts from there).
 /// The journal's originals stay the card's stock; this is the last-known-good above it. <see cref="Suspended"/> means
-/// stock until someone loads or keeps a profile again.
+/// stock until someone loads or keeps a profile again. <see cref="Vbios"/> and <see cref="Driver"/> are what the card ran
+/// when it was kept or loaded (null from a build before 0.2.3): the offsets were measured on that firmware's curve, so
+/// a profile kept on another VBIOS does not go on by itself (<see cref="OtherVbios"/>).
 /// </summary>
 public sealed record DailyProfile(
     IReadOnlyList<ProfileWrite> Writes,
     DateTimeOffset KeptAt,
     bool Suspended = false,
-    IReadOnlyList<string>? History = null)
+    IReadOnlyList<string>? History = null,
+    string? Vbios = null,
+    string? Driver = null)
 {
     public const string FileName = "profile.json";
 
@@ -68,6 +72,19 @@ public sealed record DailyProfile(
         kind is VfWrites.Kind or FanPolicyWrites.Kind or ClockDomainOffsets.Kind or ClockVdemand.Kind
         || (kind == ClockOffsets.Kind && key == ClockOffsets.Key(ClockDomain.Memory))
         || (kind == RailWrites.Kind && key == RailWrites.Key(Rail.Msvdd));
+
+    /// <summary>The profile bound to the card it is kept or loaded on now; an unknown VBIOS or driver leaves the old one.</summary>
+    public DailyProfile On(string? vbios, string? driver) =>
+        this with { Vbios = Known(vbios) ?? Vbios, Driver = Known(driver) ?? Driver };
+
+    /// <summary>Why the profile does not go on by itself on a card that runs <paramref name="vbiosNow"/>: it was kept on
+    /// another VBIOS (a flash changes the stock curve under the offsets). Null when it goes on, also when either is unknown.</summary>
+    public string? OtherVbios(string? vbiosNow) =>
+        Known(Vbios) is { } kept && Known(vbiosNow) is { } now && !string.Equals(kept, now, StringComparison.OrdinalIgnoreCase)
+            ? $"the daily profile was kept on VBIOS {kept} and the card now runs {now}: its offsets were measured on the other firmware's curve, so it does not go on by itself (the card stays at stock); stress_test it, then load_daily puts it on and binds it to this VBIOS"
+            : null;
+
+    private static string? Known(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
     /// <summary>The profile with one more line of history (the last 20 are kept).</summary>
     public DailyProfile Noted(DateTimeOffset at, string line) =>

@@ -77,4 +77,26 @@ public class DailyProfileTests : IDisposable
         Assert.EndsWith("line 24", d.History[^1]);
         Assert.EndsWith("line 5", d.History[0]);
     }
+
+    /// <summary>S14: a profile is bound to the VBIOS it was kept on, and one from before 0.2.3 (none recorded) or a card
+    /// whose VBIOS cannot be read is not held back.</summary>
+    [Fact]
+    public void A_profile_is_bound_to_the_vbios_it_was_kept_on()
+    {
+        var d = new DailyProfile([new("power", "fe", "560000")], T0).On("98.02.2E.00.0A", "617.42");
+        Assert.Equal(("98.02.2E.00.0A", "617.42"), (d.Vbios, d.Driver));
+        Assert.Null(d.OtherVbios("98.02.2e.00.0a"));
+        Assert.Contains("kept on VBIOS 98.02.2E.00.0A and the card now runs 98.02.30.00.01", d.OtherVbios("98.02.30.00.01"));
+        Assert.Null(d.OtherVbios(null));
+        Assert.Null(d.OtherVbios(""));
+        Assert.Null(new DailyProfile([], T0).OtherVbios("98.02.30.00.01"));
+        Assert.Equal("617.42", d.On("", null).Driver);   // an unknown reading keeps the old stamp
+
+        string path = Path.Combine(_dir, "profile.json");
+        Directory.CreateDirectory(_dir);
+        d.Save(path);
+        Assert.Equal("98.02.2E.00.0A", DailyProfile.Load(path)!.Vbios);
+        File.WriteAllText(path, """{"Writes":[],"KeptAt":"2026-10-18T13:37:00+00:00","Suspended":false}""");   // 0.2.2's file
+        Assert.Null(DailyProfile.Load(path)!.Vbios);
+    }
 }

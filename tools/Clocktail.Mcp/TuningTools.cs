@@ -701,7 +701,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
 
     [McpServerTool(Name = "load_daily", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
         "End a suspension (after stock) and put the kept daily profile on the card now; it goes on at every start and after " +
-        "every driver reset again. Fails when no daily profile is kept (a fresh install: offer a preset instead).")]
+        "every driver reset again. A profile kept on another VBIOS goes on too and is bound to this one: stress_test it first. " +
+        "Fails when no daily profile is kept (a fresh install: offer a preset instead).")]
     public string LoadDaily() => Applied(card.Broker(BrokerRequest.OpProfile, "load"), null);
 
     [McpServerTool(Name = "preview_daily", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description(
@@ -1141,7 +1142,9 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         // "end" and "crash" carry the profile's answer in "back": what that wrote is what the card went through.
         string? written = WriteOutcome.Of(r.Ok, r.Code, r.Result) ?? r.Written;
         string? error = !r.Ok && notBack.Count > 0 && (r.Error is null or "failed") ? $"not everything went back: {string.Join("; ", notBack)}" : r.Error;
-        return Out(new { success = r.Ok, error, code = r.Ok ? null : r.Code, written, next = written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst : null, data_point = point, writes = lines });
+        // Nothing written on purpose (a daily profile kept on another VBIOS, a trial in force) says why.
+        string? skipped = r.Result is { } sr ? Str(sr, "skipped") : null;
+        return Out(new { success = r.Ok, error, code = r.Ok ? null : r.Code, written, next = written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst : null, skipped, data_point = point, writes = lines });
     }
 
     private static string? Str(JsonElement e, string name) =>

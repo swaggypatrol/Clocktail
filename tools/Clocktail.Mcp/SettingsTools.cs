@@ -448,12 +448,22 @@ public sealed partial class SettingsTools(Card card)
             if (Text(w, "Kind") is { } kind && Text(w, "Key") is { } key && Text(w, "Value") is { } value)
                 writes[$"{kind}/{key}"] = value;
         string? last = p.TryGetProperty("History", out var h) && h.ValueKind == JsonValueKind.Array && h.GetArrayLength() > 0 ? h[h.GetArrayLength() - 1].GetString() : null;
+        // What the card ran when the profile was kept, against what it runs now (null where either is unknown).
+        string? keptVbios = Text(p, "Vbios"), keptDriver = Text(p, "Driver");
+        string? vbiosNow = res.TryGetProperty("card", out var c) && c.ValueKind == JsonValueKind.Object ? Text(c, "vbios") : null;
+        string? driverNow = c.ValueKind == JsonValueKind.Object ? Text(c, "driver") : null;
+        static string? Other(string? kept, string? now) =>
+            kept != null && now != null && !string.Equals(kept, now, StringComparison.OrdinalIgnoreCase) ? now : null;
         section = new
         {
             kept_at = p.GetProperty("KeptAt").GetDateTimeOffset(),
             suspended = p.GetProperty("Suspended").GetBoolean(),
             keeps = writes.Keys,
             last_change = last,
+            kept_on_vbios = keptVbios,
+            kept_on_driver = keptDriver,
+            vbios_now = Other(keptVbios, vbiosNow),
+            driver_now = Other(keptDriver, driverNow),
         };
         return writes;
     }

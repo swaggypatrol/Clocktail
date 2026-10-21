@@ -12,7 +12,7 @@ internal sealed class WindowsGpuTargets : IGpuTargets
 
     /// <param name="standDown">What each sentinel asks once it is on disk (the judge lock); null asks nothing.</param>
     public WindowsGpuTargets(GpuManager mgr, IHost host, Func<string?>? standDown = null)
-        => _targets = mgr.Gpus.Select(g => new Target(g, host, standDown)).ToList();
+        => _targets = mgr.Gpus.Select(g => new Target(g, host, standDown, mgr.Driver.Version == 0 ? null : $"{mgr.Driver.Version / 100}.{mgr.Driver.Version % 100:00}")).ToList();
 
     public IReadOnlyList<string> Ids => _targets.Select(t => t.StableId).ToList();
 
@@ -22,10 +22,12 @@ internal sealed class WindowsGpuTargets : IGpuTargets
 
     private sealed class Target : IGpuTarget
     {
-        public Target(GpuDevice g, IHost host, Func<string?>? standDown)
+        public Target(GpuDevice g, IHost host, Func<string?>? standDown, string? driver)
         {
             StableId = g.Identity.StableId;
             Name = g.Identity.Name;
+            Vbios = string.IsNullOrWhiteSpace(g.Identity.Vbios) ? null : g.Identity.Vbios;
+            Driver = driver;
             Session = new GpuSession(g.NvapiHandle, g.Identity.Name);
             var dir = BrokerPaths.GpuStateDir(StableId);
             Journal = new OwnershipJournal(Path.Combine(dir, "ownership.json"), host, StableId);
@@ -37,5 +39,7 @@ internal sealed class WindowsGpuTargets : IGpuTargets
         public GpuSession Session { get; }
         public OwnershipJournal Journal { get; }
         public ApplySentinel Sentinel { get; }
+        public string? Vbios { get; }
+        public string? Driver { get; }
     }
 }

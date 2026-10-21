@@ -21,6 +21,10 @@ public interface IGpuTarget
     GpuSession Session { get; }
     OwnershipJournal Journal { get; }
     ApplySentinel Sentinel { get; }
+    /// <summary>The VBIOS the card runs, null when unknown: a daily profile is bound to it.</summary>
+    string? Vbios => null;
+    /// <summary>The driver version ("617.42"), null when unknown.</summary>
+    string? Driver => null;
 }
 
 /// <summary>The GPUs the broker manages. A null id selects the first, matching the CLI's default adapter.</summary>
@@ -223,7 +227,7 @@ public sealed class BrokerDispatcher
         switch (req.Kind)
         {
             case "show":
-                return Ok(new { success = true, path, profile });
+                return Ok(new { success = true, path, profile, card = new { vbios = target.Vbios, driver = target.Driver } });
             case "preview":
             {
                 // What keep, or a preset or saved profile (Value: its name), would make the daily profile, against the daily
@@ -251,7 +255,7 @@ public sealed class BrokerDispatcher
                 if (writes.Count == 0) return Fail("nothing this broker holds differs from stock; nothing to keep", BrokerCode.CannotWrite);
                 var trialKept = CloseTrial(target, Experiment.Stable, "kept as the daily profile");
                 string listed = string.Join("; ", writes.Select(w => $"{w.Kind}/{w.Key}={w.Value}"));
-                var kept = new DailyProfile(DailyProfile.InWriteOrder(writes), _host.Now, History: profile?.History)
+                var kept = new DailyProfile(DailyProfile.InWriteOrder(writes), _host.Now, History: profile?.History).On(target.Vbios, target.Driver)
                     .Noted(_host.Now, req.Value is { } why ? $"kept: {listed} ({why})" : $"kept: {listed}");
                 kept.Save(path);
                 // A trial's lowered wall or current limit is still on the card: the kept wall goes back on now (and the
@@ -302,7 +306,7 @@ public sealed class BrokerDispatcher
                 // The tray's "Load": the person puts the profile back on, so a suspension ends here, not at the next keep.
                 if (profile == null) return Fail("no daily profile is kept; nothing to load", BrokerCode.CannotWrite);
                 CloseTrial(target, Experiment.Survived, "the daily profile went back on");
-                profile = profile.Noted(_host.Now, "loaded by request") with { Suspended = false };
+                profile = profile.Noted(_host.Now, "loaded by request").On(target.Vbios, target.Driver) with { Suspended = false };
                 profile.Save(path);
                 var r = ApplyProfile(target, profile, path);
                 Log(target, "Daily profile loaded", Writes(r));
@@ -317,7 +321,7 @@ public sealed class BrokerDispatcher
                 if (!preset.Fits(target.Name))
                     return Fail($"'{preset.Name}' was tuned on an {preset.Gpu}; this card is {target.Name}. Nothing was written", BrokerCode.CannotWrite);
                 CloseTrial(target, Experiment.Survived, $"preset '{preset.Name}' went on");
-                var loaded = new DailyProfile(DailyProfile.InWriteOrder(preset.Writes), _host.Now, History: profile?.History)
+                var loaded = new DailyProfile(DailyProfile.InWriteOrder(preset.Writes), _host.Now, History: profile?.History).On(target.Vbios, target.Driver)
                     .Noted(_host.Now, $"preset '{preset.Name}' loaded");
                 var r = ApplyProfile(target, loaded, path);
                 if (!r.Ok) return NotLoaded(target, $"preset '{preset.Name}'", r, profile, path);
@@ -370,7 +374,7 @@ public sealed class BrokerDispatcher
                     if (!now.Ok) return now;   // refused (out of the board's range): the profile stays as it was
                 }
                 var walled = new DailyProfile(DailyProfile.InWriteOrder([.. (profile?.Writes ?? []).Where(w => w.Kind != PowerCap.Kind || w.Key != key), new ProfileWrite(PowerCap.Kind, key, value)]),
-                    _host.Now, profile?.Suspended ?? false, profile?.History).Noted(_host.Now, $"daily power limit {mw / 1000.0:0.#} W");
+                    _host.Now, profile?.Suspended ?? false, profile?.History, profile != null ? profile.Vbios : target.Vbios, profile != null ? profile.Driver : target.Driver).Noted(_host.Now, $"daily power limit {mw / 1000.0:0.#} W");
                 walled.Save(path);
                 Log(target, $"Daily power limit · {mw / 1000.0:0.#} W", [
                     .. (profile?.Writes ?? []).Where(w => w.Kind == PowerCap.Kind && w.Key == key).Select(w => $"Old: {w.Kind}/{w.Key} = {w.Value}"),
@@ -755,7 +759,7 @@ public sealed class BrokerDispatcher
             return Fail($"no preset or saved profile named '{value}' (known: {known})", BrokerCode.CannotWrite);
         }
         CloseTrial(target, Experiment.Survived, $"saved profile '{name}' went on");
-        var loaded = new DailyProfile(DailyProfile.InWriteOrder(saved.Writes), _host.Now, History: profile?.History)
+        var loaded = new DailyProfile(DailyProfile.InWriteOrder(saved.Writes), _host.Now, History: profile?.History).On(target.Vbios, target.Driver)
             .Noted(_host.Now, $"saved profile '{name}' loaded");
         var r = ApplyProfile(target, loaded, path);
         if (!r.Ok) return NotLoaded(target, $"saved profile '{name}'", r, profile, path);
@@ -883,6 +887,7 @@ public sealed class BrokerDispatcher
                             w.TryGetProperty(b, out var u) && u.ValueKind == JsonValueKind.String ? u.GetString()! : "?";
                         yield return $"{Get("kind", "Kind")}/{Get("key", "Key")}: {Get("before", "Current")} → {Get("after", "Original")} ({Get("outcome", "action")})";
                     }
+        if (r.Result is { } s && s.TryGetProperty("skipped", out var why) && why.ValueKind == JsonValueKind.String) yield return $"Not put on: {why.GetString()}";
         if (!r.Ok) yield return $"Failed: {r.Error}";
     }
 
@@ -922,9 +927,13 @@ public sealed class BrokerDispatcher
     private BrokerResponse ApplyProfile(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only = null)
     {
         var applied = new List<JsonElement>();
+        // A profile kept on another VBIOS goes on only when someone loads or keeps one (which binds it to this VBIOS):
+        // until then whatever puts it on puts the card back to stock instead, as a suspended profile does.
+        string? skipped = profile?.OtherVbios(target.Vbios);
+        var writing = skipped != null ? null : profile;
         // A trial's current limits and fixed fans are never part of a profile, nor anything else a trial set unless the
         // profile writes it too: whatever puts the whole profile on puts them back first.
-        foreach (var held in CellsToPutBack(target, profile, whole: only == null).ToList())
+        foreach (var held in CellsToPutBack(target, writing, whole: only == null).ToList())
         {
             if (held.Kind == ClockOffsets.Kind && CurveAside(target, held.Key, held.Original) is { } aside)
             {
@@ -935,8 +944,8 @@ public sealed class BrokerDispatcher
             if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
             if (!r.Ok) return new BrokerResponse(false, r.Error ?? $"{held.Id} did not go back", Element(new { success = false, path, profile, applied }), r.Code);
         }
-        if (profile is { Suspended: false })
-            foreach (var w in profile.Writes.Where(only ?? (_ => true)))
+        if (writing is { Suspended: false })
+            foreach (var w in writing.Writes.Where(only ?? (_ => true)))
             {
                 if (w.Kind == ClockOffsets.Kind && CurveAside(target, w.Key, w.Value) is { } aside)
                 {
@@ -948,7 +957,7 @@ public sealed class BrokerDispatcher
                 if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
                 if (!r.Ok) return new BrokerResponse(false, r.Error ?? $"{w.Kind}/{w.Key} did not apply", Element(new { success = false, path, profile, applied }), r.Code);
             }
-        return Ok(new { success = true, path, profile, applied });
+        return Ok(new { success = true, path, profile, applied, skipped });
     }
 
     /// <summary>The general write: set kind/key to value through the registry. A limit the driver reveals only after
