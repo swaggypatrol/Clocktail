@@ -124,7 +124,8 @@ public sealed partial class TuningTools(Card card, Residency residency)
 
     [McpServerTool(Name = "begin_session", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Start an experiment session for a game. Every adjust_curve after this is a trial; its outcome becomes a data point " +
-        "(stable, survived until replaced, or crash). A crash during a trial does not step the daily profile down.")]
+        "(stable, survived until replaced, or crash). A crash during a trial does not step the daily profile down. A trial " +
+        "still in force from an earlier session ends first and the daily profile goes back on, as end_session does.")]
     public string BeginSession(
         [Description("The game being played.")] string game,
         [Description("Anything worth keeping with the data (settings, scene).")] string? note = null) =>

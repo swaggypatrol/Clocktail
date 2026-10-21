@@ -717,6 +717,31 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("ocp/nvvdd: 300000 → 600000", log);
     }
 
+    /// <summary>A new session while a trial is in force ends that trial as end_session does: its wall goes back to the daily
+    /// one, so the new session's data points are recorded under the wall they ran at, and a first keep cannot keep the
+    /// old trial's lowered wall as the daily one.</summary>
+    [Fact]
+    public void A_new_session_puts_the_trial_in_force_back_first()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 575 → 450 W", power_mw = 450_000u, keep_curve = true }))).Ok);
+        Assert.Equal(450_000u, _requests[0xfe]);
+
+        var b = d.Dispatch(Exp("begin", """{"game":"B"}"""));
+        Assert.True(b.Ok, b.Error);
+        Assert.Equal(575_000u, _requests[0xfe]);                    // no daily profile yet: back to stock
+        Assert.Empty(_journal.Inspect().Items);
+        Assert.Equal(Clocktail.Mcp.WriteOutcome.Applied, Clocktail.Mcp.WriteOutcome.Of(b.Ok, b.Code, b.Result));
+        var a = Assert.Single(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10));
+        Assert.Equal(450_000u, a.PowerMw);                           // A's trial, recorded under its own wall
+        Assert.Equal("B", Experiment.Load(Experiment.PathBeside(_journal.Path))!.Game);
+
+        // With nothing held, the next session begins with nothing to put back.
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"C"}""")).Ok);
+        Assert.Contains("Last trial: wall 575 → 450 W", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
     /// <summary>A trial of several items whose later item is refused does not leave the earlier ones on the card: they go
     /// back, the trial before stays in force, and the answer says nothing changed. Before, the agent was told "written:
     /// none" while the lowered wall stayed on.</summary>

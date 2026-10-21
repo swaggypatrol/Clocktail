@@ -421,13 +421,23 @@ public sealed class BrokerDispatcher
             {
                 var a = Args(req.Value);
                 string game = Text(a, "game") ?? throw new ArgumentException("begin needs a game");
-                CloseTrial(target, Experiment.Survived, "a new session began");
+                // A trial still in force from the session before ends as "end" ends it: its settings go back with the daily
+                // profile, so the new session's trials run on, and are recorded under, the daily wall and limits it says.
+                var closed = CloseTrial(target, Experiment.Survived, "a new session began");
+                IReadOnlyList<string> writes = [];
+                BrokerResponse? back = closed != null ? Back(target, closed, out writes) : null;
+                if (back is { Ok: false })
+                {
+                    Log(target, $"Session not started · {game}", [$"Last trial: {closed!.Change}", "Back to the daily profile did not all land:", .. writes]);
+                    return new BrokerResponse(false, $"the trial in force did not all go back ({back.Error}); the new session did not begin", back.Result, back.Code);
+                }
                 lock (_experiment)
                 {
                     var exp = new Experiment(game, Text(a, "note"), _host.Now);
                     exp.Save(path);
-                    Log(target, $"Session started · {game}", [exp.Note]);
-                    return Ok(new { success = true, path, data, experiment = exp });
+                    Log(target, $"Session started · {game}", [exp.Note,
+                        .. closed != null ? (string?[])[$"Last trial: {closed.Change}, ran {closed.Minutes} min", "Back to the daily profile:", .. writes] : []]);
+                    return Ok(new { success = true, path, data, experiment = exp, back = back?.Result });
                 }
             }
             case "note":
