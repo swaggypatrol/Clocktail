@@ -782,6 +782,22 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("Trial-only settings handed back", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
+    /// <summary>The fan guard's "fans-back" hands back a fixed fan duty only: a lowered current limit lowers power, so it
+    /// stays, and with no fan duty held nothing is written or recorded.</summary>
+    [Fact]
+    public void Fans_back_leaves_a_current_limit_alone()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"sweep"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "NVVDD 350 A", nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+        var r = d.Dispatch(Exp("fans-back", "the fan guard: 87 °C"));
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(0, r.Result!.Value.GetProperty("released").GetArrayLength());
+        Assert.Equal(350_000u, CurrentLimitsFixture.Limit(13));
+        Assert.Empty(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10));
+    }
+
     /// <summary>A new session while a trial is in force ends that trial as end_session does: its wall goes back to the daily
     /// one, so the new session's data points are recorded under the wall they ran at, and a first keep cannot keep the
     /// old trial's lowered wall as the daily one.</summary>

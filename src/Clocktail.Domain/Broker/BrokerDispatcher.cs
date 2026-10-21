@@ -601,34 +601,14 @@ public sealed class BrokerDispatcher
                 return r;
             }
             case "release":
-            {
                 // The agent running the trial is gone (its MCP server's input closed): what only a watching agent may hold
-                // goes back, a fixed fan duty (it can hold the fans at 30 % at a 600 W wall) and lowered current limits. The
-                // rest of the trial stays on the card and in force, recorded from here as a trial of its own without them.
-                // No curve is written: the GPU may be under load. With two agents on one card, one leaving hands these back
-                // for both: the safe side.
-                string why = req.Value ?? "the agent disconnected";
-                var held = HeldTrialCells(target).OrderBy(i => DailyProfile.Rank(i.Kind)).ToList();
-                if (held.Count == 0) return Ok(new { success = true, released = Array.Empty<object>() });
-                var back = held.Select(h => Dispatch(PutBack(target, h))).ToList();
-                DataPoint? closed = null;
-                lock (_experiment)
-                {
-                    if (Experiment.Load(path) is { Trial: { } t } exp)
-                    {
-                        closed = t.Marked ? null : exp.Point(Experiment.Survived, _host.Now, $"{why}: fans and current limits handed back");
-                        if (closed != null) Experiment.Append(data, closed);
-                        (exp with { Trial = t with { At = _host.Now, Marked = false, FanPct = null, NvvddMa = null, MsvddMa = null,
-                            Change = $"{t.Change} (fans and current limits handed back: {why})" } }).Save(path);
-                    }
-                }
-                Log(target, "Trial-only settings handed back", [$"Reason: {why}",
-                    closed != null ? $"The trial ran {closed.Minutes} min with them: recorded as survived; the rest of it stays in force" : null,
-                    .. back.SelectMany(Writes)]);
-                bool ok = back.All(x => x.Ok);
-                return new BrokerResponse(ok, ok ? null : $"not every trial-only setting went back ({back.First(x => !x.Ok).Error}): read the card",
-                    Element(new { success = ok, released = (JsonElement[])[.. back.SelectMany(AppliedOf)] }), ok ? null : back.First(x => !x.Ok).Code);
-            }
+                // goes back, a fixed fan duty (it can hold the fans at 30 % at a 600 W wall) and lowered current limits.
+                // With two agents on one card, one leaving hands these back for both: the safe side.
+                return HandBack(target, path, data, req.Value ?? "the agent disconnected", fansOnly: false);
+            case "fans-back":
+                // The service's own fan guard: the card got too hot (or unreadable) under a fixed fan duty. Only the fans
+                // go back to the curve; a lowered current limit only lowers power, so it stays.
+                return HandBack(target, path, data, req.Value ?? "the fan guard", fansOnly: true);
             case "end":
             {
                 var exp = Experiment.Load(path);
@@ -641,7 +621,7 @@ public sealed class BrokerDispatcher
                 return r;
             }
             default:
-                return Fail($"experiment needs show, begin, try, stable, crash, note, release or end, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"experiment needs show, begin, try, stable, crash, note, release, fans-back or end, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 
@@ -723,6 +703,36 @@ public sealed class BrokerDispatcher
         string error = $"{failed.Error}; {what} was not loaded: the daily profile stays as it was" +
             (back.Ok ? " and is back on the card" : $", but it did not all go back on ({back.Error}): read the card");
         return new BrokerResponse(false, error, Element(new { success = false, path, profile, applied = (JsonElement[])[.. AppliedOf(failed), .. AppliedOf(back)] }), failed.Code);
+    }
+
+    /// <summary>
+    /// The trial-only cells (a fixed fan duty, and unless <paramref name="fansOnly"/> lowered current limits) back to their
+    /// originals. The rest of the trial stays on the card and in force, recorded from here as a trial of its own without
+    /// them, the part before as survived. No curve is written: the GPU may be under load.
+    /// </summary>
+    private BrokerResponse HandBack(IGpuTarget target, string path, string data, string why, bool fansOnly)
+    {
+        var held = HeldTrialCells(target).Where(i => !fansOnly || i.Kind == FanControl.Kind).OrderBy(i => DailyProfile.Rank(i.Kind)).ToList();
+        if (held.Count == 0) return Ok(new { success = true, released = Array.Empty<object>() });
+        string what = fansOnly ? "fans handed back to the curve" : "fans and current limits handed back";
+        var back = held.Select(h => Dispatch(PutBack(target, h))).ToList();
+        DataPoint? closed = null;
+        lock (_experiment)
+        {
+            if (Experiment.Load(path) is { Trial: { } t } exp)
+            {
+                closed = t.Marked ? null : exp.Point(Experiment.Survived, _host.Now, $"{why}: {what}");
+                if (closed != null) Experiment.Append(data, closed);
+                var next = fansOnly ? t with { FanPct = null } : t with { FanPct = null, NvvddMa = null, MsvddMa = null };
+                (exp with { Trial = next with { At = _host.Now, Marked = false, Change = $"{t.Change} ({what}: {why})" } }).Save(path);
+            }
+        }
+        Log(target, fansOnly ? "Fans handed back to the curve" : "Trial-only settings handed back", [$"Reason: {why}",
+            closed != null ? $"The trial ran {closed.Minutes} min with them: recorded as survived; the rest of it stays in force" : null,
+            .. back.SelectMany(Writes)]);
+        bool ok = back.All(x => x.Ok);
+        return new BrokerResponse(ok, ok ? null : $"not every trial-only setting went back ({back.First(x => !x.Ok).Error}): read the card",
+            Element(new { success = ok, released = (JsonElement[])[.. back.SelectMany(AppliedOf)] }), ok ? null : back.First(x => !x.Ok).Code);
     }
 
     /// <summary>The write transactions an answer carries (its "applied" list), none for a refusal.</summary>

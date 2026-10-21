@@ -161,6 +161,23 @@ static int Run()
     // The last 60 s of each GPU in memory; on a reset the window is saved and its crash point steps the curve there.
     var sampler = new FlightSampler(mgr, hw, targets.Ids.Select(id => (id, targets.Resolve(id)!.Session)).ToList());
     KeepRunning("the flight recorder", () => sampler.RunAsync(cts.Token));
+    // A fixed fan duty is the agent's to watch; when the card gets too hot under one anyway, the fans go back to the curve.
+    var fanGuard = new FanGuard(dispatcher.Dispatch, Log);
+    KeepRunning("the fan guard", async () =>
+    {
+        while (!cts.IsCancellationRequested)
+        {
+            var now = DateTimeOffset.Now;
+            foreach (var (id, recorder) in sampler.Recorders)
+            {
+                var window = recorder.Freeze();
+                var last = window.Count > 0 ? window[^1] : null;
+                fanGuard.Look(id, last != null && now - last.At < TimeSpan.FromSeconds(3) ? last.TempC : null, now);
+            }
+            try { await Task.Delay(TimeSpan.FromSeconds(1), cts.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+        }
+    });
     // The driver this process opened can go away under it (a device restart, a driver update), and nothing it holds can be
     // rebound safely after that: once a session or NVML says so, the broker hands over to a fresh worker, which puts the
     // daily profile back on as at any start.
