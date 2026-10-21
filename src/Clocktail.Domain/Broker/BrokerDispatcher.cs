@@ -496,6 +496,7 @@ public sealed class BrokerDispatcher
                 // core P0 offset, NVVDD's offsets, SYS/Video, the boost, a clock lock). The board wall stays power_mw (a
                 // trial's wall is never kept) and the curve stays curve.
                 var extra = new List<ProfileWrite>();
+                var creates = new HashSet<string>();
                 if (a.ValueKind == JsonValueKind.Object && a.TryGetProperty("writes", out var ws) && ws.ValueKind == JsonValueKind.Array)
                     foreach (var w in ws.EnumerateArray())
                     {
@@ -505,6 +506,8 @@ public sealed class BrokerDispatcher
                         if (kind == VfWrites.Kind) throw new ArgumentException("the curve goes in 'curve', not in writes");
                         if (kind == PowerCap.Kind && key.Equals(PowerCap.Key(PowerRequestKind.Ordinary), StringComparison.OrdinalIgnoreCase))
                             throw new ArgumentException("the board wall goes in 'power_mw', not in writes");
+                        // create: the F8 request may be created (the driver cannot delete one; set_power_cap asks the person first).
+                        if (w.TryGetProperty("create", out var cr) && cr.ValueKind == JsonValueKind.True) creates.Add($"{kind}/{key.ToLowerInvariant()}");
                         extra.Add(new ProfileWrite(kind, key, Text(w, "value") ?? throw new ArgumentException("a trial write names its value")));
                     }
                 bool keepCurve = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("keep_curve", out var kc) && kc.ValueKind == JsonValueKind.True
@@ -558,7 +561,7 @@ public sealed class BrokerDispatcher
                     if (xbarKhz is { } xk)
                         queue.Add((DailyProfile.Rank(ClockDomainOffsets.Kind), WriteOf(target, ClockDomainOffsets.Kind, ClockDomainOffsets.Key(ClockDomainId.Xbar), Num(xk))));
                     foreach (var w in extra)
-                        queue.Add((DailyProfile.Rank(w.Kind), WriteOf(target, w.Kind, w.Key, w.Value)));
+                        queue.Add((DailyProfile.Rank(w.Kind), WriteOf(target, w.Kind, w.Key, w.Value) with { AllowCreate = creates.Contains($"{w.Kind}/{w.Key.ToLowerInvariant()}") }));
                     foreach (var (_, request) in queue.OrderBy(q => q.Rank))
                     {
                         if (!written.All(x => x.Ok)) break;
@@ -715,8 +718,10 @@ public sealed class BrokerDispatcher
     private static BrokerRequest WriteOf(IGpuTarget target, string kind, string key, string value) =>
         new(BrokerRequest.OpWrite, target.StableId, Kind: kind, Key: key, Value: value, EnableSlots: Setters(kind));
 
-    /// <summary>A cell only a trial sets and no daily profile holds: a rail's current limit, a fixed fan duty.</summary>
-    private static bool TrialOnly(OwnedItem i) => i.Kind is CurrentLimitWrites.Kind or FanControl.Kind;
+    /// <summary>A cell only a trial sets and no daily profile holds: a rail's current limit, a fixed fan duty, the F8 request
+    /// (it can only go back to non-limiting, never away).</summary>
+    private static bool TrialOnly(OwnedItem i) => i.Kind is CurrentLimitWrites.Kind or FanControl.Kind
+        || i.Kind == PowerCap.Kind && i.Key == PowerCap.Key(PowerRequestKind.Additional);
 
     /// <summary>The trial-only cells this broker holds.</summary>
     private static IEnumerable<OwnedItem> HeldTrialCells(IGpuTarget target) => target.Journal.Inspect().Items.Where(TrialOnly);

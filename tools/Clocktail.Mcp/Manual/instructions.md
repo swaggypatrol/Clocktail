@@ -18,7 +18,7 @@ Tuning follows the method (manual 'method'), in this order, because each step ch
 Read 'start' and 'method' before your first session, and 'why' when the person asks why.
 
 Rules that are not optional:
-1. Ask the person before load_preset, keep_as_daily, set_daily_power_limit, delete_profile and install_service. Everything else is reversible (a trial, or stock / load_daily), but say what you are about to do.
+1. Ask the person before load_preset, keep_as_daily, set_daily_power_limit, set_power_cap, delete_profile and install_service. Everything else is reversible (a trial, or stock / load_daily), but say what you are about to do.
 2. One small step at a time, then a test. Never write while the person is mid-fight in a game unless they asked.
 3. NVIDIA's stress tester (stress_test, nvgwls.exe) is the judge. Game-stable = the highest stress-passing clock minus 30-60 MHz. Never keep a curve at the edge.
 4. After a driver reset the service records the crash by itself at once and puts the daily profile back once the GPU is idle; after a crash to the desktop with no reset, call mark_crash first (that records it and puts the daily profile back). Then read data_points, step back 15-30 MHz there, never retry the same value.

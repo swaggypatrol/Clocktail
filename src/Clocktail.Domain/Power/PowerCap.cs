@@ -71,16 +71,22 @@ public sealed class PowerCap(NvClient hw, OwnershipJournal journal, ApplySentine
 
     public static string Key(PowerRequestKind k) => k == PowerRequestKind.Ordinary ? "fe" : "f8";
 
+    /// <summary>F8 is read back until it shows twice in a row, up to 16 times 100 ms apart, as the original program did
+    /// (re/power-thermal.md §6); FE lands at once (drills 12/13).</summary>
     public static TransactionSpec Spec(int board, PowerRequestKind kind) => new(
         Slot.ClientPwrPoliciesGetControl, Slot.ClientPwrPoliciesSetControl,
-        PrepareRead: b => PowerRequestsParser.BuildControlQuery(board, kind).CopyTo(b, 0));
+        PrepareRead: b => PowerRequestsParser.BuildControlQuery(board, kind).CopyTo(b, 0),
+        ReadbackTries: kind == PowerRequestKind.Additional ? 16 : 1);
 
     public static string Encode(uint? mw) => mw?.ToString(CultureInfo.InvariantCulture) ?? Absent;
     public static uint? Decode(string? s) => s is null or Absent ? null : uint.Parse(s, CultureInfo.InvariantCulture);
 
-    public static OwnedCell Cell(int board, PowerRequestKind kind) => new(
-        Kind, Key(kind), "mW", $"{kind} power request, mW", Spec(board, kind),
-        raw => Encode(PowerRequestsParser.ParseControl(raw, board, kind).Mw));
+    /// <summary>The request as an owned cell. An absent F8 reads as the board's maximum: the driver cannot delete a request,
+    /// so once one is created the closest it can go back to is non-limiting, and that is the original the journal keeps
+    /// and a give-back writes.</summary>
+    public static OwnedCell Cell(BoardPowerInfo board, PowerRequestKind kind) => new(
+        Kind, Key(kind), "mW", $"{kind} power request, mW", Spec(board.Board, kind),
+        raw => Encode(PowerRequestsParser.ParseControl(raw, board.Board, kind).Mw ?? (kind == PowerRequestKind.Additional ? board.MaxMw : null)));
 
     public static Func<ReadOnlyMemory<byte>, Mutation> Plan(BoardPowerInfo board, PowerRequestKind kind, uint mw, bool allowCreate = false) =>
         raw => PowerRequestRules.Plan(board, kind, mw, raw.ToArray(), allowCreate);
@@ -88,7 +94,7 @@ public sealed class PowerCap(NvClient hw, OwnershipJournal journal, ApplySentine
     public PowerCapResult Apply(GpuSession gpu, PowerRequestKind kind, uint mw, bool takeOver = false, bool allowCreate = false)
     {
         var board = PowerRequestsReader.ReadBoard(hw, gpu);
-        var r = new OwnedWriter(hw, journal, sentinel, host).Apply(gpu, Cell(board.Board, kind), Plan(board, kind, mw, allowCreate), takeOver, mw.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        var r = new OwnedWriter(hw, journal, sentinel, host).Apply(gpu, Cell(board, kind), Plan(board, kind, mw, allowCreate), takeOver, mw.ToString(System.Globalization.CultureInfo.InvariantCulture));
         return new PowerCapResult(kind, mw, Decode(r.Before), Decode(r.After), r.Tx, r.Ownership, r.SentinelCleared);
     }
 }

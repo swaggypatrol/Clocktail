@@ -161,21 +161,48 @@ public class PowerCapTests : IDisposable
     }
 
     [Fact]
-    public void Creating_F8_records_absent_as_the_original_and_cannot_restore_it()
+    public void Creating_F8_records_the_board_maximum_as_the_original_and_gives_back_to_it()
     {
         var (cap, _) = Setup();
         var r = cap.Apply(_gpu, PowerRequestKind.Additional, 550_000, allowCreate: true);
         Assert.Equal(TxOutcome.Applied, r.Tx.Outcome);
-        Assert.Null(r.BeforeMw);
+        Assert.Equal(600_000u, r.BeforeMw);   // absent reads as the board maximum
         Assert.Equal(550_000u, r.AfterMw);
-        Assert.Equal(PowerCap.Absent, Assert.Single(_journal.Load()!.Items).Original);
+        Assert.Equal("600000", Assert.Single(_journal.Load()!.Items).Original);   // absent: the closest it can go back to is non-limiting
 
-        // A driver that normalizes the value: the restore has nowhere to go, and the result says so.
-        FakeDriver.RequestApplier = (state, req) => { uint v = U(req, PowerRequestsLayout.ControlEntry(Board)); _requests[0xf8] = v > 550_000 ? 545_000 : v; return state; };   // an overshoot lands on a different value; the restore of 550 W goes through
+        // A driver that normalizes the value: the previous value existed, so it is restored, and the original is still owed.
+        FakeDriver.RequestApplier = (state, req) => { uint v = U(req, PowerRequestsLayout.ControlEntry(Board)); _requests[0xf8] = v > 550_000 && v < 600_000 ? 545_000 : v; return state; };
         var clamped = cap.Apply(_gpu, PowerRequestKind.Additional, 560_000);
         Assert.Equal(TxOutcome.Failed, clamped.Tx.Outcome);
-        Assert.Equal(RestoreState.Restored, clamped.Tx.Restore);   // the previous value 550000 existed, so it was restored
-        Assert.StartsWith("held", clamped.Ownership);               // but the original "absent" is still owed
+        Assert.Equal(RestoreState.Restored, clamped.Tx.Restore);
+        Assert.StartsWith("held", clamped.Ownership);
+
+        var back = cap.Apply(_gpu, PowerRequestKind.Additional, 600_000);   // the give-back: the board maximum, released
+        Assert.Equal(TxOutcome.Applied, back.Tx.Outcome);
+        Assert.StartsWith("released", back.Ownership);
+        Assert.Null(_journal.Load()?.Items.FirstOrDefault());
+    }
+
+    /// <summary>F8 is read back until it shows twice in a row (re/power-thermal.md §6): a request that lands on the third
+    /// read is Applied, not Failed and restored.</summary>
+    [Fact]
+    public void An_f8_request_that_lands_late_is_read_back_until_it_shows()
+    {
+        var (cap, _) = Setup();
+        uint controlWord = Slots.Info(Slot.ClientPwrPoliciesGetControl).Shape!.Value.Word;
+        uint? pending = null;
+        int reads = 0;
+        var answer = FakeDriver.QueryResponder!;
+        FakeDriver.RequestApplier = (state, req) => { pending = U(req, PowerRequestsLayout.ControlEntry(Board)); reads = 0; return state; };
+        FakeDriver.QueryResponder = q =>
+        {
+            if (BitConverter.ToUInt32(q) == controlWord && pending is { } p && ++reads >= 3) { _requests[0xf8] = p; pending = null; }
+            return answer(q);
+        };
+        var r = cap.Apply(_gpu, PowerRequestKind.Additional, 550_000, allowCreate: true);
+        Assert.Equal(TxOutcome.Applied, r.Tx.Outcome);
+        Assert.Equal(550_000u, _requests[0xf8]);
+        Assert.Equal(1, FakeDriver.Sets);   // no restore was written
     }
 
     [Fact]
@@ -203,7 +230,7 @@ public class PowerCapTests : IDisposable
     }
 
     [Fact]
-    public void Recovery_gives_a_numeric_power_original_back_and_refuses_absent()
+    public void Recovery_gives_the_power_originals_back_and_a_created_f8_goes_to_the_board_maximum()
     {
         var (cap, hw) = Setup();
         cap.Apply(_gpu, PowerRequestKind.Ordinary, 500_000);
@@ -215,8 +242,8 @@ public class PowerCapTests : IDisposable
         Assert.Equal(RecoveryAction.Written, fe.Action);
         Assert.Equal(575_000u, _requests[0xfe]);
         var f8 = rec.Items.Single(i => i.Key == "f8");
-        Assert.Equal(RecoveryAction.Refused, f8.Action);
-        Assert.Contains("absent", f8.Detail);
-        Assert.False(rec.Clean);   // the F8 record stays until a person decides what "non-limiting" should be
+        Assert.Equal(RecoveryAction.Written, f8.Action);
+        Assert.Equal(600_000u, _requests[0xf8]);   // it cannot be deleted: non-limiting is as close to absent as it goes
+        Assert.True(rec.Clean);
     }
 }

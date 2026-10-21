@@ -57,7 +57,11 @@ public sealed record TransactionSpec(
     /// answer, or a check that throws, is a veto handled like a readback mismatch: the edited fields are put back and
     /// verified. A limit that only shows after the write belongs here and not in the caller, so no path that writes
     /// the cell (a user write, recovery, the broker) can skip it.</summary>
-    Func<NvClient, GpuSession, string?>? CheckAfterWrite = null)
+    Func<NvClient, GpuSession, string?>? CheckAfterWrite = null,
+    /// <summary>A request the firmware lands a little after the call (F8): the readback is taken up to this many times,
+    /// <see cref="ReadbackGap"/> apart, until two in a row match; the last one decides. 1: read back once.</summary>
+    int ReadbackTries = 1,
+    TimeSpan? ReadbackGap = null)
 {
     public byte[] ReadBuffer()
     {
@@ -214,13 +218,20 @@ public sealed class Transaction
                 return Fail(TxOutcome.Aborted, RestoreState.NotNeeded, $"write refused before reaching the driver: {w}", before, null, w, log);
 
             // 5. Read back, whatever the write reported: the driver may have applied part of it.
-            var after = spec.ReadBuffer();
-            var rb = Call(gpu, spec.Get, spec.Index, after);
-            log.Add($"readback {spec.Get}: {rb}");
-            if (!rb.IsOk)
-                return Fail(TxOutcome.Failed, RestoreState.NotAttempted, $"write returned {w}, and the readback failed ({rb}); hardware state unknown", before, null, rb, log);
-
-            var diff = FirstDifference(after, expected, spec.VolatileRanges);
+            byte[] after;
+            int? diff;
+            for (int i = 0, agree = 0; ; i++)
+            {
+                after = spec.ReadBuffer();
+                var rb = Call(gpu, spec.Get, spec.Index, after);
+                log.Add($"readback {spec.Get}: {rb}");
+                if (!rb.IsOk)
+                    return Fail(TxOutcome.Failed, RestoreState.NotAttempted, $"write returned {w}, and the readback failed ({rb}); hardware state unknown", before, null, rb, log);
+                diff = FirstDifference(after, expected, spec.VolatileRanges);
+                agree = diff == null ? agree + 1 : 0;
+                if (spec.ReadbackTries <= 1 || agree >= 2 || i + 1 >= spec.ReadbackTries) break;
+                Thread.Sleep(spec.ReadbackGap ?? TimeSpan.FromMilliseconds(100));
+            }
             if (diff == null)
             {
                 string detail = w.IsOk ? "readback matches" : $"driver reported {w} but the readback matches the request";

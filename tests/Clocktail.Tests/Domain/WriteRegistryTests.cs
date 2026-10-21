@@ -211,7 +211,7 @@ public class WriteRegistryTests : IDisposable
         var allowed = path.Prepare(hw, _gpu, "f8", "500000", new WriteOptions(AllowCreate: true));
         var a = Writer(hw).Apply(_gpu, allowed.Cell, allowed.Plan!);
         Assert.Equal(TxOutcome.Applied, a.Tx.Outcome);
-        Assert.Equal(PowerCap.Absent, a.Original);
+        Assert.Equal("600000", a.Original);   // absent F8 reads as the board maximum, what a give-back writes
     }
 
     /// <summary>

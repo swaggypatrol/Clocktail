@@ -84,7 +84,7 @@ public class CapabilitiesTests
         Assert.Equal("set_core_offset", Assert.Single(map, c => c.Name == "core P0 offset").Tool);
         Assert.True(Assert.Single(map, c => c.Name == "NVVDD offsets") is { Tool: "adjust_nvvdd", Can: true });
         Assert.Equal("adjust_clock_domain", Assert.Single(map, c => c.Name == "SYS and Video offsets and voltage demands").Tool);
-        Assert.Null(Assert.Single(map, c => c.Name == "additional power request (F8)").Tool);
+        Assert.Equal("set_power_cap", Assert.Single(map, c => c.Name == "additional power request (F8)").Tool);
     }
 
     [Fact]

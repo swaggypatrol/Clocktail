@@ -930,6 +930,29 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("Last trial: wall 575 → 450 W", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
+    /// <summary>set_power_cap's trial creates the F8 request only when the write says create; it is trial-only, so
+    /// back_to_daily puts it back to the board maximum (it cannot be deleted) and keep never takes it.</summary>
+    [Fact]
+    public void A_trial_f8_request_is_created_on_purpose_and_goes_back_to_the_board_maximum()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"drill"}""")).Ok);
+        string Try(bool create) => JsonSerializer.Serialize(new { curve = "0*127", change = "F8 absent → 500 W", keep_curve = true,
+            writes = new[] { new { kind = "power", key = "f8", value = "500000", create } } });
+        Assert.False(d.Dispatch(Exp("try", Try(create: false))).Ok);
+        Assert.Equal(0xFFFFFFFFu, _requests.GetValueOrDefault(0xf8u, 0xFFFFFFFF));
+        var t = d.Dispatch(Exp("try", Try(create: true)));
+        Assert.True(t.Ok, t.Error);
+        Assert.Equal(500_000u, _requests[0xf8]);
+
+        var kept = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep"));
+        Assert.False(kept.Ok);   // nothing but a trial-only cell is held: nothing to keep
+        var back = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily"));
+        Assert.True(back.Ok, back.Error);
+        Assert.Equal(600_000u, _requests[0xf8]);
+        Assert.Empty(_journal.Inspect().Items);
+    }
+
     /// <summary>A trial of several items whose later item is refused does not leave the earlier ones on the card: they go
     /// back, the trial before stays in force, and the answer says nothing changed. Before, the agent was told "written:
     /// none" while the lowered wall stayed on.</summary>

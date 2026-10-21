@@ -113,7 +113,7 @@ public static class WriteRegistry
                     _ => throw new ArgumentException($"'{key}' is not a power request (fe, f8)"),
                 };
                 var board = PowerRequestsReader.ReadBoard(hw, gpu);
-                var cell = PowerCap.Cell(board.Board, kind);
+                var cell = PowerCap.Cell(board, kind);
                 // A numeric value is a request to hold; "absent" (an original recorded before our write created the
                 // request) cannot be written: the driver offers no way to delete a request.
                 return PowerCap.Decode(value) is { } mw

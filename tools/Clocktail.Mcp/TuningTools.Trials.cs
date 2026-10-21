@@ -264,6 +264,25 @@ public sealed partial class TuningTools
         return Trial($"voltage boost ({key}) {now} → {percent} %", reason, new() { ["writes"] = new[] { TrialWrite(VoltBoost.Kind, key, percent) } });
     });
 
+    [McpServerTool(Name = "set_power_cap", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
+        "Set the additional board power request (F8, the CLI's --power-cap) as a new trial, beside the ordinary one " +
+        "set_power_limit moves (FE). On a 5090 FE it does not exist until the first call creates it, and the driver offers " +
+        "no way to delete one: from then on it can only go back to the board's maximum (600 W), which is where back_to_daily, " +
+        "end_session, a crash and the agent disconnecting put it, until the next boot. It was never created on the reference " +
+        "card, so how it combines with FE is unmeasured: read gpu_status's power limit and, under load, its power to see " +
+        "which one holds. The board's range (400-600 W on a 5090). Never kept. Ask the person before calling this.")]
+    public string SetPowerCap(
+        [Description("The F8 request, W.")] double watts,
+        [Description("Why (what it is meant to show).")] string? reason = null) => Guard(() =>
+    {
+        if (watts > MaxPowerW || watts < MinPowerW) throw new ArgumentException($"the request is {MinPowerW}..{MaxPowerW} W");
+        uint mw = (uint)Math.Round(watts * 1000);
+        var f8 = card.WithDriver(PowerRequestsReader.Read).Additional;
+        string from = f8.Present ? string.Create(CultureInfo.InvariantCulture, $"{f8.Mw / 1000.0:0.#} W") : "absent";
+        return Trial(string.Create(CultureInfo.InvariantCulture, $"F8 power request {from} → {mw / 1000.0:0.#} W"), reason,
+            new() { ["writes"] = new[] { new { kind = PowerCap.Kind, key = PowerCap.Key(PowerRequestKind.Additional), value = mw.ToString(CultureInfo.InvariantCulture), create = true } } });
+    });
+
     [McpServerTool(Name = "set_daily_power_limit", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "Make this the daily power limit: it goes on now and at every start and after every driver reset. A trial's wall " +
         "(set_power_limit) is never kept, so this is how the daily one changes. 400-600 W on an RTX 5090 (575 W stock). Set it " +

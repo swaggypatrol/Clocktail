@@ -20,7 +20,7 @@ public static class Controls
     [
         new("V/F curve", "adjust_curve", c => c.VfPoints, Slot.ClockClientClkVfPointsSetControl, PerWrite: true),
         new("power limit", "set_power_limit, set_daily_power_limit", c => c.PwrPolicies, Slot.ClientPwrPoliciesSetControl),
-        new("additional power request (F8)", null, c => c.PwrPolicies, Slot.ClientPwrPoliciesSetControl, NotOffered: "only the CLI sets it (clocktail --power-cap)"),
+        new("additional power request (F8)", "set_power_cap", c => c.PwrPolicies, Slot.ClientPwrPoliciesSetControl),
         new("current limits", "set_current_limit", c => c.PowerPolicy, Slot.PowerPolicySetControl, PerWrite: true),
         new("memory offset", "set_memory_offset", c => c.PstatesWrite, Slot.SetPstates20),
         new("core P0 offset", "set_core_offset", c => c.PstatesWrite, Slot.SetPstates20),
