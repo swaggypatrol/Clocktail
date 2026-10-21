@@ -16,6 +16,7 @@ public sealed class FrameFeed
     private readonly string? _process;
     private long _offset;
     private string _partial = "";
+    private bool _dropPartial;
     private Frames _total = new(), _window = new();
 
     public string Path { get; }
@@ -24,6 +25,33 @@ public sealed class FrameFeed
 
     /// <summary>A feed on a capture file someone else runs (or one that has ended): it reads, it never stops anything.</summary>
     public static FrameFeed OnFile(string path, string? process) => new(null, path, process);
+
+    /// <summary>
+    /// A feed on a capture that is running for someone else (the live watch's), from here on: its header, then only the
+    /// frames written after now. The broker runs one capture at a time, and a second Start ends the first, so a watch
+    /// during a live watch reads the live one's file instead. It never stops the capture.
+    /// </summary>
+    public static FrameFeed Following(string path, string? process)
+    {
+        var feed = new FrameFeed(null, path, process);
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var head = new byte[(int)Math.Min(fs.Length, 64 * 1024)];
+            string text = Encoding.UTF8.GetString(head, 0, fs.ReadAtLeast(head, head.Length, throwOnEndOfStream: false));
+            int nl = text.IndexOf('\n');
+            if (nl < 0) return feed;   // no header yet: read from the start, as a fresh capture is read
+            string header = text[..nl].TrimEnd('\r');
+            feed._total.Add(header);
+            feed._window.Add(header);
+            long end = fs.Length;
+            fs.Seek(end - 1, SeekOrigin.Begin);
+            feed._dropPartial = fs.ReadByte() != '\n';   // mid-line: the rest of that frame is not this feed's
+            feed._offset = end;
+        }
+        catch (IOException) { }   // not there yet: read from the start
+        return feed;
+    }
 
     /// <summary>Starts a capture for <paramref name="seconds"/>; null with the reason when it cannot.</summary>
     public static FrameFeed? Start(Card card, int seconds, string? process, out string? why)
@@ -46,6 +74,13 @@ public sealed class FrameFeed
         int n = fs.ReadAtLeast(buf, buf.Length, throwOnEndOfStream: false);
         _offset += n;
         string text = _partial + Encoding.UTF8.GetString(buf, 0, n);
+        if (_dropPartial)
+        {
+            int nl = text.IndexOf('\n');
+            if (nl < 0) { _partial = ""; return; }
+            text = text[(nl + 1)..];
+            _dropPartial = false;
+        }
         int last = text.LastIndexOf('\n');
         _partial = last < 0 ? text : text[(last + 1)..];
         if (last < 0) return;

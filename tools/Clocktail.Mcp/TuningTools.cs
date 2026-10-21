@@ -17,7 +17,7 @@ namespace Clocktail.Mcp;
 /// is recorded as the trial's and puts the daily profile back unchanged.
 /// </summary>
 [McpServerToolType]
-public sealed partial class TuningTools(Card card, Residency residency)
+public sealed partial class TuningTools(Card card, Residency residency, LiveWatch live)
 {
     /// <summary>The largest change one adjust_curve call may make to a point (CLOCKTAIL_MCP_STEP_MHZ).</summary>
     public static readonly int StepMhz = Env("CLOCKTAIL_MCP_STEP_MHZ", 15);

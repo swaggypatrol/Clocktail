@@ -175,7 +175,11 @@ public sealed partial class TuningTools
     {
         if (seconds < 10 || seconds > MaxWatchSeconds) throw new ArgumentException($"seconds is 10..{MaxWatchSeconds} (CLOCKTAIL_MCP_MAX_WATCH_S)");
         var curve = card.Read().Curve;
-        var frames = FrameFeed.Start(card, seconds, process, out var noFrames);
+        // A live watch's capture is followed, not replaced: a second capture would end it, and every later live line would
+        // say "no frames".
+        string? noFrames = null;
+        var shared = live.FramePath;
+        var frames = shared != null ? FrameFeed.Following(shared, process) : FrameFeed.Start(card, seconds, process, out noFrames);
         var samples = new List<Card.Sample>();
         var until = DateTime.UtcNow.AddSeconds(seconds);
         while (DateTime.UtcNow < until)
@@ -190,7 +194,7 @@ public sealed partial class TuningTools
         var point = p50Mv is { } mv && Nearest(curve, (uint)(mv * 1000)) is { } pt
             ? new { index = pt.Index, mv = pt.VoltageUv / 1000.0, curve_mhz = pt.EffectiveKhz / 1000.0 } : null;
         var reasons = loaded.SelectMany(s => s.Telemetry?.ThrottleReasons ?? []).Distinct().ToList();
-        frames?.Settle(TimeSpan.FromSeconds(3));
+        if (shared == null) frames?.Settle(TimeSpan.FromSeconds(3));   // its own capture ends by itself: let it finish writing
         var fps = frames?.Total();
         var p50 = WatchStats(loaded, 0.5);
         string summary = string.Create(CultureInfo.InvariantCulture,

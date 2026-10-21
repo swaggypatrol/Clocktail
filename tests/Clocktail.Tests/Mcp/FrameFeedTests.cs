@@ -35,6 +35,28 @@ public sealed class FrameFeedTests : IDisposable
         Assert.Equal(3900, feed.Total()!.Frames);   // the run's total still counts every frame
     }
 
+    /// <summary>A watch during a live watch follows the live capture's file instead of starting a capture of its own,
+    /// which would end the live one: it reads the header, then only the frames written after it began.</summary>
+    [Fact]
+    public void A_follower_reads_only_what_the_running_capture_writes_after_it_starts()
+    {
+        Frames("Game.exe", 2, 3000);                                     // the live watch's frames so far
+        File.AppendAllText(_path, "Game.exe,1234,0x1,DXGI,0,0,1,Hard");    // and a frame half written
+        var watch = FrameFeed.Following(_path, null);
+        File.AppendAllText(_path, "ware: Independent Flip,0,NA,2,2\n");
+        Frames("Game.exe", 1000 / 90.0, 900);
+        var got = watch.Total()!;
+        Assert.Equal(900, got.Frames);                                   // not the 3000 before it, nor the half frame
+        Assert.Equal(90, got.AvgFps, 0);
+
+        // A capture with only its header so far, or none yet, is read from the start.
+        File.WriteAllText(_path, Header + "\n");
+        var early = FrameFeed.Following(_path, null);
+        Frames("Game.exe", 10, 100);
+        Assert.Equal(100, early.Total()!.Frames);
+        Assert.Null(FrameFeed.Following(_path + ".none", null).Total());
+    }
+
     [Fact]
     public void Without_it_the_pause_is_averaged_in()
     {
