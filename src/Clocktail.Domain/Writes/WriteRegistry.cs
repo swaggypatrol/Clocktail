@@ -187,12 +187,11 @@ public static class WriteRegistry
                 return new Prepared(cell, plan, cannot);
             }),
 
-        new(CurrentLimitWrites.Kind, "nvvdd | msvdd", "mA; the driver's range, and never above the VBIOS default (or the origin)",
+        new(CurrentLimitWrites.Kind, "nvvdd | msvdd", "mA; the driver's range",
             (hw, gpu, key, value, o) =>
             {
-                // The record is identified afresh (one current-limit record on the rail's regulator
-                // output); the origin lets a limit someone else raised be put back.
-                var (cell, plan, cannot) = CurrentLimitWrites.Prepare(hw, gpu, key, value, o.IsRecovery ? value : o.Original);
+                // The record is identified afresh (one current-limit record on the rail's regulator output).
+                var (cell, plan, cannot) = CurrentLimitWrites.Prepare(hw, gpu, key, value);
                 return new Prepared(cell, plan, cannot);
             }),
 

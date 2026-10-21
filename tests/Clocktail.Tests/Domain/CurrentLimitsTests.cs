@@ -200,16 +200,19 @@ public class CurrentLimitsTests : IDisposable
     }
 
     [Fact]
-    public void A_limit_is_never_raised_above_the_default_and_never_left_the_drivers_range()
+    public void A_limit_may_go_above_the_default_but_never_leaves_the_drivers_range()
     {
         CurrentLimitsFixture.Install();
-        var up = Write("msvdd", "180001");
-        Assert.False(up.Tx.Succeeded);
-        Assert.Contains("only ever lowered", up.Tx.Detail);
+        var up = Write("msvdd", "250000");                                   // above the 180 A default (the user, 2026-10-21)
+        Assert.True(up.Tx.Succeeded, up.Tx.Detail);
+        Assert.Equal(250_000u, CurrentLimitsFixture.Limit(14));
+        var over = Write("msvdd", "5001001");                                // past the driver's 5001 A
+        Assert.False(over.Tx.Succeeded);
+        Assert.Contains("outside", over.Tx.Detail);
         var zero = Write("nvvdd", "0");
         Assert.False(zero.Tx.Succeeded);
         Assert.Contains("outside", zero.Tx.Detail);
-        Assert.Equal(0, FakeDriver.Sets);
+        Assert.Equal(1, FakeDriver.Sets);
     }
 
     [Fact]

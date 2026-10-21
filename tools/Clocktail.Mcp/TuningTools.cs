@@ -344,8 +344,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "Set a rail's current limit (OCP, in amps) for the session, as a new trial with the curve left as it " +
         "is. The firmware caps the rail's current at it, so a lower NVVDD limit caps the core's power (P = V x I) and moves " +
         "the card down the curve below where the 400 W board wall stops; gpu_status shows each rail's amps and watts to " +
-        "pick it from. Never above the VBIOS default (NVVDD 600 A, MSVDD 180 A); 'default' as amps puts the default back. " +
-        "Never kept: back_to_daily, end_session, keep_as_daily, a crash and the agent disconnecting all put the default back.")]
+        "pick it from. Up to the driver's maximum (5001 A on a 5090), above the VBIOS default (NVVDD 600 A, MSVDD 180 A) " +
+        "too; at the 600 W wall NVVDD peaks near 430 A on the reference card, so the board power limit binds first and a " +
+        "raise changes nothing there. 'default' as amps puts the default back. Never kept: back_to_daily, end_session, " +
+        "keep_as_daily, a crash and the agent disconnecting all put the default back.")]
     public string SetCurrentLimit(
         [Description("nvvdd or msvdd.")] string rail,
         [Description("The limit in amps, or 'default'.")] string amps,
@@ -359,7 +361,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             : throw new ArgumentException($"'{amps}' is not a number of amps or 'default'");
         int floor = r == Clocktail.Domain.Rails.Rail.Nvvdd ? MinNvvddA : MinMsvddA;
         if (ma < floor * 1000) throw new ArgumentException($"{ma / 1000.0} A is below {floor} A for {rail} (CLOCKTAIL_MCP_MIN_{rail.ToUpperInvariant()}_A)");
-        if (ma > limit.DefaultMa) throw new ArgumentException($"{ma / 1000.0} A is above the {rail} default of {limit.DefaultMa / 1000.0} A: a current limit is only ever lowered");
+        if (ma > limit.MaxMa) throw new ArgumentException($"{ma / 1000.0} A is above the driver's {rail} maximum of {limit.MaxMa / 1000.0} A");
         var t = look.Telemetry;
         string change = string.Create(CultureInfo.InvariantCulture, $"{CurrentLimitWrites.Key(r).ToUpperInvariant()} current limit {limit.LimitMa / 1000.0} → {ma / 1000.0} A");
         var context = new List<string> { Readings(look) };

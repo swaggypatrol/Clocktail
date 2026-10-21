@@ -294,8 +294,9 @@ public static class CurrentLimitsReader
 /// A rail's current limit ("OCP") as one owned cell: CONTROL read for the
 /// rail's record alone and written back with its limit changed (gateway kind 0x13). The firmware caps the rail's
 /// current at it, so a lower limit caps that rail's power (P = V·I) where the board power request cannot go below
-/// 400 W. The plan holds a value to the driver's [min, max] and never above the VBIOS default: it is protection, and
-/// raising it is what lets a 5090 past its wall. Recovery and a return to the origin may go back above the default.
+/// 400 W. The plan holds a value to the driver's [min, max] (1 mA..5001 A on the 5090). A limit above the VBIOS
+/// default (NVVDD 600 A, MSVDD 180 A) is allowed (the user, 2026-10-21); at the 600 W wall NVVDD peaks near 430 A on
+/// the reference card, so the board power limit binds first and a raise changes nothing there.
 /// </summary>
 public static class CurrentLimitWrites
 {
@@ -322,9 +323,9 @@ public static class CurrentLimitWrites
             return CurrentLimitsParser.ControlLimit(raw, record).ToString(CultureInfo.InvariantCulture);
         });
 
-    /// <summary>Judged on the fresh snapshot: the record is still a current limit (its control
-    /// identity has not changed), and the value is inside the driver's range and no higher than the default or the origin.</summary>
-    public static Func<ReadOnlyMemory<byte>, Mutation> Plan(CurrentLimit limit, uint ma, uint? origin) => raw =>
+    /// <summary>Judged on the fresh snapshot: the record is still a current limit (its control identity has not changed),
+    /// and the value is inside the driver's range.</summary>
+    public static Func<ReadOnlyMemory<byte>, Mutation> Plan(CurrentLimit limit, uint ma) => raw =>
     {
         var s = raw.Span;
         if (BinaryPrimitives.ReadUInt32LittleEndian(s[PolicyTableLayout.Mask..]) != 1u << limit.Record)
@@ -333,15 +334,12 @@ public static class CurrentLimitWrites
             return new Mutation.Abort($"the selected {limit.Rail} current-limit record changed identity; nothing written");
         if (ma < limit.MinMa || ma > limit.MaxMa)
             return new Mutation.Abort($"{ma / 1000.0:0.###} A is outside the {limit.MinMa / 1000.0:0.###}–{limit.MaxMa / 1000.0:0.###} A range the driver reports for {limit.Rail}");
-        uint ceiling = Math.Max(limit.DefaultMa, origin ?? 0);
-        if (ma > ceiling)
-            return new Mutation.Abort($"{ma / 1000.0:0.###} A is above the {limit.Rail} default of {limit.DefaultMa / 1000.0:0.###} A: a current limit is protection and is only ever lowered");
         uint now = CurrentLimitsParser.ControlLimit(s, limit.Record);
         return now == ma ? new Mutation.Apply([]) : Mutation.Of(Edit.UInt32(PolicyTableLayout.ControlLimit(limit.Record), ma));
     };
 
     /// <summary>The write-path registry's entry. The record is identified afresh for every write.</summary>
-    public static (OwnedCell Cell, Func<ReadOnlyMemory<byte>, Mutation>? Plan, string? CannotWrite) Prepare(NvClient hw, GpuSession gpu, string key, string value, string? origin)
+    public static (OwnedCell Cell, Func<ReadOnlyMemory<byte>, Mutation>? Plan, string? CannotWrite) Prepare(NvClient hw, GpuSession gpu, string key, string value)
     {
         var rail = ParseKey(key);
         var limits = CurrentLimitsReader.Read(hw, gpu);
@@ -349,7 +347,6 @@ public static class CurrentLimitWrites
         var cell = Cell(rail, limit.Record);
         if (!uint.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var ma))
             return (cell, null, $"'{value}' is not a whole number of milliamps");
-        uint? from = uint.TryParse(origin, NumberStyles.None, CultureInfo.InvariantCulture, out var o) ? o : null;
-        return (cell, Plan(limit, ma, from), null);
+        return (cell, Plan(limit, ma), null);
     }
 }

@@ -242,7 +242,7 @@ public sealed partial class SettingsTools
                 Join(rpm is { } r ? (r == 0 ? "stopped (idle, normal)" : $"{F(rpm)} rpm, {F(duty)} %") : null, fanNote is { Length: > 0 } fn ? fn : null, health?.Note)));
         }
 
-        // Current limits: never above the VBIOS default.
+        // Current limits: above the VBIOS default is a look (allowed, but past NVIDIA's own setting).
         var cl = Obj(s, "current_limits");
         double? nv = Num(cl, "nvvdd", "limit_a"), nvS = Num(cl, "nvvdd", "stock_a"), ms = Num(cl, "msvdd", "limit_a"), msS = Num(cl, "msvdd", "stock_a");
         if (nv != null || ms != null)

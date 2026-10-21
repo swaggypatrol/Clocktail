@@ -778,8 +778,8 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal(600_000u, CurrentLimitsFixture.Limit(13));   // back to the default at once
         Assert.DoesNotContain(_journal.Inspect().Items, i => i.Kind == CurrentLimitWrites.Kind);
 
-        // A limit beyond the default is refused, and the trial before stays in force.
-        Assert.False(d.Dispatch(Exp("try", Limit(650_000))).Ok);
+        // A limit beyond the driver's range is refused, and the trial before stays in force.
+        Assert.False(d.Dispatch(Exp("try", Limit(5_001_001))).Ok);
         Assert.True(d.Dispatch(Exp("try", Limit(300_000))).Ok);
         var end = d.Dispatch(Exp("end"));
         Assert.True(end.Ok, end.Error);
@@ -943,8 +943,8 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(d.Dispatch(Exp("begin", """{"game":"Cyberpunk"}""")).Ok);
         Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 560 → 500 W", power_mw = 500_000u, keep_curve = true }))).Ok);
 
-        // The wall lands first, then the current limit is refused (above its default).
-        var t = d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W and 650 A", power_mw = 450_000u, nvvdd_ma = 650_000u, keep_curve = true })));
+        // The wall lands first, then the current limit is refused (past the driver's 5001 A).
+        var t = d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W and 5001.001 A", power_mw = 450_000u, nvvdd_ma = 5_001_001u, keep_curve = true })));
         Assert.False(t.Ok);
         Assert.Contains("put back, so the card is as it was", t.Error);
         Assert.Equal(500_000u, _requests[0xfe]);                    // the previous trial's wall, not 450 W
