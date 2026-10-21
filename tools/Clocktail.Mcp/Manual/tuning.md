@@ -21,7 +21,7 @@ Under the wall, a game runs a narrow band of the curve. To test lower points:
 - `set_power_limit` (400-600 W) moves the card down the curve. On the reference card's tuned curve under nvgwls full load: 600 W ~2842 MHz at 930 mV; 550 W ~2752 at 900; 500 W ~2625 at 875; 450 W ~2467 at 865; 400 W ~2272 at 860.
 - Below what 400 W reaches, cap the frame rate in the game, or use `set_current_limit` on NVVDD (closed-loop, no trip; 350 A ~2145 MHz at 850 mV; 300 A ~1837 at 835; 250 A ~1530 at 820).
 - Caveat: NVVDD current caps from about 380-400 A upward raise XBAR and MSVDD for unknown reasons (wall-only at 400 W was ~90 MHz faster than wall + 400 A). Prefer the wall above 400 W.
-- Caveat: pinning a point with a limit and then raising the curve mostly tests whether a lower voltage holds the same clock, not frequency headroom.
+- Caveat: pinning a point with a limit and then raising the curve mostly tests whether a lower voltage holds the same clock, not frequency headroom. Under the wall a raise shows as the same clock about 1 mV lower. To test the new clock, loosen the wall or the current limit after each raise until the clock reaches the point's new curve frequency: on the reference card +15 MHz needed 480 → 490 W, or 350 → 360 A. At the edge the same setting passes one run and hangs the next; repeat the last pass before trusting it.
 
 ## What the reference curve looks like (for orientation)
 Stock up to 800 mV; +30 MHz per point to +210 by ~840 mV; +405 to +510 through 850-885 mV (the knee is where an RTX 5090 gains most); then a straight line of about +2 MHz per mV from 2775 MHz at 885 mV to 3071 MHz at 1035 mV, flat above. Under the 600 W wall that is roughly +200 MHz over stock at the same power (+195 to +221 measured).

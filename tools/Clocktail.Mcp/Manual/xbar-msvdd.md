@@ -10,6 +10,7 @@ The interconnect rail and the crossbar clock: the free +2 %, the +6-7 % with XBA
 ## XBAR clock offset and voltage demand
 - The XBAR offset raises XBAR at the same voltage (+75 MHz moved XBAR 2340 -> 2422 MHz with nothing else changing).
 - Under load XBAR is held to **about 0.9 x the core clock**. About +250 MHz of offset reaches that; more only lowers the MSVDD voltage XBAR needs.
+- **The XBAR offset pulls the SYS clock down** in the memory phase: XBAR 0 / +200 / +300 / +400 gave SYS 2182 / 2017 / 1912 / 1830 MHz. Giving SYS +150 back at XBAR +300 changed nothing in a Blender render (A B B A, 5.846 / 5.846 / 5.832 / 5.834 s, 2026-10-21); its effect on games is not measured. Read `sys_mhz` in stress_test and watch when judging an XBAR step.
 - The **voltage demand** (-25..+50 mV) raises MSVDD for XBAR's points. It is what keeps MSVDD off its floor at large offsets.
 
 Blender Cycles (2560x1440, 384 spp, median of 7, lower is better), stock 6.774 s:

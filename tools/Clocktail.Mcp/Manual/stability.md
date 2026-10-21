@@ -21,7 +21,8 @@ Hence the rule: **game-stable = the highest stress-passing clock minus 30-60 MHz
 
 ## Stability boundaries on the reference card (nvgwls, for orientation)
 Full load, 60 s per step (passed / hung, MHz): 855 mV 2415 / -; 870-875 mV 2745 / -; 885 mV 2820 / 2820 (one run each way); 890 mV 2827 / 2835-2842; 895 mV 2842 / 2857; 910 mV 2880 / -; 915 mV - / 2887 (once). Slope ~16-20 MHz/mV at 855-875 mV, ~3-5 at 875-885, ~2-3 above: the curve's bend is 875-885 mV.
-Light load (40 % duty, ~65 C): 930 mV 2947 / 2970; 940 mV 2970 / 3000; 955 mV 3015 / 3045; 975-985 mV 3105 / 3127; 1000-1005 mV 3097 / 3120. Light load is about 55 MHz looser than heavy load at 930 mV.
+Light load (40 % duty, ~65 C): 930 mV 2947 / 2970; 940 mV 2970 / 3000; 955 mV 3015 / 3045; 975-985 mV 3105 / 3127; 1000-1005 mV 3097 / 3120. Light load is about 55 MHz looser than heavy load at 930 mV. These light-load points were pinned with `nvidia-smi -lgc` clock locks, which Clocktail does not set; without one, a load lands where its power puts it on the curve.
+Which nvgwls load reaches which voltage on the founders curve at 600 W: load 30 ~950 mV; 40-45 975-990 mV; 50 1005-1020 mV; 55-64 965-985 mV at 430-550 W; 72 and up the wall, 905-930 mV. Kingdom Come: Deliverance II crashed in the 970 mV middle band, which load 55-64 reaches: use it for that band.
 
 ## What a crash looks like
 - **V/F hang (the usual one)**: the screen freezes for about 30 s (the TDR delay), the readings freeze at high clocks (3105-3180 MHz at 995-1090 mV, power falling to 125-200 W, utilization 100 %), then the driver resets (event `nvlddmkm 153`, Display 4101). nvgwls exits with code 2. No blue screen. The service records the trial as a crash and puts the daily profile back by itself.
