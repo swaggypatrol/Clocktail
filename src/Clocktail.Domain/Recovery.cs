@@ -99,7 +99,10 @@ public sealed class Recovery(NvClient hw, OwnershipJournal journal, ApplySentine
             items.Add(item);
             needsWrite |= needsAdmin;
         }
-        if (items.All(i => i.StateKnown)) sentinel.Clear();
+        // A window recovery opened itself stays up only for a write of its own whose outcome is unknown. An item it could
+        // not prepare or read (a kind this version does not know, an unreadable cell) wrote nothing: its debt stays in
+        // the journal and in the answer, but a sentinel for it locked out every later write with nothing in flight.
+        if (items.All(i => i.StateKnown) || !blocked && !items.Any(i => !i.StateKnown && i.Tx != null)) sentinel.Clear();
         bool journalCleared = journal.Inspect().Reason == RecoveryReason.Nothing;
         return new RecoveryResult(plan.Reason, plan.Detail, items, journalCleared, !sentinel.IsBlocked(out _), needsWrite);
     }

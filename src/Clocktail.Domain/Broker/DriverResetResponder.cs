@@ -123,7 +123,12 @@ public sealed class DriverResetResponder(
                     RespondFor(id, reset, 0);
                     continue;
                 }
-                if (!down) { Profile(id, "apply", "the broker started", "at start"); continue; }
+                if (!down)
+                {
+                    RecoverLeftovers(id);
+                    Profile(id, "apply", "the broker started", "at start");
+                    continue;
+                }
                 const string why = "the machine went down holding the profile";
                 Record(id, why, "at start");
                 Profile(id, "after-reset", why, "at start");
@@ -148,6 +153,22 @@ public sealed class DriverResetResponder(
         return resetsSince(since.UtcDateTime) is > 0 and var n
             ? $"a driver reset while the service restarted ({n} reset event{(n == 1 ? "" : "s")} in the System log since the trial in force was written)"
             : null;
+    }
+
+    /// <summary>
+    /// At start in the same boot: a write window left open (a write whose outcome became unknown, or a worker ended
+    /// mid-write by a handover or an update) refuses every write, the start's daily profile included, and nothing else
+    /// would clear it. Ordinary recovery runs first when the sentinel is up or the journal's owner has died.
+    /// </summary>
+    private void RecoverLeftovers(string gpuId)
+    {
+        var own = perform(new BrokerRequest(BrokerRequest.OpOwnership, gpuId));
+        if (own.Result is not { } res) return;
+        bool sentinel = res.TryGetProperty("sentinel", out var s) && s.ValueKind == System.Text.Json.JsonValueKind.String;
+        bool died = res.TryGetProperty("reason", out var why) && why.GetString() == "OwnerDied";
+        if (!sentinel && !died) return;
+        var r = perform(new BrokerRequest(BrokerRequest.OpRecover, gpuId));
+        log($"gpu {gpuId}: at start, {(sentinel ? "a write window was left open" : "the last worker's cells were still held")}: recovered: {Summary(r)}");
     }
 
     /// <summary>The crash recorded ("crashed"): the trial in force made a data point, nothing written.</summary>

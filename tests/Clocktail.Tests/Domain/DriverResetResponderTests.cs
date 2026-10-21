@@ -133,9 +133,27 @@ public class DriverResetResponderTests
         {
             _asked.Clear(); _profile.Clear();
             Start(resets, trial).ApplyAtStart([]);
-            Assert.Empty(_asked);
+            Assert.Equal(BrokerRequest.OpOwnership, Assert.Single(_asked).Op);   // a look for leftovers, nothing to recover
             Assert.Equal("apply", Assert.Single(_profile).Kind);
         }
+    }
+
+    /// <summary>A worker ended mid-write (a handover, an update) leaves its write window open in the same boot; every write
+    /// is refused while it stands, the start's daily profile included. Start recovers first, then applies.</summary>
+    [Fact]
+    public void A_write_window_left_open_is_recovered_before_the_daily_profile_goes_on()
+    {
+        var order = new List<string>();
+        var r = new DriverResetResponder(req =>
+        {
+            order.Add(req.Op == BrokerRequest.OpProfile ? $"profile:{req.Kind}" : req.Op);
+            return req.Op == BrokerRequest.OpOwnership
+                ? new BrokerResponse(true, Result: JsonSerializer.SerializeToElement(new { reason = "OwnedByThisProcess", sentinel = "vf/core (adjust_curve)" }))
+                : Recovered(true, "Written");
+        }, ["gpu-A"], _log.Add, () => _now, t => _now += t);
+        r.ApplyAtStart([]);
+        Assert.Equal([BrokerRequest.OpOwnership, BrokerRequest.OpRecover, "profile:apply"], order);
+        Assert.Contains(_log, l => l.Contains("a write window was left open"));
     }
 
     [Fact]

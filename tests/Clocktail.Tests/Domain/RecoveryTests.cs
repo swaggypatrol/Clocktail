@@ -136,6 +136,24 @@ public class RecoveryTests : IDisposable
         Assert.True(_sentinel.IsBlocked(out _));
     }
 
+    /// <summary>A dead owner's record this version cannot give back (an unknown kind) and no window open: recovery opens
+    /// one, writes nothing, and must not leave it up, or every later write is refused with nothing in flight.</summary>
+    [Fact]
+    public void An_item_recovery_cannot_prepare_leaves_the_debt_but_not_a_sentinel()
+    {
+        var (rec, _) = Setup(coreDelta: 0);
+        _host.Pid = 32316;
+        _journal.Claim(new OwnedItem("from-a-newer-version", "x", "1", _host.Now, null));
+        _host.Pid = 100;
+        var r = rec.Run(_gpu, canWrite: true);
+        var item = Assert.Single(r.Items);
+        Assert.Equal(RecoveryAction.Refused, item.Action);
+        Assert.False(item.StateKnown);
+        Assert.NotNull(_journal.Load());             // the debt stays on record
+        Assert.False(_sentinel.IsBlocked(out _));    // but writes are not locked out
+        Assert.Equal(0, FakeDriver.Sets);
+    }
+
     [Fact]
     public void A_debt_without_a_sentinel_is_paid_inside_one_sentinel_window()
     {
