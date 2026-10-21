@@ -439,6 +439,47 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         return Out(new { success = true, change, written = res.Written, rails = after == null ? null : Rails(after), warning = unread });
     });
 
+    [McpServerTool(Name = "adjust_nvvdd", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Move the core rail NVVDD's offsets as a new trial, the curve left as it is: REL, ALT and OV each move a limit, and the " +
+        "rail's MAX is the lowest of the three, so the top of the V/F curve is cut where it sits above MAX; VMIN moves the " +
+        "floor. On the reference card REL ±5 mV and ALT -5 mV moved MAX 1:1 and the rails did not couple; REL -25 mV only " +
+        "clipped the top. Raising lets the curve's top points run at their own voltage, up to the rail's standard 1.15 V " +
+        "ceiling, which the write path enforces. Per call each offset moves at most 10 mV down or 25 mV up; REL/ALT/OV at most " +
+        "250 mV and VMIN 100 mV below stock, VMIN at most 50 mV above. Too low shows as a crash or a driver reset. gpu_status " +
+        "shows NVVDD's volts and MAX. back_to_daily, end_session and a crash put the daily profile's offsets back (stock when " +
+        "it keeps none); keep_as_daily keeps the offsets on the card.")]
+    public string AdjustNvvdd(
+        [Description("mV to add to NVVDD's REL offset; default 0.")] double relDeltaMv = 0,
+        [Description("mV to add to NVVDD's ALT offset; default 0.")] double altDeltaMv = 0,
+        [Description("mV to add to NVVDD's OV offset; default 0.")] double ovDeltaMv = 0,
+        [Description("mV to add to NVVDD's VMIN offset (the floor); default 0.")] double vminDeltaMv = 0,
+        [Description("Why this step (what you saw, what you expect).")] string? reason = null) => Guard(() =>
+    {
+        double[] deltas = [relDeltaMv, altDeltaMv, ovDeltaMv, vminDeltaMv];
+        if (deltas.All(x => x == 0)) throw new ArgumentException("every delta is 0: nothing to try");
+        if (deltas.Any(x => -x > MsvddStepMv))
+            throw new ArgumentException($"a step down is at most {MsvddStepMv} mV per offset (CLOCKTAIL_MCP_MSVDD_STEP_MV); split it into several trials");
+        if (deltas.Any(x => x > MsvddRaiseStepMv))
+            throw new ArgumentException($"a step up is at most {MsvddRaiseStepMv} mV per offset (CLOCKTAIL_MCP_MSVDD_RAISE_STEP_MV); split it into several trials");
+        var rail = card.WithDriver(RailsReader.Read).Get(Clocktail.Domain.Rails.Rail.Nvvdd) ?? throw new InvalidOperationException("the NVVDD rail is unreadable");
+        var now = rail.Offsets;
+        var stock = StockRail(Clocktail.Domain.Rails.Rail.Nvvdd, now);
+        int Uv(double mv) => (int)Math.Round(mv * 1000);
+        var next = new RailOffsets(now.RelUv + Uv(relDeltaMv), now.AltUv + Uv(altDeltaMv), now.OvUv + Uv(ovDeltaMv), now.VminUv + Uv(vminDeltaMv));
+        foreach (var (name, offset, floor) in new[] { ("REL", next.RelUv, stock.RelUv), ("ALT", next.AltUv, stock.AltUv), ("OV", next.OvUv, stock.OvUv) })
+            if (offset < floor - MsvddMaxBelowMv * 1000)
+                throw new ArgumentException($"{name} {offset / 1000.0} mV would be more than {MsvddMaxBelowMv} mV below stock (CLOCKTAIL_MCP_MSVDD_MAX_BELOW_MV)");
+        if (next.VminUv < stock.VminUv - MsvddVminBelowMv * 1000) throw new ArgumentException($"VMIN {next.VminUv / 1000.0} mV would be more than {MsvddVminBelowMv} mV below stock (CLOCKTAIL_MCP_MSVDD_VMIN_BELOW_MV)");
+        if (next.VminUv > stock.VminUv + MsvddVminAboveMv * 1000 && vminDeltaMv > 0) throw new ArgumentException($"VMIN goes {MsvddVminAboveMv} mV above stock at most (CLOCKTAIL_MCP_MSVDD_VMIN_ABOVE_MV)");
+        var moved = new List<string>();
+        void Moved(string name, int from, int to) { if (from != to) moved.Add(string.Create(CultureInfo.InvariantCulture, $"{name} {from / 1000.0} → {to / 1000.0} mV")); }
+        Moved("REL", now.RelUv, next.RelUv); Moved("ALT", now.AltUv, next.AltUv); Moved("OV", now.OvUv, next.OvUv); Moved("VMIN", now.VminUv, next.VminUv);
+        string value = string.Create(CultureInfo.InvariantCulture, $"rel={next.RelUv},alt={next.AltUv},ov={next.OvUv},vmin={next.VminUv}");
+        string context = string.Create(CultureInfo.InvariantCulture, $"NVVDD before the write: MAX {rail.Limits.MaxUv / 1000.0} mV, VMIN {rail.Limits.VminUv / 1000.0} mV");
+        return Trial($"NVVDD offsets {string.Join(", ", moved)}", reason is null ? context : $"{reason} ({context})",
+            new() { ["writes"] = new[] { TrialWrite(RailWrites.Kind, RailWrites.Key(Clocktail.Domain.Rails.Rail.Nvvdd), value) } });
+    });
+
     [McpServerTool(Name = "stress_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Run the driver's own golden stressor (nvgwls.exe, what NVIDIA App's auto-tune runs) on what is on the card now, " +
         "sampling the operating point twice a second; no game and no person needed, so it is the way to test while the " +
@@ -1042,12 +1083,15 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
 
     /// <summary>MSVDD's stock offsets: the journal's original while the broker holds the rail (a trial, or a daily profile
     /// that keeps offsets), else what it holds now.</summary>
-    private RailOffsets StockMsvdd(RailOffsets now)
+    private RailOffsets StockMsvdd(RailOffsets now) => StockRail(Clocktail.Domain.Rails.Rail.Msvdd, now);
+
+    /// <summary>A rail's stock offsets: the journal's original while the broker holds the rail, else what it holds now.</summary>
+    private RailOffsets StockRail(Clocktail.Domain.Rails.Rail rail, RailOffsets now)
     {
         var r = card.Broker(BrokerRequest.OpOwnership);
         if (r.Ok && r.Result is { } res && res.TryGetProperty("items", out var items))
             foreach (var i in items.EnumerateArray())
-                if (Str(i, "Kind") == RailWrites.Kind && Str(i, "Key") == RailWrites.Key(Clocktail.Domain.Rails.Rail.Msvdd) && Str(i, "Original") is { } o)
+                if (Str(i, "Kind") == RailWrites.Kind && Str(i, "Key") == RailWrites.Key(rail) && Str(i, "Original") is { } o)
                     return RailWrites.Decode(o);
         return now;
     }

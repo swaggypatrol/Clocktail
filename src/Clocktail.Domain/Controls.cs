@@ -28,7 +28,7 @@ public static class Controls
         new("SYS and Video offsets and voltage demands", null, c => c.ClockDomains, Slot.ClockClkDomainsSetControl,
             NotOffered: "only the CLI sets them (clocktail --sys-offset / --video-offset / --sys-vdemand / --video-vdemand)"),
         new("MSVDD voltage", "adjust_msvdd", c => c.VoltWrite, Slot.VoltVoltRailsSetControl),
-        new("NVVDD offsets", null, c => c.VoltWrite, Slot.VoltVoltRailsSetControl, NotOffered: "only the CLI sets them (clocktail --rail nvvdd:...)"),
+        new("NVVDD offsets", "adjust_nvvdd", c => c.VoltWrite, Slot.VoltVoltRailsSetControl),
         new("fan curve", "set_fan_curve", c => Present(c, "fan policy", Slot.FanPolicyGetInfo, Slot.FanPolicyGetControl, Slot.FanPolicySetControl), Slot.FanPolicySetControl),
         new("fixed fan speed", "set_fan_speed", c => c.FanCoolers, Slot.ClientFanCoolersSetControl),
         new("voltage boost", null, c => c.Boost == VoltBoostPath.None ? Capability.No("no boost path") : Capability.Yes($"the {c.Boost.ToString().ToLowerInvariant()} path"), null,

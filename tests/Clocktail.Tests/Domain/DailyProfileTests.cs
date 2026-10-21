@@ -36,7 +36,7 @@ public class DailyProfileTests : IDisposable
         Assert.True(DailyProfile.KeptFromCard("vf", "core"));
         Assert.True(DailyProfile.KeptFromCard("fancurve", "0"));
         Assert.True(DailyProfile.KeptFromCard("rails", "msvdd"));
-        Assert.False(DailyProfile.KeptFromCard("rails", "nvvdd"));
+        Assert.True(DailyProfile.KeptFromCard("rails", "nvvdd"));   // adjust_nvvdd tunes it (2026-10-21)
         Assert.True(DailyProfile.KeptFromCard("clockdomain", "xbar"));
         Assert.True(DailyProfile.KeptFromCard("vdemand", "xbar"));
         Assert.False(DailyProfile.KeptFromCard("power", "fe"));

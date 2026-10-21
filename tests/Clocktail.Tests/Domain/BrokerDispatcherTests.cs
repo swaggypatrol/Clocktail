@@ -1004,6 +1004,13 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(back.Ok, back.Error);
         Assert.Equal(0, NvvddRel());
         Assert.Empty(_journal.Inspect().Items);
+
+        // adjust_nvvdd's offsets are kept from the card, as MSVDD's are.
+        Assert.True(d.Dispatch(Exp("try", Try(new[] { new { kind = "rails", key = "nvvdd", value = "rel=-100000,alt=0,ov=0,vmin=0" } }))).Ok);
+        var kept = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep"));
+        Assert.True(kept.Ok, kept.Error);
+        Assert.Contains(kept.Result!.Value.GetProperty("profile").GetProperty("Writes").EnumerateArray(),
+            x => x.GetProperty("Kind").GetString() == "rails" && x.GetProperty("Key").GetString() == "nvvdd");
     }
 
     /// <summary>The MSVDD offsets are kept from the card, as the curves are (the user, 2026-10-20: REL 0 is free speed).
