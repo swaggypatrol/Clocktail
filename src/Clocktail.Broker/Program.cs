@@ -97,6 +97,7 @@ static int Run()
         return 1;
     }
     WorkerProcess.WriteUtf8WhenRedirected();   // under the supervisor, this output is broker.log's
+    WorkerProcess.KeepOutputFromChildren();    // and it stays the supervisor's: PresentMon does not inherit it
 
     using var mgr = GpuManager.Open();
     var host = new SystemHost();

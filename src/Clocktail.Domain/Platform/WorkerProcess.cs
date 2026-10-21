@@ -17,12 +17,27 @@ public sealed class WorkerProcess(string exe)
     private static readonly System.Text.UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false);
     private nint _job;
 
+    /// <summary>How long <see cref="Run"/> waits, once the worker has exited, for the last of its output.</summary>
+    public static readonly TimeSpan DrainFor = TimeSpan.FromSeconds(2);
+
     /// <summary>For the worker: when its output goes to a pipe (a supervisor reads it), write it as UTF-8, which is how
     /// <see cref="Run"/> reads it, instead of the console's code page.</summary>
     public static void WriteUtf8WhenRedirected()
     {
         if (Console.IsOutputRedirected) Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), Utf8) { AutoFlush = true });
         if (Console.IsErrorRedirected) Console.SetError(new StreamWriter(Console.OpenStandardError(), Utf8) { AutoFlush = true });
+    }
+
+    /// <summary>
+    /// For the worker: its standard output and error (the supervisor's pipes) are not handed down to what it starts.
+    /// .NET starts every child with the parent's inheritable handles, and a pipe end inherited from the supervisor stays
+    /// inheritable, so PresentMon, started by the worker for a frame capture of up to 4 h, held the supervisor's pipes
+    /// open after the worker itself had exited.
+    /// </summary>
+    public static void KeepOutputFromChildren()
+    {
+        foreach (int std in new[] { StdOutput, StdError })
+            if (GetStdHandle(std) is var h && h != 0 && h != -1) SetHandleInformation(h, HandleFlagInherit, 0);
     }
 
     /// <summary>Start <c>exe arguments</c>, pass each line it prints to <paramref name="line"/>, and return its exit code.</summary>
@@ -56,7 +71,13 @@ public sealed class WorkerProcess(string exe)
         if (!Contain(p)) log?.Invoke($"worker pid {p.Id} could not be tied to the supervisor (error {Marshal.GetLastPInvokeError()}); it would outlive a killed supervisor");
         p.BeginOutputReadLine();
         p.BeginErrorReadLine();
-        p.WaitForExit();   // also drains the redirected output
+        // The process, not its output: the parameterless wait also waits for the pipes to close, and a process the worker
+        // started that still holds them (see KeepOutputFromChildren) kept the supervisor from restarting a worker that had
+        // died, for as long as that process ran. A finite wait returns at the exit; then a short drain for the last lines.
+        while (!p.WaitForExit(1000)) { }
+        using (var drain = new CancellationTokenSource(DrainFor))
+            try { p.WaitForExitAsync(drain.Token).GetAwaiter().GetResult(); }
+            catch (OperationCanceledException) { log?.Invoke($"worker pid {p.Id} exited, but its output stayed open {DrainFor.TotalSeconds:0} s longer (a process it started holds it): not waiting for it"); }
         return p.ExitCode;
     }
 
@@ -77,6 +98,14 @@ public sealed class WorkerProcess(string exe)
     }
 
     private const int ExtendedLimitInformation = 9;
+    private const int StdOutput = -11, StdError = -12;
+    private const uint HandleFlagInherit = 1;
+
+    [DllImport("kernel32", SetLastError = true)]
+    private static extern nint GetStdHandle(int which);
+
+    [DllImport("kernel32", SetLastError = true)]
+    private static extern bool SetHandleInformation(nint handle, uint mask, uint flags);
     private const uint KillOnJobClose = 0x2000;
 
     [StructLayout(LayoutKind.Sequential)]

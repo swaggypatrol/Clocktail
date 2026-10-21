@@ -96,6 +96,22 @@ public class SupervisorTests
 
     }
 
+    /// <summary>A worker that exits while a process it started still holds its output (PresentMon, for a capture of up to
+    /// 4 h) is seen to exit at once, not when that process ends: the supervisor restarts the worker.</summary>
+    [Fact]
+    public void A_worker_that_exits_is_waited_for_not_a_process_holding_its_output()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var cmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
+        var said = new List<string>();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        // ping runs ~10 s with the worker's output inherited; the worker itself exits at once.
+        int code = new WorkerProcess(cmd).Run("/d /c \"echo started& start \"\" /b ping -n 11 127.0.0.1 >nul& exit /b 3\"", _ => { }, said.Add);
+        Assert.Equal(3, code);
+        Assert.InRange(clock.Elapsed.TotalSeconds, 0, 7);
+        Assert.Contains(said, l => l.Contains("its output stayed open"));
+    }
+
     [Fact]
     public void Exit_codes_read_as_a_person_reads_them()
     {
