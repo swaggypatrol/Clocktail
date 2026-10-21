@@ -67,7 +67,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "Where the card runs right now: NVVDD/MSVDD, core clock, the V/F point it sits on (stock, current and daily offset), " +
         "power, temperature and its margin, the memory temperature (memory_c), utilization, VRAM, NVML limit reasons, each " +
         "rail's amps and watts against its current limit, the 16-pin input (connector and slot watts, input current against " +
-        "its limit, with a concern near it), what each GPC measures, and the experiment session. NVML on this card sets gpu_idle at " +
+        "its limit, with a concern near it), the PCIe link (pcie: generation and width now and the most the slot allows, " +
+        "replays since boot), what each GPC measures, and the experiment session. NVML on this card sets gpu_idle at " +
         "full load when the clock sits at the top of a curve cut flat, and sw_power_cap at ~340 W far under the 598 W wall: " +
         "read power against power_limit_w, not the reason bits.")]
     public string GpuStatus() => Guard(() =>
@@ -97,6 +98,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             pstate = t?.PState is { } ps ? $"P{ps}" : null,
             util_pct = t?.GpuUtilPercent,
             memory_c = card.MemoryC(),
+            pcie = SettingsTools.Pcie(card.PcieLink()),
             vram_used_gib = Gib(t?.VramUsedBytes),
             vram_total_gib = Gib(t?.VramTotalBytes),
             memory_controller_pct = t?.MemUtilPercent,

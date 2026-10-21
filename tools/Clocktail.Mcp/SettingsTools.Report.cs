@@ -260,6 +260,28 @@ public sealed partial class SettingsTools
         return rows;
     }
 
+    /// <summary>
+    /// The PCIe link: ⚠️ when it has resent data since boot (0 on a sound link; the reference card: 0), or when under load
+    /// (50 % busy or more) it runs a lower generation or width than the card and slot allow together (a riser, an extension
+    /// cable, a card not fully seated, the BIOS's PCIe setting). At idle the link slows down by design: ℹ️, judged under load.
+    /// A slot of a lower generation than the card is said, not marked: the slot is what it is.
+    /// </summary>
+    private static ReportRow? PcieRow(JsonElement? p, double? util)
+    {
+        if (p is not { } x || Num(x, "gen") is not { } gen) return null;
+        double? width = Num(x, "width"), maxGen = Num(x, "max_gen"), maxWidth = Num(x, "max_width"), gpuMax = Num(x, "gpu_max_gen"), replays = Num(x, "replays");
+        bool below = gen < maxGen || width < maxWidth, loaded = util >= 50;
+        var notes = new List<string?>();
+        if (replays > 0) notes.Add($"{F(replays)} replays since boot: the link resent data (0 on a sound link); a riser, an extension cable or a card not fully seated shows this");
+        if (below) notes.Add(loaded
+            ? $"under load it runs below what the card and slot allow (Gen {F(maxGen)} x{F(maxWidth)}): a riser, an extension cable, a card not fully seated or the BIOS's PCIe setting"
+            : $"the slot allows Gen {F(maxGen)} x{F(maxWidth)}; the link slows down at idle by design, so judge it under load");
+        if (maxGen < gpuMax) notes.Add($"the slot is Gen {F(maxGen)}; the card can do Gen {F(gpuMax)}");
+        string mark = replays > 0 || below && loaded ? Look : below ? Info : Safe;
+        return new("🔗", "PCIe link", "", width is { } w ? $"Gen {F(gen)} x{F(w)}" : $"Gen {F(gen)}", "", mark,
+            Join([.. notes, mark == Safe ? "as fast as the card and slot allow" : null]));
+    }
+
     private static List<ReportRow> LiveRows(JsonElement s, JsonElement l)
     {
         var rows = new List<ReportRow>();
@@ -280,7 +302,7 @@ public sealed partial class SettingsTools
         if (locks.Count > 0)
             rows.Add(ownLock
                 ? new("🔒", "Clock lock", "", string.Join("; ", locks), "", Info,
-                    "set by Clocktail (set_clock_lock): a stress run or a curve test measures the lock, not the curve; back_to_daily releases it unless the daily profile keeps it")
+                    "set by Clocktail (set_clock_lock): a stress run or a curve test measures the lock, not the curve; back_to_daily releases it unless it is a cap the daily profile keeps")
                 : new("🔒", "Clock lock", "", string.Join("; ", locks), "", Look,
                     "set by another tool, not Clocktail, and still in force: a stress run or a curve test measures the lock, not the curve. " +
                     "`nvidia-smi -rgc` releases NVML's locked clocks; a point lock or Boost Lock, the tool that set it"));
@@ -303,6 +325,7 @@ public sealed partial class SettingsTools
         if (board is { } b)
             rows.Add(new("⚡", "Power draw", "", limit is { } lim ? $"{F(b)} W of {F(lim)} W" : $"{F(b)} W", "", Safe,
                 Join(util is { } u ? $"{F(u)} % busy" : null, limit is { } li && b >= li - 10 ? "on the power limit" : null)));
+        if (PcieRow(Obj(s, "pcie"), util) is { } pcie) rows.Add(pcie);
         if (clock is { } c)
             rows.Add(new("📈", "Core", "", mv is { } v ? $"{F(c)} MHz @ {F(v)} mV" : $"{F(c)} MHz", "", mv > max + 0.5 ? Look : Safe,
                 max is { } m ? $"voltage limit {F(m)} mV" : ""));

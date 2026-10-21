@@ -13,7 +13,7 @@ What the agent starts is a relay that loads no driver library and runs the same 
 | `card_report` | 🩺 How's my card doing: every setting as original → now, the change and a ✅ / ⚠️ / ⛔ safety mark, live readings, one verdict; between the tables the V/F curve drawn in Braille dots (now, stock, and ● where the card runs). |
 | `manual` | The agent's manual: the method phase by phase and why, every control and how to combine them, Blackwell, reading the card, stability, presets, troubleshooting. Its short version is the server's instructions. |
 | `install_service` | Install or update the service (one UAC prompt). Every write tool needs it. |
-| `gpu_status` | Where the card runs now: voltages (and what each GPC measures), clock, the curve point, power vs limit, temperature headroom, VRAM. |
+| `gpu_status` | Where the card runs now: voltages (and what each GPC measures), clock, the curve point, power vs limit, temperature headroom, VRAM, the 16-pin input, the PCIe link. |
 | `card_settings` | Everything set on the card, next to stock and the daily profile. |
 | `diagnostic_report` | A plain-JSON file for a bug report: versions, the card, what each control can do, how the driver answered every read. GET only. |
 | `limiter` | What holds the clock back right now. |

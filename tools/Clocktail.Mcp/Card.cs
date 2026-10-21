@@ -62,6 +62,13 @@ public sealed class Card : IDisposable
         }
     }
 
+    /// <summary>The PCIe link (NvmlApi.PcieLink); null without NVML.</summary>
+    public NvmlPcieLink? PcieLink()
+    {
+        using (_lane.Enter("the PCIe link"))
+            return _mgr.Nvml is { } n && _gpu.HasNvml ? n.PcieLink(_gpu.NvmlHandle) : null;
+    }
+
     /// <summary>NVAPI's GetPerfDecreaseInfo (public nvapi.h): the reasons the driver is holding performance down, as bits;
     /// null where it does not answer. 0 at idle and at the 600 W wall on the reference card.</summary>
     public uint? PerfDecrease()

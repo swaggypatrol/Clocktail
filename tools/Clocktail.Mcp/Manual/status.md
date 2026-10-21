@@ -10,6 +10,7 @@ What each status field means, what is normal, how to name the limiter, and the t
 - `vram_used_gib` of `vram_total_gib` (31.8 on a 5090; the driver's reservation left out, as nvidia-smi does) and `memory_controller_pct` (how busy the memory bus is). A game near the total starts swapping over PCIe, which shows as stutter no clock fixes. `stress_test` and `watch` give its P10/P50/P90, the CSVs every sample.
 - `memory_c`: the memory chip temperature (`manual memory`).
 - `rails`: per-rail amps and watts from the power monitor, with the current limit in force.
+- `pcie`: the PCIe link: `gen` and `width` now, `max_gen` / `max_width` (the most the card and its slot allow together), `gpu_max_gen` (the card's own) and `replays` (data the link resent since boot). The link drops its generation at idle by design, so judge it under load. Gen 5 x16 and 0 replays on the reference card.
 - `input`: the 16-pin connector's watts, the PCIe slot's, and the board's input current against its limit, with a `concern` when the connector passes 600 W or the current comes within 10 % of the limit (`manual power-thermal`).
 - `gpc_mv`: the voltage the 11 GPCs measure at their own sensors (mean, min, max, and the mean against NVVDD). On the reference card the mean sits 3-9 mV above NVVDD and the lowest GPC within 7 mV below it, at idle and at the wall: the core gets what the rail is asked for, so a crash is the point's frequency, not a sagging rail. `stress_test` gives its P10/P50/P90, the CSVs every sample. Read only on the layout verified on an RTX 5090; absent elsewhere.
 - `point`: the V/F point the card sits on: index, mV, stock MHz, current offset, the daily profile's offset.
@@ -22,6 +23,7 @@ Everything Clocktail can write, as it is on the card now, next to stock and the 
 - `clock_locks`: locks in the driver's clock-limit record (`set_clock_lock`, `nvidia-smi -lgc`, Boost Lock), whoever set them.
 - `perf_limits`: the driver's ceiling and floor per clock domain and the limit that set each (`manual blackwell`).
 - `controls`: the capability map: each control, the tool that sets it, whether it can be set on this card and driver, and why not.
+- `pcie`: the PCIe link, as in `gpu_status`.
 - `tdr`: Windows' driver timeout (`manual stability`); `vbios` and `driver`, which the daily profile is bound to (`manual blackwell`).
 - `daily_differs_on_card`: what the daily profile keeps that the card does not hold now.
 

@@ -15,6 +15,11 @@ public readonly record struct NvmlMemory(ulong Total, ulong Free, ulong Used);
 public readonly record struct NvmlUtilization(uint Gpu, uint Memory);
 public readonly record struct NvmlPci(uint Domain, uint Bus, uint Device, uint DeviceId, uint SubSystemId, string BusId);
 
+/// <summary>The PCIe link as nvidia-smi's "GPU Link Info" gives it: the generation and width it runs at now, the most this
+/// card and its slot allow together, the card's own highest generation, and the replays since boot (data the link had to
+/// resend). Each is null where NVML does not answer.</summary>
+public readonly record struct NvmlPcieLink(uint? Gen, uint? Width, uint? MaxGen, uint? MaxWidth, uint? GpuMaxGen, uint? Replays);
+
 /// <summary>One field of nvmlDeviceGetFieldValues: its own status (0 = read), and the value as its type gives it.</summary>
 public readonly record struct NvmlFieldValue(uint Id, int Status, int Type, ulong Raw)
 {
@@ -84,6 +89,7 @@ public sealed unsafe class NvmlApi : IDisposable
     private delegate* unmanaged[Cdecl]<nint, MarginTemperature*, int> _margin;
     private delegate* unmanaged[Cdecl]<nint, uint*, int> _pstate;
     private delegate* unmanaged[Cdecl]<nint, uint, uint*, int> _threshold;
+    private delegate* unmanaged[Cdecl]<nint, uint*, int> _pcieGen, _pcieWidth, _pcieMaxGen, _pcieMaxWidth, _pcieGpuMaxGen, _pcieReplays;
 
     /// <summary>nvmlFieldValue_t: 40 bytes, the value union 8-aligned at +32.</summary>
     [StructLayout(LayoutKind.Sequential)]
@@ -182,6 +188,12 @@ public sealed unsafe class NvmlApi : IDisposable
         _margin = (delegate* unmanaged[Cdecl]<nint, MarginTemperature*, int>)Sym(e, "nvmlDeviceGetMarginTemperature", true);
         _pstate = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetPerformanceState", true);
         _threshold = (delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)Sym(e, "nvmlDeviceGetTemperatureThreshold", true);
+        _pcieGen = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetCurrPcieLinkGeneration", true);
+        _pcieWidth = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetCurrPcieLinkWidth", true);
+        _pcieMaxGen = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetMaxPcieLinkGeneration", true);
+        _pcieMaxWidth = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetMaxPcieLinkWidth", true);
+        _pcieGpuMaxGen = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetGpuMaxPcieLinkGeneration", true);
+        _pcieReplays = (delegate* unmanaged[Cdecl]<nint, uint*, int>)Sym(e, "nvmlDeviceGetPcieReplayCounter", true);
     }
 
     /// <summary>Before every call: once lost, fail as the call would have, without entering the library.</summary>
@@ -327,6 +339,18 @@ public sealed unsafe class NvmlApi : IDisposable
         if (_threshold == null || _lost) return null;
         uint v;
         return Seen(_threshold(h, (uint)t, &v)) == 0 ? v : null;
+    }
+
+    /// <summary>The PCIe link (<see cref="NvmlPcieLink"/>). The link drops its generation at idle by design, so only a reading
+    /// under load says what the slot gives; Gen 5 x16 and 0 replays on the reference card (2026-10-21).</summary>
+    public NvmlPcieLink PcieLink(nint h) => new(Read(_pcieGen, h), Read(_pcieWidth, h), Read(_pcieMaxGen, h), Read(_pcieMaxWidth, h),
+        Read(_pcieGpuMaxGen, h), Read(_pcieReplays, h));
+
+    private uint? Read(delegate* unmanaged[Cdecl]<nint, uint*, int> f, nint h)
+    {
+        if (f == null || _lost) return null;
+        uint v;
+        return Seen(f(h, &v)) == 0 ? v : null;
     }
 
     public ulong ThrottleReasons(nint h)

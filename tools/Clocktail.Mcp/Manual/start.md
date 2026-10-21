@@ -10,7 +10,7 @@ Every number in this manual was measured on one reference card: RTX 5090 Founder
 | Need | Tool |
 |---|---|
 | "How's my card doing", "is it safe", "what did we change" | `card_report` |
-| Where it runs now: voltages, clock, V/F point, power, temperature, memory temperature, the 16-pin input | `gpu_status` |
+| Where it runs now: voltages, clock, V/F point, power, temperature, memory temperature, the 16-pin input, the PCIe link | `gpu_status` |
 | What is set: power limit, offsets, curve, rails, XBAR/SYS/Video, the clock ratio, clock locks, fans, current limits, the daily profile, what each control can do here | `card_settings` |
 | What is holding the clock back right now, and the driver's own clock ceilings | `limiter` |
 | The curve near a voltage | `curve_around` |

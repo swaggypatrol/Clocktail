@@ -45,7 +45,9 @@ public sealed partial class SettingsTools(Card card)
         "band as stop_start_c), the NVVDD/MSVDD current limits, the daily profile and the experiment session; beside them " +
         "clock_locks (any lock in the driver's clock-limit record: set_clock_lock's, nvidia-smi -lgc's, Boost Lock), " +
         "perf_limits (the driver's ceiling and floor per clock domain and the limit that set each), tdr (Windows' driver " +
-        "timeout) and the VBIOS and driver the daily profile is bound to. stock_* is what the card held before Clocktail first wrote the setting (the ownership " +
+        "timeout), pcie (the PCIe link: generation and width now, the most the card and slot allow together, the card's own " +
+        "highest generation, replays since boot; the link slows down at idle by design) and the VBIOS and driver the daily " +
+        "profile is bound to. stock_* is what the card held before Clocktail first wrote the setting (the ownership " +
         "journal), or the value now where Clocktail holds nothing; daily_* is the daily profile's value, absent where it " +
         "keeps none. journal_holds names the settings Clocktail has written and gives back on recovery; daily_profile is " +
         "absent when none is kept, session when none is open. daily_differs_on_card lists what the daily profile keeps that " +
@@ -83,6 +85,7 @@ public sealed partial class SettingsTools(Card card)
             at = DateTimeOffset.Now,
             // Locks in the driver's client clock-limit record: NVML's locked clocks, a V/F point lock, Boost Lock. One the
             // journal does not hold was set by another tool and outlives it.
+            pcie = Section(() => Pcie(card.PcieLink()) ?? throw new InvalidOperationException("NVML does not answer")),
             clock_locks = Section(() => card.WithDriver(ClientLimitsLayout.Read).Select(h => new { entry = h.Domain, mode = h.Mode, value = h.Value, what = h.Describe() }).ToList()),
             tdr = Section(() => (OperatingSystem.IsWindows() ? Clocktail.Domain.Platform.TdrSettings.Read() : null) is { } tdr
                 ? new { delay_s = tdr.Delay, level = tdr.LevelOrDefault, set_delay = tdr.DelayS != null, what = tdr.Describe(), safe_to_map = !tdr.Unsafe }
@@ -482,6 +485,11 @@ public sealed partial class SettingsTools(Card card)
             policies = control == null ? null : Policies(PolicyTable.Rows(limits, control, readings)),
         };
     }
+
+    /// <summary>The PCIe link as gpu_status and card_settings show it; null without NVML or with no field answered.</summary>
+    public static object? Pcie(NvmlPcieLink? p) => p is { } l && (l.Gen ?? l.Width ?? l.MaxGen ?? l.Replays) != null
+        ? new { gen = l.Gen, width = l.Width, max_gen = l.MaxGen, max_width = l.MaxWidth, gpu_max_gen = l.GpuMaxGen, replays = l.Replays }
+        : null;
 
     /// <summary>The driver's whole power-policy table, in W or A: what each record limits, the channel it watches, its
     /// bounds, the limit in force and the reading now.</summary>
