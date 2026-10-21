@@ -80,13 +80,24 @@ public sealed class FlightRecorder(TimeSpan keep)
         double floor = 0.6 * watts[watts.Count / 2];
         var blocked = window.FirstOrDefault(s => s.ReadMs >= BlockedMs);
         var before = resetSeenAt - HangDetectAtLeast;
-        var pick = loaded.LastOrDefault(s => s.Watts >= floor && s.At <= before && (blocked == null || s.At < blocked.At));
-        if (pick == null) return null;
+        int at = loaded.FindLastIndex(s => s.Watts >= floor && s.At <= before && (blocked == null || s.At < blocked.At));
+        if (at < 0) return null;
+        // The sample of the wall letting go is not the failure point: on 2026-10-18 17:59Z the last loaded sample was
+        // 2895 MHz at 910 mV, 598.6 W, then 2947 MHz at 970 mV, 514 W (power down 14 %, clock and voltage up as the
+        // limit stopped holding), then the frozen tail. That middle sample passed the 60 % floor and was picked.
+        while (at > 0 && LettingGo(loaded[at], loaded[at - 1])) at--;
+        var pick = loaded[at];
         string why = frozen != null ? $"last loaded sample before the readings froze at {frozen.At:HH:mm:ss.f}"
             : blocked != null ? $"last loaded sample before the reads blocked at {blocked.At:HH:mm:ss.f}"
             : $"last loaded sample {HangDetectAtLeast.TotalSeconds:0} s or more before the reset";
         return new CrashPoint(pick, (resetSeenAt - pick.At).TotalSeconds, why);
     }
+
+    /// <summary>A sample of the limit letting go, against the one before it: power down at least 10 % while the clock
+    /// rose 15 MHz or more, or NVVDD 10 mV or more (a GPU doing less work at a higher point: the hang beginning).</summary>
+    public static bool LettingGo(FlightSample s, FlightSample before) =>
+        s.Watts is double w && before.Watts is double b && w <= 0.9 * b
+        && (s.ClockMhz >= before.ClockMhz + 15 || s.CoreMv >= before.CoreMv + 10);
 
     /// <summary>
     /// The first sample of a frozen tail, or null. A hung GPU can keep answering without blocking: on 2026-10-18 17:59Z it

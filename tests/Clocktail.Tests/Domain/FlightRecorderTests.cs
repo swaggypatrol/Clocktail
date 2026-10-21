@@ -19,6 +19,25 @@ public class FlightRecorderTests
         Assert.Equal(T0.AddSeconds(60), w[0].At);
     }
 
+    /// <summary>The measured hang of 2026-10-18 17:59Z (re/tuning-results §2): 2895 MHz at 910 mV, 598.6 W; then the
+    /// limit letting go, 2947 MHz at 970 mV, 514 W; then ~30 s frozen at 3180 MHz, 995-1000 mV, ~126 W.</summary>
+    [Fact]
+    public void The_sample_of_the_limit_letting_go_is_not_the_crash_point()
+    {
+        var w = new List<FlightSample>();
+        for (int i = 0; i < 40; i++) w.Add(S(i * 0.5, 2895, 910, 598.6));        // 0 .. 19.5 s
+        w.Add(S(20.0, 2947, 970, 514));                                             // letting go
+        for (int i = 0; i < 60; i++) w.Add(S(20.5 + i * 0.5, 3180, 995 + (uint)(i % 2) * 5, 126));   // frozen
+        var p = FlightRecorder.Pick(w, T0.AddSeconds(51));
+        Assert.NotNull(p);
+        Assert.Equal((2895u, 910u), (p!.Sample.ClockMhz!.Value, p.Sample.CoreMv!.Value));
+        Assert.Equal(T0.AddSeconds(19.5), p.Sample.At);
+
+        // A drop in power at the same point (a lighter scene) is not letting go.
+        Assert.False(FlightRecorder.LettingGo(S(1, 2895, 910, 450), S(0.5, 2895, 910, 598)));
+        Assert.True(FlightRecorder.LettingGo(S(1, 2947, 970, 514), S(0.5, 2895, 910, 598.6)));
+    }
+
     [Fact]
     public void The_crash_point_is_the_last_loaded_sample_before_the_reads_block_not_the_wall_letting_go()
     {

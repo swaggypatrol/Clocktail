@@ -32,7 +32,7 @@ Light load (40 % duty, ~65 C): 930 mV 2947 / 2970; 940 mV 2970 / 3000; 955 mV 30
 ## After a crash
 1. A driver reset: the service has recorded the crash and puts the daily profile back once the GPU is idle (about 15 s; card_report says when it is on). A crash to the desktop with no reset: `mark_crash` first, which records it and puts the daily profile back. Then tell the person their card is safe.
 2. `data_points`: which trial, which points, how long it ran.
-3. The crash voltage the flight recorder reports is unreliable: with a 30 s TDR delay its 20 s window is all frozen samples. The real failure point is the last full-load sample before the freeze (for example 2895 MHz at 910 mV / 598 W). If a live watch was running, its CSV has every sample (4 a second): find that last one there (`live_read` with tailSeconds shows the last 30 s). Otherwise use the trial's operating point.
+3. The crash voltage the flight recorder reports is its pick of the last full-load sample before the freeze: it skips the frozen tail (with a 30 s TDR delay, ~30 s of the same clock and voltage at ~125 W) and the one sample of the limit letting go (power down, clock and voltage up), so on the reference hang it gives 2895 MHz at 910 mV / 598 W, not 2947 at 970. `data_points` puts the crash on the point nearest it. Check it when you can: If a live watch was running, its CSV has every sample (4 a second): find that last one there (`live_read` with tailSeconds shows the last 30 s). Otherwise use the trial's operating point.
 4. Step that region down 15-30 MHz below the crash value; never retry the same value.
 5. Note it with `log_note`, including the game and scene.
 
