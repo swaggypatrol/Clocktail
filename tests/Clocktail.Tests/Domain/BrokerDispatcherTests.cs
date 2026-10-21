@@ -953,6 +953,45 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Empty(_journal.Inspect().Items);
     }
 
+    /// <summary>The 575 W regime (2026-10-21): the FE request read 600 W while the board power policy held 575, and the
+    /// service, seeing the request already at the daily wall, wrote nothing. Putting the profile on now checks the policy
+    /// and writes the request again, a step away and back; with the two agreeing it writes nothing more.</summary>
+    [Fact]
+    public void A_daily_wall_the_firmware_does_not_hold_is_written_again()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        uint policyWord = CurrentLimitsFixture.Word(Slot.PowerPolicyGetControl);
+        int at = PolicyTableLayout.ControlLimit(8);
+        var applier = FakeDriver.RequestApplier!;
+        int feWrites = 0;
+        FakeDriver.RequestApplier = (state, req) =>
+        {
+            var next = applier(state, req);
+            if (BitConverter.ToUInt32(req) == Slots.Info(Slot.ClientPwrPoliciesSetControl).Shape!.Value.Word)
+            {
+                feWrites++;   // the firmware follows a request write
+                W(FakeDriver.State[policyWord], at, _requests[0xfe]);
+            }
+            return next;
+        };
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 600_000)).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep")).Ok);
+        W(FakeDriver.State[policyWord], at, 575_000);   // the firmware back on the VBIOS default; the request still reads 600
+        feWrites = 0;
+
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "the broker started"));
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(2, feWrites);
+        Assert.Equal(600_000u, _requests[0xfe]);
+        Assert.Equal(600_000u, U(FakeDriver.State[policyWord], at));
+        Assert.Contains("the card enforced 575 W under a 600 W request", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+
+        feWrites = 0;
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "again")).Ok);
+        Assert.Equal(0, feWrites);   // the two agree: nothing more is written
+    }
+
     /// <summary>A trial of several items whose later item is refused does not leave the earlier ones on the card: they go
     /// back, the trial before stays in force, and the answer says nothing changed. Before, the agent was told "written:
     /// none" while the lowered wall stayed on.</summary>

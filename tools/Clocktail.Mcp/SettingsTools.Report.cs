@@ -110,14 +110,18 @@ public sealed partial class SettingsTools
         // Power limit: the board's own range is NVIDIA's limit.
         var pw = Obj(s, "power");
         double? limitW = Num(pw, "limit_w"), stockW = Num(pw, "stock_w"), maxW = Num(pw, "board_max_w"), minW = Num(pw, "board_min_w"), dailyW = Num(pw, "daily_w");
-        bool powerOk = limitW is { } lw && (maxW is not { } mx || lw <= mx + 0.5) && (minW is not { } mn || lw >= mn - 0.5);
+        double? firmwareW = Num(pw, "firmware_w");
+        // The request reads one wall and the firmware holds another (575 W under a 600 W request, 2026-10-21).
+        bool notHeld = firmwareW is { } fw && limitW is { } rq && Math.Abs(fw - rq) > 0.5;
+        bool powerOk = !notHeld && limitW is { } lw && (maxW is not { } mx || lw <= mx + 0.5) && (minW is not { } mn || lw >= mn - 0.5);
         if (Unread(pw) is { } pwErr)
             rows.Add(new("⚡", "Power limit", "?", "?", "?", Look, pwErr));
         else
             rows.Add(new("⚡", "Power limit", V(stockW, "W"), V(limitW, "W"), Change(limitW, stockW, "W"), powerOk ? Safe : Look,
                 Join(maxW is { } bm ? $"board max {F(bm)} W" : null,
                      dailyW is { } dw && limitW is { } lwNow && Math.Abs(dw - lwNow) > 0.5 ? $"daily {F(dw)} W; a trial set this one" : null,
-                     powerOk ? null : "outside the board's own range")));
+                     notHeld ? $"the card enforces {F(firmwareW)} W, not the {F(limitW)} W asked for: back_to_daily writes the request again" : null,
+                     powerOk || notHeld ? null : "outside the board's own range")));
 
         // The V/F curve: offsets move clocks along the curve, never the voltage past MAX (the rails row has MAX).
         var vf = Obj(s, "vf_curve");

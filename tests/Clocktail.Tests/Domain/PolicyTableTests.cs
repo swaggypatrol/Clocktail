@@ -41,6 +41,21 @@ public class PolicyTableTests
         Assert.Contains("\"limit\":60,\"now\":49.6,\"use_pct\":82.7", json);
     }
 
+    /// <summary>The board power policy is the one class 0x18 record in mW with the request's own range (record 8 on the
+    /// 5090), not the 50 kW one beside it.</summary>
+    [Fact]
+    public void The_board_wall_is_the_power_limit_record_with_the_requests_range()
+    {
+        FakeDriver.Reset();
+        CurrentLimitsFixture.Install();
+        var hw = new NvClient(FakeDriver.ApiFor([Slot.PowerPolicyGetInfo, Slot.PowerPolicyGetControl, Slot.PowerMonitorGetInfo], []));
+        var gpu = new GpuSession(1, "fake");
+        var board = new BoardPowerInfo(0, 1, 400_000, 575_000, 600_000);
+        Assert.Equal(8, BoardWall.Record(CurrentLimitsReader.Read(hw, gpu).Records, board)!.Index);
+        Assert.Equal(575_000u, BoardWall.Enforced(hw, gpu, board));
+        Assert.Null(BoardWall.Record(CurrentLimitsReader.Read(hw, gpu).Records, board with { MinMw = 1 }));
+    }
+
     [Fact]
     public void A_record_the_driver_did_not_answer_for_has_no_limit()
     {

@@ -39,6 +39,11 @@ public class BoardInputTests
     {
         var s = JsonDocument.Parse("""{"current_limits":{"input":{"connector_w":612,"input_a":52,"input_limit_a":60,"concern":"the 16-pin connector carries 612 W, over its 600 W rating"}}}""").RootElement;
         var row = Assert.Single(SettingsTools.ReportRows(s, JsonDocument.Parse("{}").RootElement), r => r.Name == "16-pin input");
+        // The firmware holding another wall than the request is a look, with what to do.
+        var wall = JsonDocument.Parse("""{"power":{"limit_w":600,"firmware_w":575,"board_min_w":400,"board_max_w":600,"stock_w":575,"daily_w":600}}""").RootElement;
+        var power = Assert.Single(SettingsTools.ReportRows(wall, JsonDocument.Parse("{}").RootElement), r => r.Name == "Power limit");
+        Assert.Equal(SettingsTools.Look, power.Mark);
+        Assert.Contains("the card enforces 575 W, not the 600 W asked for", power.Note);
         Assert.Equal(SettingsTools.Look, row.Mark);
     }
 }

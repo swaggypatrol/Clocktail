@@ -234,6 +234,34 @@ public static class PolicyTable
     }
 }
 
+/// <summary>
+/// The board power policy the FE request is enforced through: the class 0x18 record in mW with the request's own range
+/// (record 8 on the 5090: 400 / 575 / 600 W), and the limit in force there. It follows every request write (a 500 W
+/// trial read 500 W there, 2026-10-21). That morning the card held 575 W, the VBIOS default, for two hours under a
+/// request that read 600 W, with NVML reporting 600: the service had started, found the request at 600 and written
+/// nothing. A request written again (500, 400, then 600) took at once, and the card held 600 W from then on.
+/// </summary>
+public static class BoardWall
+{
+    public const uint PowerLimitClass = 0x18;
+
+    /// <summary>The one record that matches; null when none or more than one does.</summary>
+    public static PolicyRecord? Record(IReadOnlyList<PolicyRecord> records, BoardPowerInfo board)
+    {
+        var hits = records.Where(r => r.Class == PowerLimitClass && r.Unit != PolicyTableLayout.UnitMilliamps && r.Min == board.MinMw && r.Max == board.MaxMw).ToList();
+        return hits.Count == 1 ? hits[0] : null;
+    }
+
+    /// <summary>The board limit the firmware enforces, mW; null when the table has no single matching record.</summary>
+    public static uint? Enforced(NvClient hw, GpuSession gpu, BoardPowerInfo board)
+    {
+        var records = CurrentLimitsReader.Read(hw, gpu).Records;
+        if (Record(records, board) is not { } r) return null;
+        var control = CurrentLimitsReader.Control(hw, gpu, r.Index);
+        return CurrentLimitsParser.ControlClass(control, r.Index) == r.Class ? CurrentLimitsParser.ControlLimit(control, r.Index) : null;
+    }
+}
+
 /// <summary>Read-only: every call here is a GET, takes no write window and no lock.</summary>
 public static class CurrentLimitsReader
 {

@@ -47,7 +47,8 @@ public sealed partial class SettingsTools(Card card)
         "keeps none. journal_holds names the settings Clocktail has written and gives back on recovery; daily_profile is " +
         "absent when none is kept, session when none is open. daily_differs_on_card lists what the daily profile keeps that " +
         "the card does not hold now ([] = the card is on it; absent when none is kept, it is suspended or a trial is in " +
-        "force). current_limits.policies is the driver's whole power-policy table: what each record limits (named only " +
+        "force). power.firmware_w is the board limit the firmware enforces (its power-policy record), which must equal " +
+        "limit_w, the request. current_limits.policies is the driver's whole power-policy table: what each record limits (named only " +
         "where measured), the channel it watches, its range, the limit in force and the reading now with use_pct; one near " +
         "100 % under load is one that can hold the clock. controls is the capability map: each control, the MCP tool that sets it (null: none does), whether it can " +
         "be set on this card and driver, and why not. A section that cannot be read is {\"error\"} and the rest still answer. Read-only.")]
@@ -228,10 +229,14 @@ public sealed partial class SettingsTools(Card card)
     {
         var p = card.WithDriver(PowerRequestsReader.Read);
         string fe = PowerCap.Key(PowerRequestKind.Ordinary);
+        uint? firmware = null;
+        try { firmware = card.WithDriver((hw, s) => BoardWall.Enforced(hw, s, p.Board)); }
+        catch (Exception e) when (Soft(e)) { }
         return new
         {
             limit_w = p.Ordinary.Mw / 1000.0,
             enforced_w = t?.PowerEnforcedWatts,
+            firmware_w = firmware / 1000.0,
             f8_cap_w = p.Additional.Mw / 1000.0,
             board_min_w = p.Board.MinMw / 1000.0,
             board_max_w = p.Board.MaxMw / 1000.0,

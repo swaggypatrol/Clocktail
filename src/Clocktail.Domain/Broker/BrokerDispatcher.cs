@@ -925,6 +925,7 @@ public sealed class BrokerDispatcher
                         yield return $"{Get("kind", "Kind")}/{Get("key", "Key")}: {Get("before", "Current")} → {Get("after", "Original")} ({Get("outcome", "action")})";
                     }
         if (r.Result is { } s && s.TryGetProperty("skipped", out var why) && why.ValueKind == JsonValueKind.String) yield return $"Not put on: {why.GetString()}";
+        if (r.Result is { } t && t.TryGetProperty("wall", out var wall) && wall.ValueKind == JsonValueKind.String) yield return $"Wall: {wall.GetString()}";
         if (!r.Ok) yield return $"Failed: {r.Error}";
     }
 
@@ -993,7 +994,29 @@ public sealed class BrokerDispatcher
                 if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
                 if (!r.Ok) return new BrokerResponse(false, r.Error ?? $"{w.Kind}/{w.Key} did not apply", Element(new { success = false, path, profile, applied }), r.Code);
             }
-        return Ok(new { success = true, path, profile, applied, skipped });
+        // The firmware's board limit must follow the request (BoardWall): a request that reads as the daily wall while the
+        // card holds another is written again, a step away and back (a changed value is what was seen to take).
+        string? wallNote = null;
+        if (writing is { Suspended: false } && writing.Writes.Where(only ?? (_ => true)).FirstOrDefault(w => w.Kind == PowerCap.Kind && w.Key == PowerCap.Key(PowerRequestKind.Ordinary)) is { } wall
+            && uint.TryParse(wall.Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var wallMw))
+        {
+            BoardPowerInfo? board = null;
+            uint? enforced = null;
+            try { board = PowerRequestsReader.ReadBoard(_hw, target.Session); enforced = BoardWall.Enforced(_hw, target.Session, board); }
+            catch (Exception e) when (e is InvalidOperationException or InvalidDataException or ArgumentException) { }
+            if (board != null && enforced is { } held && held != wallMw)
+            {
+                wallNote = $"the card enforced {held / 1000.0:0.#} W under a {wallMw / 1000.0:0.#} W request: the request was written again";
+                uint away = wallMw - 1000 >= board.MinMw ? wallMw - 1000 : wallMw + 1000;
+                foreach (var v in new[] { away, wallMw })
+                {
+                    var r = Dispatch(WriteOf(target, PowerCap.Kind, wall.Key, v.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+                    if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
+                    if (!r.Ok) return new BrokerResponse(false, r.Error ?? "the daily wall could not be written again", Element(new { success = false, path, profile, applied, wall = wallNote }), r.Code);
+                }
+            }
+        }
+        return Ok(new { success = true, path, profile, applied, skipped, wall = wallNote });
     }
 
     /// <summary>The general write: set kind/key to value through the registry. A limit the driver reveals only after
