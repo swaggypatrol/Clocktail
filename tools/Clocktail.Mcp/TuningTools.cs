@@ -100,6 +100,11 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             memory_controller_pct = t?.MemUtilPercent,
             limit_reasons = t?.ThrottleReasons,
             rails = Rails(look),
+            input = look.Input is { } inp ? new
+            {
+                connector_w = inp.ConnectorW is { } cw ? Math.Round(cw, 1) : (double?)null, pcie_slot_w = inp.PcieSlotW is { } pw ? Math.Round(pw, 1) : (double?)null,
+                input_a = inp.InputA is { } ia ? Math.Round(ia, 1) : (double?)null, input_limit_a = inp.InputLimitA, concern = inp.Concern(),
+            } : null,
             gpc_mv = gpc == null ? null : new
             {
                 mean = Math.Round(gpc.MeanMv, 1), min = gpc.MinMv, max = gpc.MaxMv,

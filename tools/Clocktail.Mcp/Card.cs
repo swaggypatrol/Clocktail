@@ -90,7 +90,8 @@ public sealed class Card : IDisposable
     /// <summary>One look at the card: NVML's telemetry, both rails' present voltage, NVVDD's MAX and the Core curve, and
     /// from the power monitor each rail's output with the current limit in force (null when the table is unreadable).</summary>
     public sealed record Look(TelemetrySnapshot? Telemetry, uint? NvvddUv, uint? MsvddUv, uint? NvvddMaxUv, VfCurveSnapshot Curve,
-        CurrentLimits? Limits = null, MonitorReading? NvvddOut = null, MonitorReading? MsvddOut = null, RailRecord? Msvdd = null);
+        CurrentLimits? Limits = null, MonitorReading? NvvddOut = null, MonitorReading? MsvddOut = null, RailRecord? Msvdd = null,
+        BoardInput? Input = null);
 
     public Look Read()
     {
@@ -116,15 +117,17 @@ public sealed class Card : IDisposable
             catch (InvalidOperationException) { }
             CurrentLimits? limits = null;
             MonitorReading? nvvddOut = null, msvddOut = null;
+            BoardInput? input = null;
             try
             {
                 limits = CurrentLimitsReader.Read(_hw, _session);
                 var readings = CurrentLimitsReader.Monitor(_hw, _session, limits.Channels);
                 nvvddOut = limits.Output(Rail.Nvvdd, readings);
                 msvddOut = limits.Output(Rail.Msvdd, readings);
+                input = BoardInput.From(limits, readings);
             }
             catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
-            return new Look(t, nvvdd, msvdd, max, VfReader.Read(_hw, _session), limits, nvvddOut, msvddOut, msvddRail);
+            return new Look(t, nvvdd, msvdd, max, VfReader.Read(_hw, _session), limits, nvvddOut, msvddOut, msvddRail, input);
         }
     }
 

@@ -419,8 +419,19 @@ public sealed partial class SettingsTools(Card card)
                 daily_a = Scaled(c.Daily(CurrentLimitWrites.Kind, CurrentLimitWrites.Key(r)), 1000),
             };
         }
-        return new { nvvdd = One(Rail.Nvvdd), msvdd = One(Rail.Msvdd) };
+        var input = BoardInput.From(limits, readings);
+        return new
+        {
+            nvvdd = One(Rail.Nvvdd), msvdd = One(Rail.Msvdd),
+            input = input == null ? null : new
+            {
+                connector_w = Round1(input.ConnectorW), pcie_slot_w = Round1(input.PcieSlotW), input_a = Round1(input.InputA),
+                input_limit_a = input.InputLimitA, concern = input.Concern(),
+            },
+        };
     }
+
+    private static double? Round1(double? v) => v is { } x ? Math.Round(x, 1) : null;
 
     /// <summary>The daily profile's writes by "kind/key", and (in <paramref name="section"/>) the profile in short: when it
     /// was kept, whether it is suspended, what it keeps; null when none is kept, an error when the broker cannot say.</summary>

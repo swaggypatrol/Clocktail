@@ -254,6 +254,11 @@ public sealed partial class SettingsTools
     private static List<ReportRow> LiveRows(JsonElement s, JsonElement l)
     {
         var rows = new List<ReportRow>();
+        // The board's input: the 16-pin connector and the input current (named from the 2026-10-21 measurements).
+        if (Obj(s, "current_limits", "input") is { } input && Num(input, "connector_w") is { } cw)
+            rows.Add(new("🔌", "16-pin input", "", Num(input, "input_a") is { } ia ? $"{F(cw)} W, {F(ia)} A" : $"{F(cw)} W", "",
+                Str(input, "concern") != null ? Look : Safe,
+                Str(input, "concern") ?? Join(Num(input, "input_limit_a") is { } il ? $"input limit {F(il)} A" : null, "rated 600 W")));
         if (Obj(s, "last_crash") is { } crash)
             rows.Add(new("💥", "Last crash", "", Str(crash, "found_at") is { } fa && DateTimeOffset.TryParse(fa, CultureInfo.InvariantCulture, out var when) ? when.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture) : "?", "", Look,
                 Join(Str(crash, "what"), Num(crash, "held") is { } n && n > 0 ? $"{F(n)} setting(s) were held; they were given back" : null, "data_points and read_log have the trial it happened in")));

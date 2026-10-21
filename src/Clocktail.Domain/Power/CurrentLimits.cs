@@ -38,6 +38,10 @@ public static class PowerMonitorLayout
     public const int InfoSize = 0xca8, InfoRev = 3, InfoMask = 0x10, Provider = 0x34, Type = 0x38, ChannelStride = 0x3c;
     public const int StatusSize = 0x59c, StatusRev = 1, StatusMask = 4, StatusTotal = 8, StatusBase = 0x1c, StatusStride = 0x2c;
     public const uint Regulator = 6, NvvddOutput = 1, MsvddOutput = 0x10;
+    /// <summary>Measured on the RTX 5090 FE (2026-10-21, idle and full load at 400/500/600 W): type 0xda read total board
+    /// less the PCIe slot to 0.1 W in every state (the 16-pin connector), type 0xa9 reads current only and tracks the
+    /// board's input current (+0.5 A; 49.6 A at the 600 W wall). Its policy record caps it at 60 A.</summary>
+    public const uint ConnectorInput = 0xda, InputCurrent = 0xa9, PcieSlot = 0xff;
 
     public static uint TypeOf(Rail rail) => rail == Rail.Nvvdd ? NvvddOutput : MsvddOutput;
 
@@ -47,6 +51,7 @@ public static class PowerMonitorLayout
         1 => "NVVDD output", 2 => "FBVDD output", 3 => "FBVDDQ output", 8 => "total GPU output", 0xb => "SRAM output",
         0x10 => "MSVDD output", 0xe8 => "misc 0 input", 0xf5 => "total board", 0xf6 => "NVVDD input", 0xf7 => "FBVDD input",
         0xf8 => "FBVDDQ input", 0xfa => "8-pin input 0", 0xfb => "8-pin input 1", 0xfe => "PCIe 3.3 V", 0xff => "PCIe 12 V",
+        ConnectorInput => "16-pin input", InputCurrent => "board input current",
         _ => $"rail 0x{type:x}",
     };
 }
@@ -56,6 +61,32 @@ public sealed record MonitorChannel(int Index, uint Provider, uint Type);
 
 /// <summary>A rail's current limit as the driver states it: the record, its bounds and the limit in force, mA.</summary>
 public sealed record CurrentLimit(Rail Rail, int Record, uint Channel, uint MinMa, uint DefaultMa, uint MaxMa, uint LimitMa);
+
+/// <summary>
+/// What comes into the board: the 16-pin connector's watts, the PCIe slot's, and the input current against the limit its
+/// policy record states (60 A on the 5090 FE). Null fields where the card has no such channel.
+/// </summary>
+public sealed record BoardInput(double? ConnectorW, double? PcieSlotW, double? InputA, double? InputLimitA)
+{
+    /// <summary>The 16-pin connector is rated 600 W.</summary>
+    public const double ConnectorRatedW = 600;
+
+    public static BoardInput? From(CurrentLimits limits, IReadOnlyList<MonitorReading> readings)
+    {
+        MonitorReading? Of(uint type) => readings.FirstOrDefault(r => r.Type == type);
+        var connector = Of(PowerMonitorLayout.ConnectorInput);
+        var current = Of(PowerMonitorLayout.InputCurrent);
+        if (connector == null && current == null) return null;
+        var record = current == null ? null : limits.Records.FirstOrDefault(r => r.Channel == current.Channel && r.Unit == PolicyTableLayout.UnitMilliamps);
+        return new BoardInput(connector?.Mw / 1000.0, Of(PowerMonitorLayout.PcieSlot)?.Mw / 1000.0, current?.Ma / 1000.0, record?.Default / 1000.0);
+    }
+
+    /// <summary>Why it needs a look, or null: the connector over its 600 W rating, or the input current within 10 % of its limit.</summary>
+    public string? Concern() =>
+        ConnectorW > ConnectorRatedW ? $"the 16-pin connector carries {ConnectorW:0} W, over its {ConnectorRatedW:0} W rating"
+        : InputA is { } a && InputLimitA is { } l && l > 0 && a >= 0.9 * l ? $"input current {a:0.#} A is within 10 % of its {l:0} A limit"
+        : null;
+}
 
 /// <summary>One power-monitor channel's reading.</summary>
 public sealed record MonitorReading(int Channel, uint Type, uint Mw, int Ma, uint Uv);
