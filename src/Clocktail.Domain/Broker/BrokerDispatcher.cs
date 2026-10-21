@@ -450,9 +450,13 @@ public sealed class BrokerDispatcher
                     Log(target, $"Session not started · {game}", [$"Last trial: {closed!.Change}", "Back to the daily profile did not all land:", .. writes]);
                     return new BrokerResponse(false, $"the trial in force did not all go back ({back.Error}); the new session did not begin", back.Result, back.Code);
                 }
+                // unattended: the person is away (an overnight mapping run), so the session stops writing new trials after
+                // max_crashes crashes (default 2) rather than keep hanging the card; nothing steps down, the daily profile stays.
+                bool unattended = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("unattended", out var un) && un.ValueKind == JsonValueKind.True;
+                int? budget = unattended ? (int)(UInt(a, "max_crashes") ?? 2) : null;
                 lock (_experiment)
                 {
-                    var exp = new Experiment(game, Text(a, "note"), _host.Now);
+                    var exp = new Experiment(game, Text(a, "note"), _host.Now, CrashBudget: budget);
                     exp.Save(path);
                     Log(target, $"Session started · {game}", [exp.Note,
                         .. closed != null ? (string?[])[$"Last trial: {closed.Change}, ran {closed.Minutes} min", "Back to the daily profile:", .. writes] : []]);
@@ -486,6 +490,8 @@ public sealed class BrokerDispatcher
                 lock (_experiment)
                 {
                     var exp = Experiment.Load(path) ?? throw new InvalidOperationException("no experiment session is open; begin one first");
+                    if (exp.CrashBudget is { } budget && exp.CrashesSince(data) is var crashes && crashes >= budget)
+                        return Fail($"this unattended session has had {crashes} crash{(crashes == 1 ? "" : "es")}, its budget of {budget}: no new trial until a new session begins (the daily profile stays on)", BrokerCode.CrashBudget);
                     // The writer's context (the readings and each point before and after, from the MCP server) goes in as given.
                     var context = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("context", out var c) && c.ValueKind == JsonValueKind.Array
                         ? c.EnumerateArray().Select(x => x.GetString()).ToList() : [];

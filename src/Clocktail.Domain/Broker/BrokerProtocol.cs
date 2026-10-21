@@ -142,4 +142,6 @@ public static class BrokerCode
     public const string NoProof = "no_proof";
     /// <summary>The op threw before it could produce a result: the reason is in the error.</summary>
     public const string Failed = "failed";
+    /// <summary>An unattended session spent its crash budget: no new trial until a new session begins.</summary>
+    public const string CrashBudget = "crash_budget";
 }

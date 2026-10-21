@@ -77,7 +77,10 @@ public sealed record DataPoint(
 /// unchanged instead of stepping it down (the user's decision, 2026-10-18). Without a trial in force a crash is the
 /// daily profile's, as before.
 /// </summary>
-public sealed record Experiment(string Game, string? Note, DateTimeOffset StartedAt, ExperimentTrial? Trial = null)
+public sealed record Experiment(string Game, string? Note, DateTimeOffset StartedAt, ExperimentTrial? Trial = null,
+    /// <summary>The session's crash budget, when it was begun unattended: after this many crashes no new trial is written
+    /// until a new session begins (the daily profile stays on). Null: no budget, the person is at the machine.</summary>
+    int? CrashBudget = null)
 {
     public const string FileName = "experiment.json";
     public const string DataFileName = "datapoints.jsonl";
@@ -112,6 +115,10 @@ public sealed record Experiment(string Game, string? Note, DateTimeOffset Starte
         if (File.Exists(path)) File.Delete(path);
         if (File.Exists(AtomicFile.BackupPath(path))) File.Delete(AtomicFile.BackupPath(path));
     }
+
+    /// <summary>The crashes recorded in this session so far.</summary>
+    public int CrashesSince(string dataPath) =>
+        ReadLast(dataPath, 1000).Count(p => p.Outcome == Crash && p.At >= StartedAt && p.Game == Game);
 
     /// <summary>The trial's data point with this outcome; null when there is no trial.</summary>
     public DataPoint? Point(string outcome, DateTimeOffset at, string? note = null, uint? crashUv = null) =>

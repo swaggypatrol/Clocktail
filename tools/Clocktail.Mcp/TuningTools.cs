@@ -133,11 +133,17 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     [McpServerTool(Name = "begin_session", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Start an experiment session for a game. Every adjust_curve after this is a trial; its outcome becomes a data point " +
         "(stable, survived until replaced, or crash). A crash during a trial does not step the daily profile down. A trial " +
-        "still in force from an earlier session ends first and the daily profile goes back on, as end_session does.")]
+        "still in force from an earlier session ends first and the daily profile goes back on, as end_session does. " +
+        "unattended=true when the person is away (an overnight stress mapping): after maxCrashes crashes (default 2) no " +
+        "new trial is written until a new session, so the card is not hung over and over with nobody there; the daily " +
+        "profile stays on and nothing steps down.")]
     public string BeginSession(
         [Description("The game being played.")] string game,
-        [Description("Anything worth keeping with the data (settings, scene).")] string? note = null) =>
-        Reply(card.Broker(BrokerRequest.OpExperiment, "begin", JsonSerializer.Serialize(new { game, note })));
+        [Description("Anything worth keeping with the data (settings, scene).")] string? note = null,
+        [Description("The person is away: stop writing new trials after maxCrashes crashes.")] bool unattended = false,
+        [Description("With unattended: the crashes allowed before trials stop, 1..10 (default 2).")] int maxCrashes = 2) =>
+        maxCrashes is < 1 or > 10 ? Out(new { success = false, error = "maxCrashes is 1..10" })
+        : Reply(card.Broker(BrokerRequest.OpExperiment, "begin", JsonSerializer.Serialize(new { game, note, unattended, max_crashes = maxCrashes })));
 
     [McpServerTool(Name = "adjust_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Raise or lower the Core V/F points around where the card runs now, as a new trial of the session. Each call moves " +

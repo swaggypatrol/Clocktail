@@ -782,6 +782,26 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("Trial-only settings handed back", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
+    /// <summary>An unattended session stops writing trials once it has spent its crash budget; a session the person is at
+    /// has none, and a new session starts a new budget.</summary>
+    [Fact]
+    public void An_unattended_session_stops_trials_after_its_crash_budget()
+    {
+        var d = Power();
+        string Wall(uint w) => JsonSerializer.Serialize(new { curve = "0*127", change = $"{w} W", power_mw = w * 1000, keep_curve = true });
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"overnight","unattended":true,"max_crashes":1}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", Wall(500))).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "nvlddmkm 153")).Ok);
+        var refused = d.Dispatch(Exp("try", Wall(480)));
+        Assert.False(refused.Ok);
+        Assert.Equal(BrokerCode.CrashBudget, refused.Code);
+
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"attended"}""")).Ok);   // no budget when the person is there
+        Assert.True(d.Dispatch(Exp("try", Wall(480))).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "nvlddmkm 153")).Ok);
+        Assert.True(d.Dispatch(Exp("try", Wall(460))).Ok);
+    }
+
     /// <summary>preview: what keep would save, against the daily profile and the card, with what is held and not kept;
     /// nothing is written or saved.</summary>
     [Fact]
