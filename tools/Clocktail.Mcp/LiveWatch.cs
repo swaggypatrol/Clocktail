@@ -93,7 +93,7 @@ public sealed class LiveWatch(Card card) : IDisposable
             var dir = Dir();
             Directory.CreateDirectory(dir);
             var now = DateTimeOffset.Now;
-            string stem = Path.Combine(dir, $"live-{now:yyyyMMdd-HHmmss}");
+            string stem = Path.Combine(dir, string.Create(CultureInfo.InvariantCulture, $"live-{now:yyyyMMdd-HHmmss}"));
             var run = new Run
             {
                 Started = now, IntervalMs = intervalMs, EverySeconds = everySeconds, Note = note,

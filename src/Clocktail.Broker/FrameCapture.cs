@@ -41,7 +41,7 @@ internal sealed class FrameCapture : IFrameCapture
         {
             StopLocked();
             Directory.CreateDirectory(dir);
-            _path = Path.Combine(dir, $"{DateTime.Now:yyyyMMdd-HHmmss}{(process is { } n ? "-" + Path.GetFileNameWithoutExtension(n) : "")}.csv");
+            _path = Path.Combine(dir, $"{DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)}{(process is { } n ? "-" + Path.GetFileNameWithoutExtension(n) : "")}.csv");
             // PresentMon's own --output_file is not shared for reading while it writes (a live watch read nothing until the
             // capture ended, 2026-10-20), so it writes to this process, which writes the file and shares it.
             var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };

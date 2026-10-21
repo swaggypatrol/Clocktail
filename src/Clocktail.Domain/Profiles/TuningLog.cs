@@ -22,7 +22,7 @@ public static class TuningLog
     {
         var sb = new StringBuilder();
         if (!File.Exists(path)) sb.Append("# Clocktail tuning log\n\nOne entry per change, newest last.\n");
-        sb.Append(Heading).Append(at.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")).Append(" · ").Append(title).Append('\n');
+        sb.Append(Heading).Append(at.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)).Append(" · ").Append(title).Append('\n');
         foreach (var line in lines)
             if (!string.IsNullOrWhiteSpace(line)) sb.Append("- ").Append(line.Replace("\n", "\n  ")).Append('\n');
         for (int attempt = 0; attempt < 5; attempt++)

@@ -17,6 +17,9 @@ public sealed class Residency(Card card) : BackgroundService
     public const int MinUtilPct = 50;
     private static readonly TimeSpan Keep = TimeSpan.FromMinutes(10);
 
+    /// <summary>A day's file name, Gregorian whatever the person's calendar, so a day written is the day read back.</summary>
+    public static string DayFile(DateTime day) => day.ToString("yyyyMMdd", CultureInfo.InvariantCulture) + ".csv";
+
     public sealed record Tick(DateTimeOffset At, uint Uv, uint Mhz, uint Util, double? W);
 
     private readonly object _gate = new();
@@ -75,7 +78,7 @@ public sealed class Residency(Card card) : BackgroundService
         if (Dir() is { } dir)
             for (var day = from.LocalDateTime.Date; day <= to.LocalDateTime.Date; day = day.AddDays(1))
             {
-                string path = Path.Combine(dir, $"{day:yyyyMMdd}.csv");
+                string path = Path.Combine(dir, DayFile(day));
                 if (!File.Exists(path)) continue;
                 using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                 using var r = new StreamReader(fs);
@@ -102,7 +105,7 @@ public sealed class Residency(Card card) : BackgroundService
             var sb = new StringBuilder();
             foreach (var t in day)
                 sb.Append(string.Create(CultureInfo.InvariantCulture, $"{t.At:O},{t.Uv},{t.Mhz},{t.Util},{t.W:0.#}\n"));
-            File.AppendAllText(Path.Combine(dir, $"{day.Key:yyyyMMdd}.csv"), sb.ToString());
+            File.AppendAllText(Path.Combine(dir, DayFile(day.Key)), sb.ToString());
         }
         lock (_gate) _pending.RemoveAll(batch.Contains);
     }

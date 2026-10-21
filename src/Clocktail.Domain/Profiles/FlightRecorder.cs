@@ -122,7 +122,7 @@ public sealed class FlightRecorder(TimeSpan keep)
     {
         var dir = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(journalPath))!, "crash-traces");
         Directory.CreateDirectory(dir);
-        var path = Path.Combine(dir, $"trace-{at.UtcDateTime:yyyyMMdd-HHmmss}.json");
+        var path = Path.Combine(dir, string.Create(CultureInfo.InvariantCulture, $"trace-{at.UtcDateTime:yyyyMMdd-HHmmss}.json"));
         AtomicFile.Write(path, JsonSerializer.SerializeToUtf8Bytes(new { at, evidence, driver, crash_point = point, samples = window }, Json));
         foreach (var old in Directory.GetFiles(dir, "trace-*.json").Order(StringComparer.Ordinal).SkipLast(TracesKept))
             try { File.Delete(old); } catch (IOException) { }

@@ -34,13 +34,18 @@ public static class SystemLog
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool EvtClose(IntPtr handle);
 
+    /// <summary>The XPath for <see cref="Count"/>. The time is the event log's own format whatever the person's culture:
+    /// with the current one, a non-Gregorian calendar or a '.' time separator made a query that matched nothing, so a
+    /// driver reset during a stress run went unseen and the run passed.</summary>
+    public static string Query(string filter, DateTime sinceUtc) => string.Create(System.Globalization.CultureInfo.InvariantCulture,
+        $"*[System[({filter}) and TimeCreated[@SystemTime>='{sinceUtc.ToUniversalTime():yyyy-MM-ddTHH:mm:ss.fffZ}']]]");
+
     /// <summary>How many System events match <paramref name="filter"/> (an XPath over System, e.g.
     /// <see cref="DriverResetFilter"/>) since <paramref name="sinceUtc"/>, at most <paramref name="max"/>.</summary>
     /// <exception cref="InvalidOperationException">The System log could not be queried.</exception>
     public static int Count(string filter, DateTime sinceUtc, int max = 64)
     {
-        string query = $"*[System[({filter}) and TimeCreated[@SystemTime>='{sinceUtc.ToUniversalTime():yyyy-MM-ddTHH:mm:ss.fffZ}']]]";
-        var results = EvtQuery(IntPtr.Zero, "System", query, QueryChannelPath);
+        var results = EvtQuery(IntPtr.Zero, "System", Query(filter, sinceUtc), QueryChannelPath);
         if (results == IntPtr.Zero)
             throw new InvalidOperationException($"could not query the System log (error {Marshal.GetLastPInvokeError()})");
         try
