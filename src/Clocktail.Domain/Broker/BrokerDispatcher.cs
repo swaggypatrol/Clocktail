@@ -266,8 +266,8 @@ public sealed class BrokerDispatcher
                     req.Value is { } note ? $"Note: {note}" : null,
                     trialKept != null ? $"From trial: {trialKept.Game}, {trialKept.Change} ({Limits(trialKept)})" : null,
                     profile != null
-                        ? "Taken from the card: V/F curve, fan curve, memory offset, MSVDD offsets, XBAR/SYS/Video offsets and voltage demands; the power limit stays the old daily profile's; current limits and fixed fan duties are not kept"
-                        : trialWall ? "A trial's power limit, current limits and fixed fan duties are not kept" : "Current limits and fixed fan duties are not kept",
+                        ? "Taken from the card: what the trials tuned (the curves, offsets, rails, voltage demands, the clock ratio and a clock cap); the power limit stays the old daily profile's; current limits, fixed fan duties, the F8 request, clock floors, point locks and Boost Lock are not kept"
+                        : trialWall ? "A trial's power limit, current limits, fixed fan duties, the F8 request, clock floors, point locks and Boost Lock are not kept" : "Current limits, fixed fan duties, the F8 request, clock floors, point locks and Boost Lock are not kept",
                     .. kept.Writes.Select(w => $"New: {w.Kind}/{w.Key} = {w.Value}"),
                     .. (profile?.Writes ?? []).Select(w => $"Old: {w.Kind}/{w.Key} = {w.Value}"),
                     .. wall != null ? ["Daily power limit put back:", .. Writes(wall)] : Array.Empty<string>()]);
@@ -720,10 +720,9 @@ public sealed class BrokerDispatcher
     private static BrokerRequest WriteOf(IGpuTarget target, string kind, string key, string value) =>
         new(BrokerRequest.OpWrite, target.StableId, Kind: kind, Key: key, Value: value, EnableSlots: Setters(kind));
 
-    /// <summary>A cell only a trial sets and no daily profile holds: a rail's current limit, a fixed fan duty, the F8 request
-    /// (it can only go back to non-limiting, never away).</summary>
-    private static bool TrialOnly(OwnedItem i) => i.Kind is CurrentLimitWrites.Kind or FanControl.Kind
-        || i.Kind == PowerCap.Kind && i.Key == PowerCap.Key(PowerRequestKind.Additional);
+    /// <summary>A cell only a trial sets and no daily profile holds (DailyProfile.TrialOnly): a rail's current limit, a
+    /// fixed fan duty, the F8 request, a clock floor, V/F point lock or Boost Lock.</summary>
+    private static bool TrialOnly(OwnedItem i) => DailyProfile.TrialOnly(i.Kind, i.Key);
 
     /// <summary>The trial-only cells this broker holds.</summary>
     private static IEnumerable<OwnedItem> HeldTrialCells(IGpuTarget target) => target.Journal.Inspect().Items.Where(TrialOnly);
@@ -748,7 +747,7 @@ public sealed class BrokerDispatcher
         bool trialWall = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial?.PowerMw != null;
         foreach (var item in target.Journal.Inspect().Items)
         {
-            if (TrialOnly(item)) { notKept.Add($"{item.Id}: trial-only (a current limit or a fixed fan duty)"); continue; }
+            if (TrialOnly(item)) { notKept.Add($"{item.Id}: trial-only (a current limit, a fixed fan duty, the F8 request, or a clock floor, point lock or Boost Lock)"); continue; }
             if (trialWall && item.Kind == PowerCap.Kind) { notKept.Add($"{item.Id}: a trial's wall; the daily wall is set with set_daily_power_limit"); continue; }
             var wp = WriteRegistry.Find(item.Kind) ?? throw new InvalidOperationException($"this version cannot keep '{item.Id}'");
             var cell = wp.Prepare(_hw, target.Session, item.Key, item.Original, WriteOptions.Recovery).Cell;
@@ -761,7 +760,9 @@ public sealed class BrokerDispatcher
         if (profile != null)
         {
             notKept.AddRange(writes.Where(w => !DailyProfile.KeptFromCard(w.Kind, w.Key)).Select(w => $"{w.Kind}/{w.Key}: stays as the daily profile keeps it"));
-            writes = [.. profile.Writes.Where(w => !DailyProfile.KeptFromCard(w.Kind, w.Key)), .. writes.Where(w => DailyProfile.KeptFromCard(w.Kind, w.Key))];
+            // A lock a profile kept before locks were trial-only (0.2.5) is not carried over.
+            writes = [.. profile.Writes.Where(w => !DailyProfile.KeptFromCard(w.Kind, w.Key) && !DailyProfile.TrialOnly(w.Kind, w.Key)),
+                      .. writes.Where(w => DailyProfile.KeptFromCard(w.Kind, w.Key))];
         }
         return (writes, notKept);
     }
@@ -840,7 +841,7 @@ public sealed class BrokerDispatcher
     {
         var held = HeldTrialCells(target).Where(i => !fansOnly || i.Kind == FanControl.Kind).OrderBy(i => DailyProfile.Rank(i.Kind)).ToList();
         if (held.Count == 0) return Ok(new { success = true, released = Array.Empty<object>() });
-        string what = fansOnly ? "fans handed back to the curve" : "fans and current limits handed back";
+        string what = fansOnly ? "fans handed back to the curve" : "fans, current limits and clock locks handed back";
         var back = held.Select(h => Dispatch(PutBack(target, h))).ToList();
         DataPoint? closed = null;
         lock (_experiment)
@@ -985,7 +986,8 @@ public sealed class BrokerDispatcher
         }
         bool curveFollows = writing is { Suspended: false } && writing.Writes.Where(only ?? (_ => true)).Any(w => w.Kind == VfWrites.Kind);
         if (writing is { Suspended: false })
-            foreach (var w in writing.Writes.Where(only ?? (_ => true)))
+            // A lock a profile kept before locks were trial-only (0.2.5) stays off: CellsToPutBack released it above.
+            foreach (var w in writing.Writes.Where(only ?? (_ => true)).Where(w => !DailyProfile.TrialOnly(w.Kind, w.Key)))
             {
                 if (w.Kind == ClockOffsets.Kind && CurveAside(target, w.Key, w.Value, curveFollows) is { } aside)
                 {

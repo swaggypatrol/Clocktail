@@ -32,5 +32,5 @@ Stock up to 800 mV; +30 MHz per point to +210 by ~840 mV; +405 to +510 through 8
 - **MSVDD undervolt** (`adjust_msvdd`): saves a few watts the wall gives back to the core, but slows XBAR; see `manual xbar-msvdd`.
 
 ## What each tool changes, and what is kept
-Every write tool, what it writes, how far one call goes, whether `keep_as_daily` keeps it, how they combine, and what the newer controls did on the reference card: `manual controls`. `keep_as_daily` keeps everything a trial set, not just the last change (a clock lock too): `preview_daily` shows it, and `back_to_daily` first if only some of it should stay.
+Every write tool, what it writes, how far one call goes, whether `keep_as_daily` keeps it, how they combine, and what the newer controls did on the reference card: `manual controls`. `keep_as_daily` keeps everything a trial set, not just the last change (a clock cap too, never a floor, point lock or Boost Lock): `preview_daily` shows it, and `back_to_daily` first if only some of it should stay.
 The order the phases go in, and why, is `manual method`.

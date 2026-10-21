@@ -839,9 +839,9 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "Make what the trials set on the card the new daily profile, permanently: it goes on at every start and after " +
         "every driver reset from then on. Show preview_daily first: it lists exactly what would be kept. Kept from the card: the V/F curve, the core and memory P0 " +
         "offsets, NVVDD's and MSVDD's offsets, the XBAR/SYS/Video clock offsets and voltage demands and the core's voltage " +
-        "demand, the XBAR/core clock ratio, the voltage boost, a clock lock (release one set only for a test first), the fan " +
+        "demand, the XBAR/core clock ratio, the voltage boost, a clock cap (release one set only for a test first), the fan " +
         "curve and the fans' zero-RPM band. Not kept: the power limit (it stays the daily profile's; set_daily_power_limit " +
-        "changes it), the F8 power request, current limits and fixed fan duties; a trial's lowered wall, limit or fixed fans go back at once. " +
+        "changes it), the F8 power request, current limits, fixed fan duties, and a clock floor, point lock or Boost Lock; a trial's lowered wall, limit, fixed fans or lock go back at once. " +
         "Everything a trial set is kept, not just the last change: call back_to_daily first if only the curve should be. " +
         "The curve kept is the one on the card: if the trial ran under a lowered wall or limit, the curve is what matters, " +
         "not the wall it was found under. The trial in force (if any) " +

@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using Clocktail.Domain;
 using Clocktail.Domain.Clocks;
 using Clocktail.Domain.Ownership;
+using Clocktail.Domain.Profiles;
 using Clocktail.Hw;
 
 namespace Clocktail.Tests.Domain;
@@ -129,6 +130,53 @@ public class ClockLimitWritesTests : IDisposable
         Assert.True(back.Ok, back.Error);
         Assert.Empty(ClientLimitsLayout.Parse(FakeDriver.State[Word]));
         Assert.Empty(_journal.Inspect().Items);
+    }
+
+    private Clocktail.Domain.Broker.BrokerDispatcher Dispatcher()
+    {
+        var hw = new NvClient(FakeDriver.ApiFor([Slot.PerfClientLimitsGetStatus], [Slot.PerfClientLimitsSetStatus]));
+        return new Clocktail.Domain.Broker.BrokerDispatcher(hw, new Target(_journal, _sentinel), _host, canWrite: true);
+    }
+
+    /// <summary>keep_as_daily keeps a cap and releases a floor: a floor, a point lock and Boost Lock would hold the card high
+    /// at idle after every boot, so they are trial-only (mVolt+ 0.50.6 never keeps one either).</summary>
+    [Fact]
+    public void Keep_takes_the_cap_and_releases_the_floor()
+    {
+        Install();
+        var d = Dispatcher();
+        Assert.True(d.Dispatch(new Clocktail.Domain.Broker.BrokerRequest(Clocktail.Domain.Broker.BrokerRequest.OpExperiment, Kind: "begin", Value: """{"game":"drill"}""")).Ok);
+        var t = d.Dispatch(new Clocktail.Domain.Broker.BrokerRequest(Clocktail.Domain.Broker.BrokerRequest.OpExperiment, Kind: "try",
+            Value: System.Text.Json.JsonSerializer.Serialize(new { curve = "0*127", change = "-lgc 1200,2400", keep_curve = true, writes = new[] {
+                new { kind = "clocklimit", key = "max", value = "2400000" }, new { kind = "clocklimit", key = "min", value = "1200000" } } })));
+        Assert.True(t.Ok, t.Error);
+        Assert.Equal(2, ClientLimitsLayout.Parse(FakeDriver.State[Word]).Count);
+        var kept = d.Dispatch(new Clocktail.Domain.Broker.BrokerRequest(Clocktail.Domain.Broker.BrokerRequest.OpProfile, Kind: "keep"));
+        Assert.True(kept.Ok, kept.Error);
+        var profile = DailyProfile.Load(DailyProfile.PathBeside(_journal.Path))!;
+        Assert.Equal("clocklimit/max=2400000", Assert.Single(profile.Writes, w => w.Kind == ClockLimitWrites.Kind) is var w ? $"{w.Kind}/{w.Key}={w.Value}" : null);
+        var held = Assert.Single(ClientLimitsLayout.Parse(FakeDriver.State[Word]));
+        Assert.Equal((0, 2_400_000u), (held.Domain, held.Value));   // the cap stays on, the floor went back
+    }
+
+    /// <summary>A profile kept by 0.2.5 with Boost Lock in it: the lock no longer goes on with the profile, and one the
+    /// journal holds is released; its cap still goes on.</summary>
+    [Fact]
+    public void A_lock_an_older_profile_kept_stays_off()
+    {
+        Install();
+        new DailyProfile([new(ClockLimitWrites.Kind, ClockLimitWrites.MaxKey, "2400000"), new(ClockLimitWrites.Kind, ClockLimitWrites.VoltageKey, "1500000")],
+            _host.Now).Save(DailyProfile.PathBeside(_journal.Path));
+        var d = Dispatcher();
+        var r = d.Dispatch(new Clocktail.Domain.Broker.BrokerRequest(Clocktail.Domain.Broker.BrokerRequest.OpProfile, Kind: "apply"));
+        Assert.True(r.Ok, r.Error);
+        var held = Assert.Single(ClientLimitsLayout.Parse(FakeDriver.State[Word]));
+        Assert.Equal((0, 2_400_000u), (held.Domain, held.Value));
+        Assert.True(DailyProfile.TrialOnly(ClockLimitWrites.Kind, ClockLimitWrites.VoltageKey));
+        Assert.True(DailyProfile.TrialOnly(ClockLimitWrites.Kind, ClockLimitWrites.MinKey));
+        Assert.False(DailyProfile.TrialOnly(ClockLimitWrites.Kind, ClockLimitWrites.MaxKey));
+        Assert.True(DailyProfile.KeptFromCard(ClockLimitWrites.Kind, ClockLimitWrites.MaxKey));
+        Assert.False(DailyProfile.KeptFromCard(ClockLimitWrites.Kind, ClockLimitWrites.VoltageKey));
     }
 
     [Fact]

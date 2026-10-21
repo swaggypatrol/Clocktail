@@ -5,7 +5,7 @@ What each write tool changes on the card, how far one call goes, what it is for,
 - Every change except the daily wall is a **trial** inside a session: `begin_session` first (a trial without one is refused). Each trial ends as stable (`mark_stable`), survived (replaced by the next one, or `back_to_daily`) or crash, and becomes a data point.
 - The service does the write, reads it back and records the value it found (the ownership journal), so `back_to_daily`, `end_session`, a crash and `stock` can always put it back.
 - Every tool moves a bounded step per call and refuses what passes NVIDIA's own limits for the card (1150 mV, the board's 400-600 W, the firmware's ranges). A refusal says why: explain the limit, never work around it.
-- `keep_as_daily` keeps what the trials left on the card, not just the last step; `preview_daily` shows exactly what it would keep. Walls, current limits, the F8 request and fixed fan duties are never kept.
+- `keep_as_daily` keeps what the trials left on the card, not just the last step; `preview_daily` shows exactly what it would keep. Walls, current limits, the F8 request, fixed fan duties and clock locks other than a cap are never kept.
 - `card_settings` shows each control now, stock and daily; its `controls` section says, for this card and driver, which ones can be written and why not.
 
 ## The core clock: the V/F curve
@@ -25,7 +25,8 @@ The firmware climbs the curve until a limit stops it (`manual blackwell`). Every
 ## Holding the clock in place: clock locks
 - `set_clock_lock`: the driver's client clock-limit record, the one `nvidia-smi -lgc`, a V/F point lock and Boost Lock use. `maxMhz` caps the core, `minMhz` holds it at least there, `lockMv` pins it to the V/F point at that voltage, `boostLock` holds the curve's top even at idle. 0 (or false) releases one; a point lock and a range cannot be in force together.
 - What it is for: test one point exactly (`lockMv` + `stress_test` at light load, which otherwise lands where its power puts it), or keep a run in one band while the wall would move it (`minMhz`/`maxMhz`). The light-load boundary in `manual stability` was measured this way.
-- A lock changes what every later measurement means: `limiter`'s `perf_limits` names it (CLIENT_LOW_STRICT_GPC_MAX/MIN on the reference card). Release it (`lockMv 0`, or `maxMhz 0 minMhz 0`) before mapping the curve, and before `keep_as_daily` unless the person wants it every day: **`keep_as_daily` keeps a lock**.
+- A lock changes what every later measurement means: `limiter`'s `perf_limits` names it (CLIENT_LOW_STRICT_GPC_MAX/MIN on the reference card). Release it (`lockMv 0`, or `maxMhz 0 minMhz 0`) before mapping the curve.
+- **Only a cap is ever kept.** A floor, a point lock and Boost Lock are trial-only, like a current limit: `keep_as_daily`, `back_to_daily`, `end_session`, a crash and the agent going away all release them, because any of them would hold the card at a high clock or voltage at idle after every boot (mVolt+ never keeps one either). A cap (`maxMhz`) only ever lowers, so `keep_as_daily` keeps it: release one set only for a test (`maxMhz 0`) before keeping, or the test clock becomes the daily ceiling.
 - `card_report` flags a lock another tool left on the card (they outlive the tool that set them).
 
 ## Power
@@ -66,7 +67,7 @@ MSVDD feeds the crossbar (XBAR), L2, SYS and Video; it runs at what the core ask
 | `adjust_clock_domain` | SYS's or Video's clock offset and voltage demand; the core's voltage demand | 50 MHz, 10 mV | yes |
 | `set_clock_ratio` | XBAR's clock ratio to the core | 0.025 | yes |
 | `set_voltage_boost` | the voltage boost percentage | 25 % | yes |
-| `set_clock_lock` | a clock cap, a clock floor, a V/F point lock or Boost Lock | any | yes |
+| `set_clock_lock` | a clock cap, a clock floor, a V/F point lock or Boost Lock | any | the cap only; a floor, point lock or Boost Lock never |
 | `set_power_limit` | the wall, for the session (to reach other points) | 400-600 W | no: `set_daily_power_limit` sets the daily wall |
 | `set_power_cap` | the F8 power request, for the session (ask first: it cannot be deleted) | 400-600 W | never |
 | `set_current_limit` | a rail's current limit, for the session | up to the driver's max | never |
@@ -76,7 +77,7 @@ MSVDD feeds the crossbar (XBAR), L2, SYS and Video; it runs at what the core ask
 
 ## Combining them
 - **Map a band of the curve at full load**: `set_power_limit` (or `set_current_limit nvvdd` below 400 W) to put full load there, warm up, then `adjust_curve +15` with `fromMv`/`toMv` around the voltage it ran at, `stress_test load=100`, `mark_stable`, repeat. After each raise, loosen the wall a little until the clock reaches the point's new frequency, or the run only shows the same clock at a lower voltage (`manual tuning`).
-- **Test one clock exactly**: `set_clock_lock minMhz=<MHz> maxMhz=<MHz>` and `stress_test load=40`: the card runs that clock at the voltage the curve gives it, wherever the load's power would have put it. Raise the lock 15 MHz per pass (or the curve there, which tests the same clock at less voltage); `lockMv` pins a point by its voltage instead. Release with 0 when done.
+- **Test one clock exactly**: `set_clock_lock minMhz=<MHz> maxMhz=<MHz>` and `stress_test load=40`: the card runs that clock at the voltage the curve gives it, wherever the load's power would have put it. Raise the lock 15 MHz per pass (or the curve there, which tests the same clock at less voltage); `lockMv` pins a point by its voltage instead. Release both with 0 when done: the floor goes by itself at the end of the trial, the cap would be kept.
 - **Write the daily curve worked out from the boundary**: `set_curve` with the whole curve at idle (or `adjust_curve` down in bands), then `flatten_curve` where the chip stopped scaling; `stress_test` at load 100 and 50, then games, then `keep_as_daily` (ask).
 - **Undervolt (the same clocks for less power)**: `shift_curve 25` at a time, tested like a raise; under a wall it turns into clock. To keep the clocks and only lower the voltage, `adjust_clock_domain core` with a negative demand, tested the same way.
 - **The uncore, in order**: `adjust_msvdd` REL to 0, `adjust_xbar` demand +20 mV, offset +50 per call to +250..+300, then `set_clock_ratio` up 0.025 at a time if XBAR still sits at 0.9 x the core. Judge each by a benchmark, A B B A (`manual method`).

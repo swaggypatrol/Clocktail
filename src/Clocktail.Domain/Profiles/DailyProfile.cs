@@ -65,13 +65,22 @@ public sealed record DailyProfile(
     };
 
     /// <summary>What keep takes from the card even when a profile is kept already: everything an agent tunes in a trial,
-    /// the curves (V/F, fan) and the fans' zero-RPM band, the P0 core and memory offsets, both rails' offsets, the voltage boost, a clock limit, the
+    /// the curves (V/F, fan) and the fans' zero-RPM band, the P0 core and memory offsets, both rails' offsets, the voltage boost, a clock cap, the
     /// XBAR/core clock ratio and the XBAR/SYS/Video clock offsets and voltage demands (the user, 2026-10-20: the agent does everything we did by hand). The wall stays as kept, so a
     /// wall lowered in a trial to sample the curve never becomes the daily one; the daily wall is set on its own
     /// ("wall").</summary>
     public static bool KeptFromCard(string kind, string key) =>
         kind is VfWrites.Kind or FanPolicyWrites.Kind or FanStopWrites.Kind or ClockDomainOffsets.Kind or ClockVdemand.Kind or ClockOffsets.Kind or RailWrites.Kind
-            or VoltBoost.Kind or ClockLimitWrites.Kind or ClockRatio.Kind;
+            or VoltBoost.Kind or ClockRatio.Kind
+        || kind == ClockLimitWrites.Kind && key == ClockLimitWrites.MaxKey;
+
+    /// <summary>What only a trial sets and no daily profile holds: a rail's current limit, a fixed fan duty, the F8 request
+    /// (it can only go back to non-limiting, never away), and a clock floor, V/F point lock or Boost Lock. Each of those
+    /// would hold the card at a high clock or voltage at idle after every boot; mVolt+ 0.50.6 never puts one in a profile
+    /// either (they are leases there). A clock cap is kept: it only ever lowers.</summary>
+    public static bool TrialOnly(string kind, string key) => kind is CurrentLimitWrites.Kind or FanControl.Kind
+        || kind == PowerCap.Kind && key == PowerCap.Key(PowerRequestKind.Additional)
+        || kind == ClockLimitWrites.Kind && key != ClockLimitWrites.MaxKey;
 
     /// <summary>The profile bound to the card it is kept or loaded on now; an unknown VBIOS or driver leaves the old one.</summary>
     public DailyProfile On(string? vbios, string? driver) =>

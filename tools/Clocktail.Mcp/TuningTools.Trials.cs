@@ -301,10 +301,11 @@ public sealed partial class TuningTools
         "range nvidia-smi -lgc sets), lockMv pins the core to the V/F point at that voltage, boostLock holds it at the " +
         "curve's top even at idle. 0 (or boostLock false) releases that one; one left out stays as it is. A point lock and a " +
         "clock range cannot be in force together. Uses: hold one point of the curve for a stress run (lockMv), or keep a test " +
-        "in one band while the wall would move it (minMhz/maxMhz). The lock outlives the trial only as the daily profile " +
-        "keeps it; card_settings clock_locks shows what is in force. On the reference card -lgc 1200,2400 held the clock at " +
-        "most 2392 MHz under load. back_to_daily, end_session and a crash put the daily profile's back (none: released); " +
-        "keep_as_daily keeps it.")]
+        "in one band while the wall would move it (minMhz/maxMhz). card_settings clock_locks shows what is in force. On the " +
+        "reference card -lgc 1200,2400 held the clock at most 2392 MHz under load. Only a cap can become daily: keep_as_daily " +
+        "keeps maxMhz (release a test cap first, or it becomes the daily ceiling). A floor, a point lock and Boost Lock are " +
+        "trial-only, as a current limit is: they would hold the card at a high clock or voltage at idle after every boot, so " +
+        "keep_as_daily, back_to_daily, end_session, a crash and the agent disconnecting release them.")]
     public string SetClockLock(
         [Description("Maximum core clock, MHz; 0 releases.")] double? maxMhz = null,
         [Description("Minimum core clock, MHz; 0 releases.")] double? minMhz = null,
