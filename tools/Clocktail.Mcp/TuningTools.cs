@@ -490,8 +490,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             : Nvgwls.Verdict(code, resets);
         bool failed = tooHot ? resets > 0 : Nvgwls.Failed(code, resets);
 
-        // The first 2 s are the ramp; the rest is what the settings were tested at.
-        var held = samples.Count > 4 ? samples.Skip(4).ToList() : samples;
+        // The first 2 s are the ramp; the rest is what the settings were tested at. A run that hung ends in frozen readings
+        // (the curve's top at ~125 W for the whole TdrDelay): they are not what it was tested at.
+        IReadOnlyList<Card.Sample> held = samples.Count > 4 ? samples.Skip(4).ToList() : samples;
+        if (failed) held = WithoutFrozenTail(held);
         static double? P(IEnumerable<double?> xs, double q)
         {
             var v = xs.Where(x => x != null).Select(x => x!.Value).Order().ToList();
@@ -928,6 +930,16 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         if (crashUv is { } uv && Nearest(curve, uv) is { } p)
             return [(p.Index, stays.FirstOrDefault(s => s.Index == p.Index)?.ClockMhz)];
         return [.. stays.Where(s => s.Share >= 0.1).Select(s => (s.Index, (uint?)s.ClockMhz))];
+    }
+
+    /// <summary>The samples before a frozen tail, by the flight recorder's rule (same clock, voltage within 5 mV, power fallen
+    /// into it); all of them when there is none, or when the tail is the whole run (a pinned load, not a hang).</summary>
+    public static IReadOnlyList<Card.Sample> WithoutFrozenTail(IReadOnlyList<Card.Sample> samples)
+    {
+        if (samples.Count == 0) return samples;
+        var frozen = FlightRecorder.FrozenFrom([.. samples.Select(s => new FlightSample(s.At, 0, s.Telemetry?.GraphicsClockMhz,
+            s.NvvddUv / 1000, s.Telemetry?.PowerWatts, s.Telemetry?.TemperatureC, s.Telemetry?.GpuUtilPercent, null))]);
+        return frozen == null || frozen.At == samples[0].At ? samples : [.. samples.Where(s => s.At < frozen.At)];
     }
 
     /// <summary>A curve point a run of samples sat on, with the clock it ran there (P90 of those samples).</summary>
