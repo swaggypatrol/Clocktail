@@ -220,6 +220,74 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         });
     });
 
+    /// <summary>flatten_curve refuses to write above this GPU utilization: a curve written under load began 2 of 3 hangs.</summary>
+    public const uint FlattenMaxUtilPct = 15;
+
+    /// <summary>
+    /// The offsets a flat top at <paramref name="targetKhz"/> needs: every point from <paramref name="fromUv"/> up, and any
+    /// point under it already above the target (so the curve never falls), lowered to run at most the target, onto the
+    /// 7.5 MHz grid, rounding down. Never raised; points under <paramref name="minUv"/> untouched. A point's clock without
+    /// its offset is its effective clock less its offset, temperature compensation included.
+    /// </summary>
+    public static int[] FlattenPlan(IReadOnlyList<VfPoint> points, int[] offsets, uint fromUv, long targetKhz, uint minUv)
+    {
+        var next = (int[])offsets.Clone();
+        foreach (var p in points)
+        {
+            if (p.VoltageUv < minUv || p.Index >= next.Length) continue;
+            long bare = (long)p.EffectiveKhz - p.OffsetKhz;
+            if (p.VoltageUv < fromUv && bare + next[p.Index] <= targetKhz) continue;
+            long want = (long)(Math.Floor((targetKhz - bare) / 7500.0) * 7500);
+            if (want < next[p.Index]) next[p.Index] = (int)want;
+        }
+        return next;
+    }
+
+    [McpServerTool(Name = "flatten_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Make the curve flat from a voltage up, as a new trial: every point from fromMv up runs at most the clock the point at " +
+        "fromMv runs now (less marginMhz), or at most ceilingMhz. Only ever lowers, so it cannot push the card past what " +
+        "it held; it is method step 4's 'flat where the chip stops scaling' in one call instead of many 15 MHz steps. Points " +
+        "under 850 mV are never touched. Refused while the GPU is busy (over 15 % utilization): write it at idle. back_to_daily " +
+        "undoes it; keep_as_daily keeps it.")]
+    public string FlattenCurve(
+        [Description("Voltage the flat top starts at, mV.")] double fromMv,
+        [Description("MHz under that point's clock to flatten to (default 0).")] double marginMhz = 0,
+        [Description("Or flatten to this clock, MHz, instead of the point's.")] double? ceilingMhz = null,
+        [Description("Why (where the chip stopped scaling).")] string? reason = null) => Guard(() =>
+    {
+        if (fromMv < MinMv) throw new ArgumentException($"fromMv is at least {MinMv} mV (CLOCKTAIL_MCP_MIN_MV)");
+        if (marginMhz < 0) throw new ArgumentException("marginMhz lowers the top: give it as a positive number");
+        var look = card.Read();
+        if (look.Telemetry?.GpuUtilPercent is { } u && u > FlattenMaxUtilPct)
+            throw new InvalidOperationException($"the GPU is {u} % busy: a curve written under load began 2 of 3 hangs on the reference card. Flatten at idle");
+        var pts = look.Curve.Points;
+        uint fromUv = (uint)Math.Round(fromMv * 1000);
+        var at = pts.Where(p => p.VoltageUv >= fromUv).MinBy(p => p.VoltageUv) ?? throw new ArgumentException($"no curve point at or above {fromMv} mV");
+        long target = ceilingMhz is { } c ? (long)Math.Round(c * 1000) : at.EffectiveKhz - (long)Math.Round(marginMhz * 1000);
+        var before = look.Curve.Offsets();
+        var next = FlattenPlan(pts, before, fromUv, target, (uint)MinMv * 1000);
+        var moved = pts.Where(p => p.Index < next.Length && next[p.Index] != before[p.Index]).ToList();
+        if (moved.Count == 0) throw new ArgumentException(string.Create(CultureInfo.InvariantCulture, $"the curve is already at or under {target / 1000.0} MHz from {fromMv} mV: nothing to lower"));
+        string change = string.Create(CultureInfo.InvariantCulture,
+            $"flat top at {target / 1000.0} MHz from {at.VoltageUv / 1000.0} mV: points {moved[0].Index}-{moved[^1].Index} lowered");
+        var context = new List<string> { Readings(look) };
+        if (reason != null) context.Add($"Purpose: {reason}");
+        foreach (var p in moved)
+            context.Add(string.Create(CultureInfo.InvariantCulture,
+                $"point {p.Index} ({p.VoltageUv / 1000.0} mV): offset {p.OffsetKhz / 1000.0} → {next[p.Index] / 1000.0} MHz, effective {p.EffectiveKhz / 1000.0} → about {(p.EffectiveKhz + next[p.Index] - p.OffsetKhz) / 1000.0} MHz"));
+        var r = card.Broker(BrokerRequest.OpExperiment, "try",
+            JsonSerializer.Serialize(new { curve = VfOffsets.Encode(next), change, at_uv = look.NvvddUv, at_mhz = look.Telemetry?.GraphicsClockMhz, context }));
+        if (!r.Ok) return Reply(r);
+        var after = ReadAfter(out var unread);
+        var daily = DailyOffsets(out _);
+        return Out(new
+        {
+            success = true, change, written = r.Written,
+            landed = after?.Curve.Points.Where(p => p.Index >= moved[0].Index && p.Index <= moved[^1].Index).Select(p => Row(p, daily)),
+            warning = unread,
+        });
+    });
+
     [McpServerTool(Name = "set_power_limit", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set the board power limit for the session, as a new trial with the curve left as it is. A lower wall makes the card " +
         "run lower down the curve, so adjust_curve can then sample points it never reaches at the full wall (and find where " +

@@ -59,7 +59,7 @@ Note: `adjust_curve` goes at most 200 MHz above the daily profile. From stock, m
 ## Phase 4: shape the daily curve
 - At each voltage: the boundary minus 30-60 MHz, the game margin.
 - Smooth and rising. On the reference: stock to 800 mV; +30 MHz per point to the knee; +405..+510 at 850-885 mV; then a straight line of ~+2 MHz per mV (2775 MHz at 885 mV to 3071 at 1035 mV); flat above.
-- A flat top where the chip stops scaling: voltage there buys no clock, only power and heat. Under the wall it even costs clock, because the watts spent on voltage are taken from frequency.
+- A flat top where the chip stops scaling: voltage there buys no clock, only power and heat. Under the wall it even costs clock, because the watts spent on voltage are taken from frequency. `flatten_curve fromMv` does it in one trial at idle (it only lowers): every point from that voltage up runs at most what the point there runs now, less `marginMhz`.
 - Leave points under ~800 mV stock: the card only runs there idle.
 Why the margin: games are stricter than the stressor. On the reference, "boundary -15" crashed a game and "boundary -30" held. Kingdom Come: Deliverance II crashed at least 37 MHz under an nvgwls pass at the same voltage, temperature and power.
 

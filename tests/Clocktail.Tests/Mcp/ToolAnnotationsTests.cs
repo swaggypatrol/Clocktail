@@ -25,10 +25,11 @@ public class ToolAnnotationsTests
     [Fact]
     public void Reading_tools_are_read_only_and_only_card_report_reaches_the_internet()
     {
-        Assert.Equal(36, Tools.Count);
+        Assert.Equal(37, Tools.Count);
         var read = Tools.Where(t => t.ReadOnly).Select(t => t.Name!).ToHashSet();
         Assert.Subset(read, new HashSet<string> { "card_report", "card_settings", "gpu_status", "limiter", "manual", "read_log", "data_points" });
         Assert.DoesNotContain("adjust_curve", read);
+        Assert.DoesNotContain("flatten_curve", read);
         Assert.DoesNotContain("log_note", read);   // it writes the tuning log
         Assert.Equal(["card_report"], Tools.Where(t => t.OpenWorld).Select(t => t.Name!));
     }
