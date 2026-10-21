@@ -99,7 +99,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                 Started = now, IntervalMs = intervalMs, EverySeconds = everySeconds, Note = note,
                 LogPath = stem + ".log", CsvPath = stem + ".csv", Log = Writer(stem + ".log"), Csv = Writer(stem + ".csv"),
             };
-            run.Csv.WriteLine("time,clock_mhz,nvvdd_mv,msvdd_mv,xbar_mhz,board_w,limit_w,temp_c,util_pct,fan_pct,curve_point,held_by,limit_reasons,instant_w,vram_used_gib,temp_margin_c,gpc_mean_mv,gpc_min_mv");
+            run.Csv.WriteLine("time,clock_mhz,nvvdd_mv,msvdd_mv,xbar_mhz,board_w,limit_w,temp_c,util_pct,fan_pct,curve_point,held_by,limit_reasons,instant_w,vram_used_gib,temp_margin_c,gpc_mean_mv,gpc_min_mv,memory_c");
             Emit(run, string.Create(CultureInfo.InvariantCulture, $"🟢 live watch started: a line every {everySeconds} s under load, sampled every {intervalMs} ms")
                 + (note != null ? $". Playing: {note}" : ""));
             run.Frames = FrameFeed.Start(card, Math.Min(MaxHours * 3600, MaxFrameSeconds), process, out var noFrames);
@@ -238,7 +238,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                         hangMhz = null;
                         hangReported = false;
                     }
-                    WriteCsv(run, p, t, s.Gpc);
+                    WriteCsv(run, p, t, s.Gpc, s.MemoryC);
                     lock (run)
                     {
                         run.Samples++;
@@ -425,12 +425,12 @@ public sealed class LiveWatch(Card card) : IDisposable
     private static string Row(Point p) => string.Create(CultureInfo.InvariantCulture,
         $"{p.At:HH:mm:ss.ff} {p.ClockMhz} MHz {p.NvvddMv:0} mV {p.BoardW:0} W {p.TempC:0} °C {p.UtilPct} % {p.HeldBy}");
 
-    private static void WriteCsv(Run run, Point p, TelemetrySnapshot t, Clocktail.Domain.Rails.GpcVoltages.Reading? gpc)
+    private static void WriteCsv(Run run, Point p, TelemetrySnapshot t, Clocktail.Domain.Rails.GpcVoltages.Reading? gpc, double? memoryC)
     {
         try
         {
             run.Csv.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"{p.At:O},{p.ClockMhz},{p.NvvddMv:0.#},{p.MsvddMv:0.#},{p.XbarMhz:0},{p.BoardW:0.#},{p.LimitW:0},{p.TempC:0},{p.UtilPct},{p.FanPct:0},{p.CurvePoint},{p.HeldBy},{string.Join("|", t.ThrottleReasons)},{t.PowerInstantWatts:0.#},{TuningTools.Gib(t.VramUsedBytes)},{t.TempMarginC},{gpc?.MeanMv:0.#},{gpc?.MinMv}"));
+                $"{p.At:O},{p.ClockMhz},{p.NvvddMv:0.#},{p.MsvddMv:0.#},{p.XbarMhz:0},{p.BoardW:0.#},{p.LimitW:0},{p.TempC:0},{p.UtilPct},{p.FanPct:0},{p.CurvePoint},{p.HeldBy},{string.Join("|", t.ThrottleReasons)},{t.PowerInstantWatts:0.#},{TuningTools.Gib(t.VramUsedBytes)},{t.TempMarginC},{gpc?.MeanMv:0.#},{gpc?.MinMv},{memoryC:0.#}"));
         }
         catch (IOException) { }
     }

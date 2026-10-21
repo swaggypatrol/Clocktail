@@ -37,7 +37,7 @@
 35,0x67f31384,PowerPolicyGetInfo,power policy,R,raw policy table layout 1: 0xa70 r4 (617.42 measured; r1 also accepts 0x628/0x828/0xa3c; undecoded); records 0x3c+i*0x58,High
 36,0x8b3e7343,PowerPolicyGetControl,power policy,R,raw policy table layout 1 CONTROL: 0xa4c r1 (617.42 measured); +4 mask queries by record; records 0x1c+i*0x28,High
 37,0xaffc2279,PowerPolicySetControl,power policy,W,raw policy table write 0xa4c r1: kind 0x13 (current limit/OCP); kind 0x1b (board power record) not written,High
-38,0x65fe3aad,ThermChannelGetStatus,thermal channels,R,thermal read,Medium
+38,0x65fe3aad,ThermChannelGetStatus,thermal channels,R,"0x34c8 r3; `@8=0xffff`; +0xd4 core, +0x160 memory chip (1/256 degC)",High
 39,0x2eb3c140,RegisterOp,GPU register access,?,if real it is raw register read/write; highest risk; never called,Low / [unknown]
 40,0xc0599498,GetMemoryInfoEx(jNizM),memory info,R,read path unknown,Low
 41,0x7c955ac0,ClockPmumonClkDomainsGetSamples,clock samples,R,read path unknown,Low

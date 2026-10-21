@@ -236,13 +236,13 @@ public sealed partial class TuningTools
         });
     });
 
-    private sealed record WatchStat(double? clock_mhz, double? nvvdd_mv, double? msvdd_mv, double? xbar_mhz, double? board_w, double? temp_c, double? vram_used_gib);
+    private sealed record WatchStat(double? clock_mhz, double? nvvdd_mv, double? msvdd_mv, double? xbar_mhz, double? board_w, double? temp_c, double? vram_used_gib, double? memory_c);
 
     private static WatchStat WatchStats(IReadOnlyList<Card.Sample> s, double q) => new(
         Pct(s.Select(x => (double?)x.Telemetry?.GraphicsClockMhz), q), Pct(s.Select(x => x.NvvddUv / 1000.0), q),
         Pct(s.Select(x => x.MsvddUv / 1000.0), q), Pct(s.Select(x => x.Mhz(AllClocksLayout.Xbar)), q),
         Pct(s.Select(x => x.Telemetry?.PowerWatts), q), Pct(s.Select(x => x.Telemetry?.TemperatureC), q),
-        Pct(s.Select(x => Gib(x.Telemetry?.VramUsedBytes)), q));
+        Pct(s.Select(x => Gib(x.Telemetry?.VramUsedBytes)), q), Pct(s.Select(x => x.MemoryC), q));
 
     private static double? Pct(IEnumerable<double?> xs, double q)
     {

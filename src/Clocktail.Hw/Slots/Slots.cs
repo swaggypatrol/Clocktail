@@ -89,7 +89,7 @@ public static class Slots
         R(Slot.PowerPolicyGetControl, 0x8b3e7343, "power-policy", V(0xa4c, 1), Evidence.High, "layout 1; a query: the mask at +4 picks the records");
         W(Slot.PowerPolicySetControl, 0xaffc2279, "power-policy", V(0xa4c, 1), Evidence.High, "kind 0x13 (current limit); kind 0x1b (board power record) not written");
 
-        R(Slot.ThermChannelGetStatus, 0x65fe3aad, "thermal", null, Evidence.Medium);
+        R(Slot.ThermChannelGetStatus, 0x65fe3aad, "thermal", V(0x34c8, 3), Evidence.High, "+8 = 0xffff; +0xd4 core, +0x160 memory, 1/256 degC (probed 2026-10-21)");
         t[(int)Slot.RegisterOp] = new SlotInfo(Slot.RegisterOp, 0x2eb3c140, "registers", SlotAccess.Forbidden, null, Signature.GpuStruct, Evidence.Low,
             "raw register access. Never implemented here.");
         R(Slot.GetMemoryInfoEx, 0xc0599498, "memory", null, Evidence.Low);

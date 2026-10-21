@@ -94,6 +94,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             temp_margin_c = t?.TempMarginC,
             pstate = t?.PState is { } ps ? $"P{ps}" : null,
             util_pct = t?.GpuUtilPercent,
+            memory_c = card.MemoryC(),
             vram_used_gib = Gib(t?.VramUsedBytes),
             vram_total_gib = Gib(t?.VramTotalBytes),
             memory_controller_pct = t?.MemUtilPercent,
@@ -505,6 +506,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             sys_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Sys)), q),
             memory_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Memory)), q),
             temp_c = P(held.Select(s => (double?)s.Telemetry?.TemperatureC), q),
+            memory_c = P(held.Select(s => s.MemoryC), q),
             vram_used_gib = P(held.Select(s => Gib(s.Telemetry?.VramUsedBytes)), q),
             gpc_mean_mv = P(held.Select(s => s.Gpc?.MeanMv), q),
             gpc_min_mv = P(held.Select(s => s.Gpc?.MinMv), q),
@@ -998,7 +1000,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
                 : Path.Combine(Path.GetTempPath(), "clocktail-stress");
             Directory.CreateDirectory(dir);
             string path = Path.Combine(dir, $"{DateTime.Now:yyyyMMdd-HHmmss}-l{load}-{seconds}s.csv");
-            var sb = new System.Text.StringBuilder("at,clock_mhz,xbar_mhz,sys_mhz,memory_mhz,video_mhz,nvvdd_mv,msvdd_mv,board_w,limit_w,nvvdd_w,nvvdd_a,msvdd_w,msvdd_a,temp_c,util_pct,reasons,instant_w,vram_used_gib,temp_margin_c,gpc_mean_mv,gpc_min_mv\n");
+            var sb = new System.Text.StringBuilder("at,clock_mhz,xbar_mhz,sys_mhz,memory_mhz,video_mhz,nvvdd_mv,msvdd_mv,board_w,limit_w,nvvdd_w,nvvdd_a,msvdd_w,msvdd_a,temp_c,util_pct,reasons,instant_w,vram_used_gib,temp_margin_c,gpc_mean_mv,gpc_min_mv,memory_c\n");
             foreach (var s in samples)
             {
                 var t = s.Telemetry;
@@ -1008,7 +1010,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
                     s.Mhz(AllClocksLayout.Memory), s.Mhz(AllClocksLayout.Video), s.NvvddUv / 1000.0, s.MsvddUv / 1000.0, t?.PowerWatts, t?.PowerEnforcedWatts,
                     s.NvvddOut?.Mw / 1000.0, s.NvvddOut?.Ma / 1000.0, s.MsvddOut?.Mw / 1000.0, s.MsvddOut?.Ma / 1000.0, t?.TemperatureC, t?.GpuUtilPercent,
                     string.Join("|", t?.ThrottleReasons ?? []), t?.PowerInstantWatts, Gib(t?.VramUsedBytes), t?.TempMarginC,
-                    s.Gpc is { } g ? Math.Round(g.MeanMv, 1) : null, s.Gpc?.MinMv,
+                    s.Gpc is { } g ? Math.Round(g.MeanMv, 1) : null, s.Gpc?.MinMv, s.MemoryC,
                 }.Select(v => v switch { null => "", IFormattable f => f.ToString(null, CultureInfo.InvariantCulture), _ => v.ToString() })));
                 sb.Append('\n');
             }
