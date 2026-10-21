@@ -508,9 +508,27 @@ public sealed class BrokerDispatcher
                             EnableSlots: [nameof(Slot.ClockClientClkVfPointsSetControl)])));
                     if (written.FirstOrDefault(x => !x.Ok) is { } failed)
                     {
+                        // The items before the one that failed landed: they go back to what they were, last first (the
+                        // order they went on in respects every write's constraint, so the reverse does too: a curve set
+                        // aside for a memory write comes back after the memory offset), and the trial before stays in force.
+                        var undone = PutBackLanded(target, written);
+                        bool clean = undone.All(x => x.Ok);
                         Log(target, $"Trial did not land · {exp.Game}", [$"Change: {change}", .. context, .. written.SelectMany(Writes),
-                            written.Count > 1 ? "The earlier items were written, the later ones were not: the card holds those plus the previous settings" : "The previous trial (if any) is still on the card"]);
-                        return failed;   // nothing landed (or it was put back): the trial before stays in force
+                            undone.Count == 0 ? "The previous trial (if any) is still on the card"
+                            : clean ? "The items written before it were put back: the previous trial (if any) is still on the card"
+                            : "The items written before it did not all go back: the card holds part of this trial",
+                            .. undone.SelectMany(Writes)]);
+                        if (undone.Count == 0) return failed;   // nothing landed (or it was put back): the trial before stays in force
+                        // Put back cleanly, the card is as it was: only the failed write's own transaction is in the answer, so
+                        // the agent is told nothing changed. Otherwise every write is, so it is told to read the card.
+                        return new BrokerResponse(false,
+                            (failed.Error ?? "a write of the trial failed") + (clean
+                                ? "; the items written before it were put back, so the card is as it was"
+                                : "; the items written before it did not all go back: read the card"),
+                            clean
+                                ? Element(new { success = false, applied = AppliedOf(failed), put_back = undone.SelectMany(Writes) })
+                                : Element(new { success = false, applied = (JsonElement[])[.. written.SelectMany(AppliedOf), .. undone.SelectMany(AppliedOf)] }),
+                            failed.Code);
                     }
                     var replaced = exp.Trial is { Marked: false } ? exp.Point(Experiment.Survived, _host.Now, "replaced by the next trial") : null;
                     if (replaced != null) Experiment.Append(data, replaced);
@@ -647,11 +665,31 @@ public sealed class BrokerDispatcher
             .. Writes(failed),
             back.Ok ? "The daily profile stays as it was and went back on" : $"The daily profile stays as it was, but it did not all go back on: {back.Error}",
             .. Writes(back)]);
-        JsonElement[] Applied(BrokerResponse x) =>
-            x.Result is { } res && res.TryGetProperty("applied", out var a) && a.ValueKind == JsonValueKind.Array ? [.. a.EnumerateArray()] : [];
         string error = $"{failed.Error}; {what} was not loaded: the daily profile stays as it was" +
             (back.Ok ? " and is back on the card" : $", but it did not all go back on ({back.Error}): read the card");
-        return new BrokerResponse(false, error, Element(new { success = false, path, profile, applied = (JsonElement[])[.. Applied(failed), .. Applied(back)] }), failed.Code);
+        return new BrokerResponse(false, error, Element(new { success = false, path, profile, applied = (JsonElement[])[.. AppliedOf(failed), .. AppliedOf(back)] }), failed.Code);
+    }
+
+    /// <summary>The write transactions an answer carries (its "applied" list), none for a refusal.</summary>
+    private static JsonElement[] AppliedOf(BrokerResponse r) =>
+        r.Result is { } res && res.TryGetProperty("applied", out var a) && a.ValueKind == JsonValueKind.Array ? [.. a.EnumerateArray()] : [];
+
+    /// <summary>Each write that landed, put back to the value it replaced, last first: a write that changed nothing is
+    /// skipped. Every put-back is an ordinary write, so the journal releases a cell that is back at its original.</summary>
+    private List<BrokerResponse> PutBackLanded(IGpuTarget target, IReadOnlyList<BrokerResponse> written)
+    {
+        var undone = new List<BrokerResponse>();
+        foreach (var w in written.Where(x => x.Ok).Reverse())
+            foreach (var item in AppliedOf(w).Reverse())
+            {
+                string? Get(string name) => item.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+                if (Get("outcome") != nameof(TxOutcome.Applied) || Get("kind") is not { } kind || Get("key") is not { } key || Get("before") is not { } before || before == Get("after"))
+                    continue;
+                undone.Add(Dispatch(kind == CurrentLimitWrites.Kind ? LimitWrite(target, key, before)
+                    : new BrokerRequest(BrokerRequest.OpWrite, target.StableId, Kind: kind, Key: key, Value: before,
+                        EnableSlots: kind == VfWrites.Kind ? [nameof(Slot.ClockClientClkVfPointsSetControl)] : null)));
+            }
+        return undone;
     }
 
     private static IEnumerable<OwnedItem> CellsToPutBack(IGpuTarget target, DailyProfile? profile, bool whole)

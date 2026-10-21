@@ -717,6 +717,32 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("ocp/nvvdd: 300000 → 600000", log);
     }
 
+    /// <summary>A trial of several items whose later item is refused does not leave the earlier ones on the card: they go
+    /// back, the trial before stays in force, and the answer says nothing changed. Before, the agent was told "written:
+    /// none" while the lowered wall stayed on.</summary>
+    [Fact]
+    public void A_trial_that_fails_part_way_puts_back_what_it_wrote_first()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 560_000)).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep")).Ok);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"Cyberpunk"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 560 → 500 W", power_mw = 500_000u, keep_curve = true }))).Ok);
+
+        // The wall lands first, then the current limit is refused (above its default).
+        var t = d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W and 650 A", power_mw = 450_000u, nvvdd_ma = 650_000u, keep_curve = true })));
+        Assert.False(t.Ok);
+        Assert.Contains("put back, so the card is as it was", t.Error);
+        Assert.Equal(500_000u, _requests[0xfe]);                    // the previous trial's wall, not 450 W
+        Assert.Equal(600_000u, CurrentLimitsFixture.Limit(13));
+        Assert.Equal(Clocktail.Mcp.WriteOutcome.None, Clocktail.Mcp.WriteOutcome.Of(t.Ok, t.Code, t.Result));
+        var exp = Experiment.Load(Experiment.PathBeside(_journal.Path))!;
+        Assert.Equal("wall 560 → 500 W", exp.Trial!.Change);            // the trial before stays in force
+        Assert.DoesNotContain(_journal.Inspect().Items, i => i.Kind == CurrentLimitWrites.Kind);
+        Assert.Contains("The items written before it were put back", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
     /// <summary>A trial may undervolt MSVDD through its REL offset. The data point carries the offset, and with no
     /// offsets in the daily profile putting it back puts the stock offset back first.</summary>
     [Fact]
