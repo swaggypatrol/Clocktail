@@ -167,7 +167,11 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     protected string? DailyBack(string why)
     {
         var r = Broker("apply", why, BrokerRequest.OpProfile);
-        return r is { Ok: true } ? null : $"the daily profile did not go back on ({r?.Error ?? "no answer from the service"}): back_to_daily";
+        if (r is { Ok: true }) return null;
+        // Back on without a group the driver will not take (621.01: MSVDD): the rest is on, and trying again changes nothing.
+        if (r?.Result is { } res && res.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True)
+            return $"the daily profile is back on, except: {r.Error}";
+        return $"the daily profile did not go back on ({r?.Error ?? "no answer from the service"}): back_to_daily";
     }
 
     protected void SaveStatus(object status)
