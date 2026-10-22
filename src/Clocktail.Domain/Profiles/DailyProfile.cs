@@ -64,6 +64,25 @@ public sealed record DailyProfile(
         ClockVdemand.Kind => 5, ClockDomainOffsets.Kind => 6, VfWrites.Kind => 7, _ => 4,
     };
 
+    /// <summary>The cells of a profile that were tuned together (the method's steps): the wall; the fans; the core (its curve,
+    /// NVVDD's offsets, the P0 core offset, the voltage boost, the core's voltage demand and clock offset, a clock cap); the
+    /// uncore (MSVDD's offsets, the XBAR/core ratio, the XBAR, SYS and Video offsets and voltage demands); the memory offset.
+    /// A cell that does not go on takes the rest of its group with it, the other groups go on: XBAR +400 / +50 mV and the
+    /// ratio 0.95 were found with MSVDD REL +50, and without it the ratio slows the core (driver 621.01 drops every rail
+    /// write). A kind this does not name is a group of its own.</summary>
+    public static string Group(string kind, string key) => kind switch
+    {
+        PowerCap.Kind => "power",
+        FanPolicyWrites.Kind or FanStopWrites.Kind => "fans",
+        RailWrites.Kind => key == RailWrites.Key(Rail.Msvdd) ? "uncore" : "core",
+        ClockOffsets.Kind => key == ClockOffsets.Key(ClockDomain.Memory) ? "memory" : "core",
+        ClockVdemand.Kind => key == ClockVdemand.Key(ClockDomainId.Graphics) ? "core" : "uncore",
+        ClockDomainOffsets.Kind => key == ClockDomainOffsets.Key(ClockDomainId.Graphics) ? "core" : "uncore",
+        ClockRatio.Kind => "uncore",
+        VfWrites.Kind or VoltBoost.Kind or ClockLimitWrites.Kind => "core",
+        _ => $"{kind}/{key}",
+    };
+
     /// <summary>What keep takes from the card even when a profile is kept already: everything an agent tunes in a trial,
     /// the curves (V/F, fan) and the fans' zero-RPM band, the P0 core and memory offsets, both rails' offsets, the voltage boost, a clock cap, the
     /// XBAR/core clock ratio and the XBAR/SYS/Video clock offsets and voltage demands (the user, 2026-10-20: the agent does everything we did by hand). The wall stays as kept, so a

@@ -1301,7 +1301,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         string? error = !r.Ok && notBack.Count > 0 && (r.Error is null or "failed") ? $"not everything went back: {string.Join("; ", notBack)}" : r.Error;
         // Nothing written on purpose (a daily profile kept on another VBIOS, a trial in force) says why.
         string? skipped = r.Result is { } sr ? Str(sr, "skipped") : null;
-        return Out(new { success = r.Ok, error, code = r.Ok ? null : r.Code, written, next = written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst : null, skipped, data_point = point, writes = lines });
+        // A daily profile that went on without a group of it (a cell the driver refused or dropped took the cells tuned with
+        // it along): which group stays at stock and why, for the person.
+        var notApplied = r.Result is { } nr && nr.TryGetProperty("not_applied", out var na) && na.ValueKind == JsonValueKind.Array ? na : (JsonElement?)null;
+        string? next = written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst
+            : notApplied != null ? "tell the person which part of the daily profile stays at stock and why (not_applied); the rest of it is on the card" : null;
+        return Out(new { success = r.Ok, error, code = r.Ok ? null : r.Code, written, next, skipped, not_applied = notApplied, data_point = point, writes = lines });
     }
 
     private static string? Str(JsonElement e, string name) =>

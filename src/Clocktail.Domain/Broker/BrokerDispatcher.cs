@@ -1009,9 +1009,57 @@ public sealed class BrokerDispatcher
     private static uint? UInt(JsonElement a, string name) =>
         a.ValueKind == JsonValueKind.Object && a.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetUInt32(out var n) ? n : null;
 
-    /// <summary>Each write of a profile that is not suspended (those <paramref name="only"/> picks, all by default), in its
-    /// order, through the ordinary write op; stops at the first that fails.</summary>
+    /// <summary>
+    /// Each write of a profile that is not suspended (those <paramref name="only"/> picks, all by default), in its order,
+    /// through the ordinary write op. A write that does not go on (refused, vetoed, or dropped by the driver, as 621.01
+    /// drops every rail write) takes the rest of its group with it (<see cref="DailyProfile.Group"/>): the profile goes on
+    /// again without that group, which puts any cell of it this broker holds back to its original, and the other groups go
+    /// on as kept. The card is then never left with half of a run, the curve set aside for a memory write and never
+    /// written back. The answer fails, names each group left at stock and why (not_applied), and carries every write.
+    /// </summary>
     private BrokerResponse ApplyProfile(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only = null)
+    {
+        var (r, failed) = ApplyOnce(target, profile, path, only);
+        if (failed == null || profile == null) return r;
+        var runs = new List<BrokerResponse> { r };
+        var left = new List<(string Group, List<string> Cells, string Why)>();
+        var writing = profile;
+        while (failed != null)
+        {
+            string group = DailyProfile.Group(failed.Kind, failed.Key);
+            bool In(ProfileWrite w) => DailyProfile.Group(w.Kind, w.Key) == group;
+            left.Add((group, [.. writing.Writes.Where(In).Select(w => $"{w.Kind}/{w.Key}")], r.Error ?? $"{failed.Kind}/{failed.Key} did not apply"));
+            writing = writing with { Writes = [.. writing.Writes.Where(w => !In(w))] };
+            (r, failed) = ApplyOnce(target, writing, path, only);
+            runs.Add(r);
+        }
+        // The later runs write again what the first one already put on; only what they changed is worth a line.
+        var applied = runs.Take(1).SelectMany(AppliedOf)
+            .Concat(runs.Skip(1).SelectMany(AppliedOf).Where(a => !(a.TryGetProperty("outcome", out var o) && o.GetString() == nameof(TxOutcome.NoChange))))
+            .ToArray();
+        string stays = string.Join("; ", left.Select(l => $"the {l.Group} ({string.Join(", ", l.Cells)}) stays at stock: {l.Why}"));
+        string error = r.Ok ? $"the daily profile is on, but {stays}" : $"{stays}; and the rest did not all go on: {r.Error}";
+        string? skipped = r.Result is { } res && res.TryGetProperty("skipped", out var sk) && sk.ValueKind == JsonValueKind.String ? sk.GetString() : null;
+        string? wall = r.Result is { } res2 && res2.TryGetProperty("wall", out var wl) && wl.ValueKind == JsonValueKind.String ? wl.GetString() : null;
+        return new BrokerResponse(false, error, Element(new
+        {
+            success = false, partial = r.Ok, path, profile, applied,
+            not_applied = left.Select(l => new { group = l.Group, cells = l.Cells, why = l.Why }),
+            skipped, wall,
+        }), r.Ok ? runs[0].Code : r.Code);
+    }
+
+    /// <summary>Why a write that ran did not go on: the broker's refusal, else the transaction's veto or detail.</summary>
+    private static string? WhyNot(BrokerResponse r)
+    {
+        if (r.Error != null) return r.Error;
+        string? Get(JsonElement a, string name) => a.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        return AppliedOf(r).Select(a => Get(a, "veto") ?? Get(a, "detail")).LastOrDefault(s => s != null);
+    }
+
+    /// <summary>One run of <see cref="ApplyProfile"/>: stops at the first write that fails, and names it when it is one of
+    /// the profile's own (a held cell that did not go back is not: nothing to leave out, the run just stops).</summary>
+    private (BrokerResponse Response, ProfileWrite? Failed) ApplyOnce(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only)
     {
         var applied = new List<JsonElement>();
         // A profile kept on another VBIOS goes on only when someone loads or keeps one (which binds it to this VBIOS):
@@ -1025,11 +1073,11 @@ public sealed class BrokerDispatcher
             if (held.Kind == ClockOffsets.Kind && CurveAside(target, held.Key, held.Original) is { } aside)
             {
                 if (aside.Result is { } ar && ar.TryGetProperty("applied", out var aa)) applied.Add(aa[0]);
-                if (!aside.Ok) return new BrokerResponse(false, aside.Error ?? "the curve could not be set aside for a P0 write", Element(new { success = false, path, profile, applied }), aside.Code);
+                if (!aside.Ok) return (new BrokerResponse(false, aside.Error ?? "the curve could not be set aside for a P0 write", Element(new { success = false, path, profile, applied }), aside.Code), null);
             }
             var r = Dispatch(PutBack(target, held));
             if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
-            if (!r.Ok) return new BrokerResponse(false, r.Error ?? $"{held.Id} did not go back", Element(new { success = false, path, profile, applied }), r.Code);
+            if (!r.Ok) return (new BrokerResponse(false, $"{held.Id} did not go back" + (WhyNot(r) is { } why ? $": {why}" : ""), Element(new { success = false, path, profile, applied }), r.Code), null);
         }
         bool curveFollows = writing is { Suspended: false } && writing.Writes.Where(only ?? (_ => true)).Any(w => w.Kind == VfWrites.Kind);
         if (writing is { Suspended: false })
@@ -1039,11 +1087,11 @@ public sealed class BrokerDispatcher
                 if (w.Kind == ClockOffsets.Kind && CurveAside(target, w.Key, w.Value, curveFollows) is { } aside)
                 {
                     if (aside.Result is { } ar && ar.TryGetProperty("applied", out var aa)) applied.Add(aa[0]);
-                    if (!aside.Ok) return new BrokerResponse(false, aside.Error ?? "the curve could not be set aside for a P0 write", Element(new { success = false, path, profile, applied }), aside.Code);
+                    if (!aside.Ok) return (new BrokerResponse(false, $"{w.Kind}/{w.Key} did not apply: the curve could not be set aside for it" + (WhyNot(aside) is { } why ? $" ({why})" : ""), Element(new { success = false, path, profile, applied }), aside.Code), w);
                 }
                 var r = Dispatch(WriteOf(target, w.Kind, w.Key, w.Value));
                 if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
-                if (!r.Ok) return new BrokerResponse(false, r.Error ?? $"{w.Kind}/{w.Key} did not apply", Element(new { success = false, path, profile, applied }), r.Code);
+                if (!r.Ok) return (new BrokerResponse(false, $"{w.Kind}/{w.Key} did not apply" + (WhyNot(r) is { } why ? $": {why}" : ""), Element(new { success = false, path, profile, applied }), r.Code), w);
             }
         // The firmware's board limit must follow the request (BoardWall): a request that reads as the daily wall while the
         // card holds another is written again, a step away and back (a changed value is what was seen to take).
@@ -1063,11 +1111,11 @@ public sealed class BrokerDispatcher
                 {
                     var r = Dispatch(WriteOf(target, PowerCap.Kind, wall.Key, v.ToString(System.Globalization.CultureInfo.InvariantCulture)));
                     if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
-                    if (!r.Ok) return new BrokerResponse(false, r.Error ?? "the daily wall could not be written again", Element(new { success = false, path, profile, applied, wall = wallNote }), r.Code);
+                    if (!r.Ok) return (new BrokerResponse(false, "the daily wall could not be written again" + (WhyNot(r) is { } why ? $": {why}" : ""), Element(new { success = false, path, profile, applied, wall = wallNote }), r.Code), wall);
                 }
             }
         }
-        return Ok(new { success = true, path, profile, applied, skipped, wall = wallNote });
+        return (Ok(new { success = true, path, profile, applied, skipped, wall = wallNote }), null);
     }
 
     /// <summary>The general write: set kind/key to value through the registry. A limit the driver reveals only after

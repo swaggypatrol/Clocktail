@@ -398,7 +398,10 @@ public sealed partial class TuningTools
         [Description("Seconds the lab measures each run, 15..60 (default 20; a comparison is four runs).")] int seconds = 20,
         [Description("Settings to compare instead of the search, each A B B A against the settings on the card: " +
             "'XBAR MHz/demand mV/ratio/MSVDD REL mV' separated by ';', e.g. '400/50/0.95/50;500/50/0.95/50'. One outside the " +
-            "limits or the cliff rule is skipped; at most 30.")] string? candidates = null) => Guard(() =>
+            "limits or the cliff rule is skipped; at most 30.")] string? candidates = null,
+        [Description("The highest MSVDD REL offset to try, mV (default the service's limit, +50). The offset on the card holds " +
+            "MSVDD where it is and tunes XBAR and the ratio alone: on driver 621.01, which drops every rail write, pass the card's " +
+            "REL offset (-50 at stock on a 5090).")] int? msvddRelMaxMv = null) => Guard(() =>
     {
         if (seconds is < 15 or > 60) throw new ArgumentException("seconds is 15..60");
         var list = Candidates(candidates);
@@ -411,6 +414,8 @@ public sealed partial class TuningTools
         uint ratioRaw = card.WithDriver(ClockRatio.Read).Raw;
         var msvdd = look.Msvdd ?? throw new InvalidOperationException("the MSVDD rail is unreadable");
         int relMv = msvdd.Offsets.RelUv / 1000;
+        int relMax = Math.Min(msvddRelMaxMv ?? MsvddRelMaxMv, MsvddRelMaxMv);
+        if (relMax < relMv) throw new ArgumentException($"msvddRelMaxMv is below MSVDD's REL offset on the card ({relMv:+0;-0;0} mV)");
         // ALT's limit above REL's with no offsets: a REL offset past it goes on with ALT raised by the rest (the rail's top is
         // the lowest of the two). Only while ALT holds no offset of its own.
         int? altGapMv = msvdd.Limits.AltOpUv != 0 && msvdd.Offsets.AltUv == 0
@@ -421,7 +426,7 @@ public sealed partial class TuningTools
             stable_id = card.StableId, pci = card.PciBusId, curve = VfOffsets.Encode(look.Curve.Offsets()), start,
             xbar_max_mhz = xbarMax, xbar_step_mhz = 50, demand_max_mv = MaxVdemandMv, demand_step_mv = 10,
             cliff_mhz = XbarCliffMhz, cliff_demand_mv = XbarCliffDemandMv, high_mhz = XbarHighMhz, high_demand_mv = XbarHighDemandMv,
-            ratio_max = 0.95, ratio_step = 0.025, msvdd_rel_max_mv = MsvddRelMaxMv, msvdd_rel_step_mv = 10,
+            ratio_max = 0.95, ratio_step = 0.025, msvdd_rel_max_mv = relMax, msvdd_rel_step_mv = 10,
             seconds, warmup_seconds = 60, grace_seconds = 45, msvdd_alt_gap_mv = altGapMv, candidates = list,
         });
         card.Broker(BrokerRequest.OpExperiment, "note", string.Create(CultureInfo.InvariantCulture,

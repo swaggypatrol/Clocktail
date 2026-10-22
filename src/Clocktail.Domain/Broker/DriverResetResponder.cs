@@ -231,7 +231,8 @@ public sealed class DriverResetResponder(
         if (p.GetProperty("Suspended").GetBoolean()) return "suspended, the card stays at stock";
         int n = res.TryGetProperty("applied", out var a) ? a.GetArrayLength() : 0;
         string last = p.TryGetProperty("History", out var h) && h.ValueKind == System.Text.Json.JsonValueKind.Array && h.GetArrayLength() > 0 ? h[h.GetArrayLength() - 1].GetString()! : "";
-        return r.Ok ? $"{n} write(s) applied; {last}" : $"not applied: {r.Error}; {last}";
+        bool partial = res.TryGetProperty("partial", out var pa) && pa.ValueKind == System.Text.Json.JsonValueKind.True;
+        return r.Ok ? $"{n} write(s) applied; {last}" : partial ? $"partly applied, {n} write(s): {r.Error}; {last}" : $"not applied: {r.Error}; {last}";
     }
 
     private static string Summary(BrokerResponse r)

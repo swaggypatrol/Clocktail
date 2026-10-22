@@ -1369,6 +1369,86 @@ public class BrokerDispatcherTests : IDisposable
         return new BrokerDispatcher(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true);
     }
 
+    /// <summary>The V/F curve and both rails, with a rail setter that answers OK and changes nothing: how driver 621.01
+    /// answered every rail write, NVVDD and MSVDD, up and down (2026-10-22).</summary>
+    private BrokerDispatcher CurveAndDroppedRails()
+    {
+        new FakeVf().Install();
+        foreach (var bytes in new[] { RailsFixture.Info(), RailsFixture.Control(), RailsFixture.Status(), RailsFixture.Devices() })
+            FakeDriver.State[BinaryPrimitives.ReadUInt32LittleEndian(bytes)] = bytes;
+        uint railsControl = Slots.Info(Slot.VoltVoltRailsGetControl).Shape!.Value.Word;
+        var vf = FakeDriver.RequestApplier!;
+        FakeDriver.RequestApplier = (state, req) => BitConverter.ToUInt32(req) == railsControl ? state : vf(state, req);
+        var hw = new NvClient(FakeDriver.ApiFor(
+            [Slot.ClockClientClkVfPointsGetInfo, Slot.ClockClientClkVfPointsGetStatus, Slot.ClockClientClkVfPointsGetControl, Slot.GetPstates20,
+             Slot.VoltVoltRailsGetInfo, Slot.VoltVoltRailsGetControl, Slot.VoltVoltRailsGetStatus, Slot.VoltVoltDevicesGetInfo],
+            [Slot.ClockClientClkVfPointsSetControl, Slot.VoltVoltRailsSetControl]), WritePolicySet.Default.WithEnabled(Slot.ClockClientClkVfPointsSetControl));
+        return new BrokerDispatcher(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true);
+    }
+
+    /// <summary>
+    /// The update to 621.01 (2026-10-22): the daily profile stopped at MSVDD, which the driver dropped, after the memory
+    /// write had set the curve aside, so the card ran a flat curve with neither the uncore nor the daily curve on. Now the
+    /// uncore stays at stock, the rest goes on, and the answer says which group did not and why.
+    /// </summary>
+    [Fact]
+    public void A_cell_the_driver_drops_leaves_its_group_at_stock_and_the_rest_of_the_profile_goes_on()
+    {
+        var d = CurveAndDroppedRails();
+        const string daily = "0*60,30000*67";
+        new DailyProfile([
+            new ProfileWrite(RailWrites.Kind, RailWrites.Key(Rail.Msvdd), "rel=0,alt=0,ov=0,vmin=0"),
+            new ProfileWrite(VfWrites.Kind, VfWrites.CoreKey, daily)], _host.Now).Save(DailyProfile.PathBeside(_journal.Path));
+
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "the broker started"));
+        Assert.False(r.Ok);
+        Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());           // the curve went on
+        Assert.Equal(RailsFixture.MsvddRelOffset, MsvddRel());              // MSVDD stayed at stock
+        Assert.Equal(VfWrites.Kind, Assert.Single(_journal.Inspect().Items).Kind);
+
+        var res = r.Result!.Value;
+        Assert.True(res.GetProperty("partial").GetBoolean());
+        var left = Assert.Single(res.GetProperty("not_applied").EnumerateArray());
+        Assert.Equal("uncore", left.GetProperty("group").GetString());
+        Assert.StartsWith("the daily profile is on, but the uncore (rails/msvdd) stays at stock: rails/msvdd did not apply: readback differs", r.Error);
+        Assert.StartsWith("partly applied, ", DriverResetResponder.ProfileSummary(r));
+        Assert.Contains("Failed: the daily profile is on, but the uncore", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
+    /// <summary>NVVDD's offsets go with the curve (a REL cut is part of it): when they do not go on, neither does the curve,
+    /// and a curve the broker holds goes back to stock rather than run without the cut it was tuned under.</summary>
+    [Fact]
+    public void A_dropped_nvvdd_offset_takes_the_curve_along_and_a_held_curve_goes_back_to_stock()
+    {
+        var d = CurveAndDroppedRails();
+        Assert.True(d.Dispatch(Curve("0*60,45000*67")).Ok);
+        new DailyProfile([
+            new ProfileWrite(RailWrites.Kind, RailWrites.Key(Rail.Nvvdd), "rel=-12500,alt=0,ov=0,vmin=0"),
+            new ProfileWrite(VfWrites.Kind, VfWrites.CoreKey, "0*60,30000*67")], _host.Now).Save(DailyProfile.PathBeside(_journal.Path));
+
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply"));
+        Assert.False(r.Ok);
+        Assert.All(FakeVf.Offsets(), o => Assert.Equal(0, o));
+        Assert.Empty(_journal.Inspect().Items);
+        var left = Assert.Single(r.Result!.Value.GetProperty("not_applied").EnumerateArray());
+        Assert.Equal("core", left.GetProperty("group").GetString());
+        Assert.Equal(["rails/nvvdd", "vf/core"], left.GetProperty("cells").EnumerateArray().Select(c => c.GetString()));
+    }
+
+    [Fact]
+    public void The_profile_groups_follow_the_method()
+    {
+        Assert.Equal("uncore", DailyProfile.Group(RailWrites.Kind, RailWrites.Key(Rail.Msvdd)));
+        Assert.Equal("core", DailyProfile.Group(RailWrites.Kind, RailWrites.Key(Rail.Nvvdd)));
+        Assert.Equal("memory", DailyProfile.Group(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Memory)));
+        Assert.Equal("core", DailyProfile.Group(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Core)));
+        Assert.Equal("uncore", DailyProfile.Group(ClockVdemand.Kind, ClockVdemand.Key(ClockDomainId.Xbar)));
+        Assert.Equal("core", DailyProfile.Group(ClockVdemand.Kind, ClockVdemand.Key(ClockDomainId.Graphics)));
+        Assert.Equal("uncore", DailyProfile.Group(ClockDomainOffsets.Kind, ClockDomainOffsets.Key(ClockDomainId.Xbar)));
+        Assert.Equal("uncore", DailyProfile.Group(ClockRatio.Kind, ClockRatio.Key));
+        Assert.Equal("power", DailyProfile.Group(PowerCap.Kind, PowerCap.Key(PowerRequestKind.Ordinary)));
+    }
+
     /// <summary>
     /// The write verb hands the path the journal's original for the cell, so a user can put a lowered slot back to a
     /// stock value above the ceiling (the hardware held it before this program did anything) and the record is
