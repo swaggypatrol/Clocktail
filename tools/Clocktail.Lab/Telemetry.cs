@@ -50,5 +50,11 @@ public sealed class NvmlSampler : ISampler
             _nvml.PerformanceState(_h));
     }
 
+    /// <summary>Video memory in use and in all, bytes (NVML's _v2 count: the driver's reservation left out); null when unread.</summary>
+    public (ulong Used, ulong Total)? Vram()
+    {
+        try { var m = _nvml.Memory(_h); return (m.Used, m.Total); } catch (NvmlException) { return null; }
+    }
+
     public void Dispose() => _nvml.Dispose();
 }

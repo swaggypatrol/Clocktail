@@ -149,8 +149,9 @@ public class LabTests
         Assert.InRange(e.Threads[^1] / (double)e.ComputeThreads, 0.4, 0.6);
     }
 
-    private static SweepStep S(int mhz, double gbps, double lat, double mem, string verdict = LabResult.Pass, double? busy = null) =>
-        new(mhz, verdict, gbps, lat, mem, 60, 62, 1, null, 0, 0, null, verdict == LabResult.Pass ? null : "a bad word", "P0", busy);
+    private static SweepStep S(int mhz, double gbps, double lat, double mem, string verdict = LabResult.Pass, double? othersMib = null) =>
+        new(mhz, verdict, gbps, lat, mem, 60, 62, 1, null, 0, 0, null, verdict == LabResult.Pass ? null : "a bad word", "P0", 22, (ulong?)othersMib,
+            new LabResult("", "", 0, 0, default, default, [], verdict, [], 22, (ulong?)othersMib).Shared);
 
     [Fact]
     public void The_sweep_goes_on_while_each_step_is_faster()
@@ -165,10 +166,10 @@ public class LabTests
     [InlineData(1520, 510, 13901, LabResult.Pass, null, "latency rose")]
     [InlineData(1510, 498, 13851, LabResult.Pass, null, "did not follow the offset")]
     [InlineData(1510, 498, 13901, LabResult.Fail, null, "a bad word")]
-    [InlineData(1510, 498, 13901, LabResult.Pass, 22.0, "other work used the GPU")]
-    public void A_slower_failing_or_unjudgeable_step_stops_the_sweep_and_the_best_is_the_one_before(double gbps, double lat, double mem, string verdict, double? busy, string why)
+    [InlineData(1510, 498, 13901, LabResult.Pass, 30000.0, "other work shared the GPU")]
+    public void A_slower_failing_or_unjudgeable_step_stops_the_sweep_and_the_best_is_the_one_before(double gbps, double lat, double mem, string verdict, double? othersMib, string why)
     {
-        var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(50, 1505, 499, 13851), S(100, gbps, lat, mem, verdict, busy) };
+        var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(50, 1505, 499, 13851), S(100, gbps, lat, mem, verdict, othersMib) };
         Assert.Contains(why, MemorySweep.Signal(steps));
         Assert.Equal(50, MemorySweep.Best(steps));
     }

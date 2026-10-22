@@ -32,19 +32,29 @@ try
             var phases = LabConfig.Parse(O("phases") ?? "burn", D("seconds", 60));
             var cfg = new LabConfig(phases, TargetW: D("target-w", 0), LightDiv: (int)D("light-div", 64));
             using var cu = CudaApi.Load();
-            using var engine = new CudaEngine(cu, Ordinal(cu, O("gpu-pci")), D("mem-fraction", 0.7), (ulong)(D("mem-cap-mib", 0) * (1 << 20)))
-                { InjectAtComputeLaunch = (int)D("inject-at", 0) };
-            using var sampler = new NvmlSampler(engine.PciBusId);
-            // What else is using the GPU: a second of utilization before the load starts.
+            int ordinal = Ordinal(cu, O("gpu-pci"));
+            using var sampler = new NvmlSampler(cu.DevicePciBusId(cu.Device(ordinal)));
+            // What else is using the GPU before the lab allocates: utilization over a second, and the video memory others
+            // hold. The buffer never takes more than is free: WDDM lets CUDA allocate past the card and pages the rest to
+            // system memory (a 21.6 GiB buffer beside a 30 GiB llama-server took 10 s a pass instead of 30 ms).
             double busy = 0;
             for (int i = 0; i < 5; i++) { busy = Math.Max(busy, sampler.Read(0, -1).UtilPct ?? 0); Thread.Sleep(200); }
+            var (vramUsed, vramTotal) = sampler.Vram() ?? (0UL, 0UL);
+            ulong cap = (ulong)(D("mem-cap-mib", 0) * (1 << 20));
+            if (vramTotal > 0)
+            {
+                ulong fits = vramTotal > vramUsed + (1UL << 30) ? vramTotal - vramUsed - (1UL << 30) : 256UL << 20;
+                cap = cap == 0 ? fits : Math.Min(cap, fits);
+            }
+            using var engine = new CudaEngine(cu, ordinal, D("mem-fraction", 0.7), cap) { InjectAtComputeLaunch = (int)D("inject-at", 0) };
             var started = DateTime.UtcNow;
             using var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
             var runner = new LabRunner(cfg, engine, sampler, log: Console.Error.WriteLine);
             var results = runner.Run(cts.Token);
             var (verdict, reasons) = LabRunner.Judge(results, phases.Count);
-            var r = new LabResult(engine.Name, engine.PciBusId, engine.MemoryBufferBytes >> 20, engine.SmCount, started, DateTime.UtcNow, results, verdict, reasons, busy);
+            var r = new LabResult(engine.Name, engine.PciBusId, engine.MemoryBufferBytes >> 20, engine.SmCount, started, DateTime.UtcNow, results, verdict, reasons, busy,
+                vramTotal > 0 ? vramUsed >> 20 : null);
             string json = JsonSerializer.Serialize(r, LabJson.Options);
             if (O("json") is { } path) File.WriteAllText(path, json); else Console.WriteLine(json);
             return r.ExitCode;

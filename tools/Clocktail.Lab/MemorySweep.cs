@@ -17,7 +17,7 @@ public sealed record SweepSpec(string StableId, string Pci, string Curve, int Da
 /// <summary>One step of the sweep: the offset, how the lab judged it, and the numbers the stop rules read.</summary>
 public sealed record SweepStep(int OffsetMhz, string Verdict, double? Gbps, double? LatencyNs, double? MemMhz, double? TempP50,
     double? TempMax, double? MaxCvPct, IReadOnlyList<PatternResult>? Patterns, long Errors, int? DriverResets, string? Signal, string? Detail,
-    string? PState = null, double? BusyBeforePct = null);
+    string? PState = null, double? BusyBeforePct = null, ulong? OthersVramMib = null, bool Shared = false);
 
 public sealed record SweepStatus(string Job, string State, DateTime StartedUtc, DateTime UpdatedUtc, int? AtMhz, ulong? BufferMib,
     IReadOnlyList<SweepStep> Steps, int? BestMhz, string? Why, string? Next)
@@ -56,8 +56,8 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     {
         var last = steps[^1];
         if (last.Verdict != LabResult.Pass) return last.Detail ?? $"the step {last.Verdict}";
-        if (last.BusyBeforePct > 10)
-            return Inv($"other work used the GPU ({last.BusyBeforePct:0} % before the step): its speed is not the memory's alone; stop it and run again");
+        if (last.Shared)
+            return Inv($"other work shared the GPU before the step ({last.OthersVramMib} MiB of video memory, {last.BusyBeforePct:0} % busy): its speed is not the memory's alone; close it and run again");
         if (steps.Count < 2) return null;
         var prev = steps[^2];
         var first = steps[0];
@@ -93,7 +93,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
         bool failed = r.Verdict == LabResult.Fail || resets > 0;
         string? detail = resets > 0 ? $"a driver reset during the step ({resets})" : r.Reasons.Count > 0 ? string.Join("; ", r.Reasons) : null;
         return new(offsetMhz, failed ? LabResult.Fail : r.Verdict, mem?.Gbps, lat?.LatencyNs, mem?.MemMhzP50, mem?.TempP50,
-            r.Phases.Max(p => p.TempMax), mem?.Patterns?.Max(p => p.CvPct), mem?.Patterns, errors, resets, null, detail, mem?.PState, r.BusyBeforePct);
+            r.Phases.Max(p => p.TempMax), mem?.Patterns?.Max(p => p.CvPct), mem?.Patterns, errors, resets, null, detail, mem?.PState, r.BusyBeforePct, r.OthersVramMib, r.Shared);
     }
 
     public int Run()
@@ -143,7 +143,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 }
                 if (trial) Broker("stable", $"tune_memory: {line}");
                 // Shared GPU or an offset not in force: the step says nothing about the memory, so there is no result.
-                bool unjudged = step.BusyBeforePct > 10 || signal?.Contains("not in force", StringComparison.Ordinal) == true;
+                bool unjudged = step.Shared || signal?.Contains("not in force", StringComparison.Ordinal) == true;
                 if (signal != null) return Finish(unjudged ? SweepStatus.Failed : SweepStatus.Done, $"{offset:+0;-0;0} MHz: {signal}", offset);
             }
             return Finish(SweepStatus.Done, $"reached {spec.ToMhz:+0;-0;0} MHz with nothing slower", null);

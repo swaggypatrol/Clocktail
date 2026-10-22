@@ -56,11 +56,12 @@ public sealed class PhaseResult
 }
 
 public sealed record LabResult(string Device, string Pci, ulong BufferMib, int SmCount, DateTime StartedUtc, DateTime FinishedUtc,
-    IReadOnlyList<PhaseResult> Phases, string Verdict, IReadOnlyList<string> Reasons, double? BusyBeforePct = null)
+    IReadOnlyList<PhaseResult> Phases, string Verdict, IReadOnlyList<string> Reasons, double? BusyBeforePct = null, ulong? OthersVramMib = null)
 {
-    /// <summary>Utilization over 10 % before the lab started: other work shares the GPU, so speeds (bandwidth, latency,
-    /// Gflop/s) are not the card's alone. Bits are judged all the same. On the reference card a local llama-server held 22 %.</summary>
-    public bool Shared => BusyBeforePct > 10;
+    /// <summary>Other work shares the GPU, so speeds (bandwidth, latency, Gflop/s) are not the card's alone: other programs held
+    /// over 4 GiB of video memory before the lab started (a local AI model, a game; the desktop holds 1-2), or kept it over
+    /// half busy (the desktop alone read ~22 % on the reference card). Bits are judged all the same.</summary>
+    public bool Shared => OthersVramMib > 4096 || BusyBeforePct > 50;
 
     public const string Pass = "pass", Fail = "fail", Inconclusive = "inconclusive";
     public int ExitCode => Verdict switch { Pass => 0, Fail => 4, _ => 5 };

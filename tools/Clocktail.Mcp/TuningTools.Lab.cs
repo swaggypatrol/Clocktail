@@ -105,6 +105,8 @@ public sealed partial class TuningTools
         string labVerdict = lab is { } l && l.TryGetProperty("verdict", out var v) ? v.GetString() ?? "?" : "none";
         var reasons = lab is { } l2 && l2.TryGetProperty("reasons", out var rs) ? rs.EnumerateArray().Select(x => x.GetString() ?? "").ToList() : [];
         double? busy = lab is { } l3 && l3.TryGetProperty("busy_before_pct", out var bb) && bb.ValueKind == JsonValueKind.Number ? bb.GetDouble() : null;
+        double? others = lab is { } l6 && l6.TryGetProperty("others_vram_mib", out var ov) && ov.ValueKind == JsonValueKind.Number ? ov.GetDouble() : null;
+        bool shared = others > 4096 || busy > 50;
         bool failed = resets > 0 || hung || labVerdict == "fail" || !hot && code is not (0 or 4 or 5);
         string verdict = resets > 0 ? $"driver reset ({resets}) during the run"
             : hung ? $"the lab did not finish within {seconds + grace + 30} s: a hang"
@@ -124,13 +126,13 @@ public sealed partial class TuningTools
 
         // ST02: each memory run is kept by memory offset and buffer, and compared with the last one like it.
         object? memoryVsLast = null;
-        if (lab is { } r && !failed && busy is not > 10 && Phase(r, "memory") is { } mem)
+        if (lab is { } r && !failed && !shared && Phase(r, "memory") is { } mem)
             memoryVsLast = KeepMemoryRun(mem, Phase(r, "latency"), r.TryGetProperty("buffer_mib", out var bm) ? bm.GetInt64() : 0);
 
         bool trial = TrialInForce(card.Broker(BrokerRequest.OpExperiment, "show")) == true;
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Lab {string.Join(",", list)}, {seconds} s: {verdict}{(reasons.Count > 0 ? $" ({string.Join("; ", reasons)})" : "")}. P50 {mhz} MHz @ NVVDD {mv} mV (curve point {pointIndex}); max {held.Max(s => s.Telemetry?.TemperatureC)} °C")
-            + (busy > 10 ? $"; other work used the GPU ({busy:0} %)" : "") + (note != null ? $". Purpose: {note}" : "");
+            + (shared ? $"; other work shared the GPU ({others:0} MiB, {busy:0} %)" : "") + (note != null ? $". Purpose: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
         bool crashRecorded = false;
         if (failed && trial)
@@ -147,7 +149,7 @@ public sealed partial class TuningTools
             reasons,
             exit_code = code,
             driver_resets = resets,
-            shared = busy > 10 ? $"other work used {busy:0} % of the GPU before the run (a local AI model, a game, a video): speeds are not the card's alone; bits are judged all the same" : null,
+            shared = shared ? $"other programs held {others:0} MiB of video memory and kept the GPU {busy:0} % busy before the run (a local AI model, a game): speeds are not the card's alone; bits are judged all the same" : null,
             phases = lab is { } l4 && l4.TryGetProperty("phases", out var ph) ? ph : (JsonElement?)null,
             buffer_mib = lab is { } l5 && l5.TryGetProperty("buffer_mib", out var bmb) ? bmb.GetInt64() : (long?)null,
             card = new
@@ -234,8 +236,10 @@ public sealed partial class TuningTools
         if (TrialInForce(show) == true) throw new InvalidOperationException("a trial is in force: back_to_daily (or keep_as_daily) first, so the sweep starts from the daily profile");
         if (Running() is { } running) throw new InvalidOperationException($"a sweep is running already ({Path.GetFileName(running)}): lab_status, or lab_stop");
         var look = card.Read();
-        if (look.Telemetry?.GpuUtilPercent is > 10 and var u)
-            throw new InvalidOperationException($"the GPU is {u} % busy with other work (a game, a local AI model, a video): the sweep measures speed, so close it first");
+        if (look.Telemetry?.VramUsedBytes is > 4UL << 30 and var used)
+            throw new InvalidOperationException($"other programs hold {used >> 20} MiB of video memory (a local AI model, a game): the sweep measures the memory's speed and needs the card to itself, so close them first");
+        if (look.Telemetry?.GpuUtilPercent is > 50 and var u)
+            throw new InvalidOperationException($"the GPU is {u} % busy with other work: the sweep measures speed, so close it first");
         var p0 = card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Memory) ?? throw new InvalidOperationException("the memory offset is unreadable");
         int daily = p0.DeltaKhz / 1000, from = fromMhz ?? daily;
         if (from * 1000 < p0.MinKhz || toMhz * 1000 > p0.MaxKhz) throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000}..{p0.MaxKhz / 1000} MHz");
