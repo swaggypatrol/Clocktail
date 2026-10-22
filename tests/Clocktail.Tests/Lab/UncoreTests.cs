@@ -38,7 +38,7 @@ public class UncoreTests
         // Ratio 0.925 with XBAR held under MSVDD's limit, as measured: the core 1.9 % down is no cliff, and still not better.
         var core = UncoreSearch.Judge(R(4780), R(4900, core: 2915), R(4900, core: 2912), R(4780));
         Assert.Equal(Comparison.NotBetter, core.Outcome);
-        Assert.Contains("XBAR could not follow the ratio", core.Why);
+        Assert.Contains("a slower core costs", core.Why);
         // One V/F bin (15 MHz, 0.5 %) is not a loss.
         Assert.Equal(Comparison.Better, UncoreSearch.Judge(R(4780), R(4830, core: 2955), R(4825, core: 2955), R(4782)).Outcome);
     }
@@ -99,6 +99,27 @@ public class UncoreTests
         Assert.True(tried.Count < 16, $"{tried.Count} comparisons");
     }
 
+    /// <summary>XBAR's clock as the card set it: the lower of its floor (the ratio x a 3050 MHz core) and its ceiling (the
+    /// clock MSVDD's reliability limit allows, 2750 MHz + 3 MHz per mV of REL). Neither the ratio nor MSVDD alone moves it
+    /// by the 0.5 % kept; the two together do.</summary>
+    [Fact]
+    public void The_ratio_and_msvdd_go_up_together_when_neither_pays_alone()
+    {
+        double Speed(UncoreSetting s) => Math.Min(s.Ratio * 3050, 2750 + 3 * s.MsvddRelMv);
+        var (search, tried) = Run(Speed);
+        Assert.Equal(new UncoreSetting(250, 0, 58976 + 2 * 1638, 20), search.Best);
+        Assert.Contains(search.Log, c => c.Stage == "window" && c.Outcome == Comparison.Better);
+        Assert.DoesNotContain(search.Log, c => c.Stage is "ratio" or "msvdd" && c.Outcome == Comparison.Better);
+    }
+
+    [Theory]
+    [InlineData(13.0, 2.0, 948UL, false)]       // the idle desktop: 13 % at idle clocks before the run, 2 % after it
+    [InlineData(22.0, 24.0, 815UL, true)]       // Mystify drawing, read with the clocks up
+    [InlineData(60.0, 2.0, 948UL, true)]        // a game before the run
+    [InlineData(3.0, 2.0, 30000UL, true)]       // a local model holding the memory
+    public void A_run_is_shared_when_other_work_kept_the_gpu_busy_or_holds_the_memory(double before, double after, ulong othersMib, bool shared) =>
+        Assert.Equal(shared, new LabResult("", "", 0, 0, default, default, [], LabResult.Pass, [], before, othersMib, after).Shared);
+
     [Fact]
     public void A_failure_ends_that_axis_and_the_best_stays_the_last_good_one()
     {
@@ -136,6 +157,42 @@ public class UncoreTests
         search.Run();
         Assert.Equal(new UncoreSetting(400, 60, 58976, 0), search.Best);
         Assert.Equal([50, 60], tried.Where(s => s.XbarMhz == 400).Take(2).Select(s => s.DemandMv));
+    }
+
+    [Fact]
+    public void A_list_compares_each_candidate_with_the_start_and_keeps_the_fastest_better_one()
+    {
+        var start = new UncoreSetting(250, 0, 62252, 20);
+        var spec = Spec with { Start = start, MsvddRelMaxMv = 50, MsvddAltGapMv = 20 };
+        var against = new List<UncoreSetting>();
+        var gains = new Dictionary<int, double> { [30] = 0.8, [40] = 1.6, [50] = 1.1 };
+        var search = new UncoreSearch(spec, (stage, a, b) =>
+        {
+            against.Add(a);
+            double g = gains.GetValueOrDefault(b.MsvddRelMv);
+            return new(stage, a, b, g >= 0.5 ? Comparison.Better : Comparison.NotBetter, "", g, 0, 0, []);
+        }, () => false);
+        search.RunList([start with { MsvddRelMv = 30 }, start with { MsvddRelMv = 40 }, start with { XbarMhz = 400, DemandMv = 20 },
+            start with { MsvddRelMv = 50 }, start with { MsvddRelMv = 60 }]);
+        Assert.Equal(start with { MsvddRelMv = 40 }, search.Best);
+        Assert.All(against, a => Assert.Equal(start, a));
+        Assert.Equal(3, against.Count);
+        // +400 MHz with +20 mV is the cliff, REL +60 past the limit: logged, not run.
+        Assert.Contains(search.Log, c => c.B.XbarMhz == 400 && c.Why.Contains("needs +50 mV", StringComparison.Ordinal));
+        Assert.Contains(search.Log, c => c.B.MsvddRelMv == 60 && c.Why.Contains("MSVDD REL past +50", StringComparison.Ordinal));
+    }
+
+    /// <summary>MSVDD's top is the lowest of REL and ALT; on the reference card ALT sits 20 mV above REL, so REL past +20 takes
+    /// ALT with it, and a setting under the gap puts ALT back to 0.</summary>
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(20, 0)]
+    [InlineData(30, 10)]
+    [InlineData(50, 30)]
+    public void Alt_follows_rel_past_the_gap(int relMv, int altMv)
+    {
+        Assert.Equal(altMv, (Spec with { MsvddAltGapMv = 20 }).AltMv(Spec.Start with { MsvddRelMv = relMv }));
+        Assert.Null(Spec.AltMv(Spec.Start with { MsvddRelMv = relMv }));
     }
 
     [Fact]

@@ -34,11 +34,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     public static readonly int MinNvvddA = Env("CLOCKTAIL_MCP_MIN_NVVDD_A", 100);
     public static readonly int MinMsvddA = Env("CLOCKTAIL_MCP_MIN_MSVDD_A", 90);
     /// <summary>adjust_msvdd: the largest step per offset down (an undervolt can fail) and up, and how far below stock REL
-    /// and VMIN may go; how high REL may go (an absolute offset: 0 is NVIDIA's own reliability limit, +20 was measured,
-    /// 2026-10-20) and how far above stock VMIN may go (+50 was measured).</summary>
+    /// and VMIN may go; how high REL may go (an absolute offset: 0 is NVIDIA's own reliability limit; +50 with ALT +30 is
+    /// 1145 mV, under the rail's 1150 mV ceiling the service enforces, and was measured, 2026-10-22) and how far above stock
+    /// VMIN may go (+50 was measured).</summary>
     public static readonly int MsvddStepMv = Env("CLOCKTAIL_MCP_MSVDD_STEP_MV", 10);
     public static readonly int MsvddRaiseStepMv = Env("CLOCKTAIL_MCP_MSVDD_RAISE_STEP_MV", 25);
-    public static readonly int MsvddRelMaxMv = Env("CLOCKTAIL_MCP_MSVDD_REL_MAX_MV", 20);
+    public static readonly int MsvddRelMaxMv = Env("CLOCKTAIL_MCP_MSVDD_REL_MAX_MV", 50);
     public static readonly int MsvddVminAboveMv = Env("CLOCKTAIL_MCP_MSVDD_VMIN_ABOVE_MV", 50);
     public static readonly int MsvddMaxBelowMv = Env("CLOCKTAIL_MCP_MSVDD_MAX_BELOW_MV", 250);
     public static readonly int MsvddVminBelowMv = Env("CLOCKTAIL_MCP_MSVDD_VMIN_BELOW_MV", 100);
@@ -472,8 +473,11 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "curve left as it is. MSVDD runs at what the core's frequency asks for minus its REL offset (measured 1:1: REL -50 → " +
         "-75 mV moved MSVDD 975 → 950 mV), down to its VMIN floor (825 mV stock). Raising REL lets XBAR run faster where MSVDD " +
         "held it: stock REL is -50 mV on a 5090, and REL -50 → 0 (NVIDIA's own reliability limit) made XBAR ~90 MHz faster and " +
-        "Blender ~2 % faster for ~2 W, the core giving 15-23 MHz back under the wall; REL may go to +20 mV (past NVIDIA's limit; " +
-        "MAX 1115 mV), which bought ~1 % more. Lowering REL is a straight undervolt: ~10 W saved at -175 mV, which the wall gives " +
+        "Blender ~2 % faster for ~2 W, the core giving 15-23 MHz back under the wall; REL may go to +50 mV (past NVIDIA's limit). " +
+        "The rail's MAX is the lowest of REL, ALT and OV, and ALT sits 20 mV above REL with no offsets (1115 against 1095 mV on " +
+        "a 5090), so REL past that takes ALT up with it (and ALT comes back down with REL): REL +50 / ALT +30 is 1145 mV, under " +
+        "the 1150 mV ceiling the service enforces. On the reference card REL +30/+40/+50 made the lab's L2 test 3.1/3.5/3.9 % " +
+        "faster than +20 at ratio 0.95, and let XBAR's offset pay (+400 / +50 mV: 5.6 %). Lowering REL is a straight undervolt: ~10 W saved at -175 mV, which the wall gives " +
         "to the core, but XBAR ~300 MHz slower. VMIN raises or lowers the floor (+50 mV at most above stock; raising it does not " +
         "cure the XBAR cliff, the voltage demand does: adjust_xbar). Per call each offset moves at most 10 mV down or 25 mV up; " +
         "REL at most 250 mV and VMIN 100 mV below stock. Too low shows as artefacts, a crash or a driver reset, under load or " +
@@ -516,6 +520,19 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         };
         if (rel != rail.Offsets.RelUv) args["msvdd_rel_uv"] = rel;
         if (vmin != rail.Offsets.VminUv) args["msvdd_vmin_uv"] = vmin;
+        // MAX is the lowest of REL, ALT and OV: REL raised past ALT's limit takes ALT with it, and ALT comes back down with REL
+        // to the daily profile's (or stock) offset, never under it.
+        if (rail.Limits.AltOpUv != 0)
+        {
+            long relLimit = rail.Limits.RelUv + (long)(rel - rail.Offsets.RelUv), altBase = rail.Limits.AltOpUv - (long)rail.Offsets.AltUv;
+            int alt = (int)Math.Max((daily ?? stock).AltUv, relLimit - altBase);
+            if (alt != rail.Offsets.AltUv)
+            {
+                args["writes"] = new[] { new { kind = "rails", key = "msvdd", value = string.Create(CultureInfo.InvariantCulture, $"alt={alt}") } };
+                change += string.Create(CultureInfo.InvariantCulture, $", ALT offset {rail.Offsets.AltUv / 1000.0} → {alt / 1000.0} mV (MAX follows REL)");
+                args["change"] = change;
+            }
+        }
         var res = card.Broker(BrokerRequest.OpExperiment, "try", JsonSerializer.Serialize(args));
         if (!res.Ok) return Reply(res);
         var after = ReadAfter(out var unread);

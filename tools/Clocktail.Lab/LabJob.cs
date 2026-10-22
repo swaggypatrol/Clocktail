@@ -52,6 +52,24 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
         catch (Exception e) when (e is IOException or JsonException) { return Failed(started, $"the lab ended without a result (exit code {p.ExitCode})"); }
     }
 
+    /// <summary>A measurement the GPU was not shared in: a run that passed while other work shared the GPU (a screen saver
+    /// drawing, a window, a download in a game launcher) is measured again every <see cref="SharedRetrySeconds"/> s until it
+    /// runs alone or <see cref="SharedWaitMinutes"/> have passed; the last run is returned, shared or not. A screen saver
+    /// draws until the display sleeps, so an unattended job waits it out.</summary>
+    protected LabResult MeasureAlone(int seconds, string phases, ulong? capMib, Action<string>? log)
+    {
+        var until = DateTime.UtcNow.AddMinutes(SharedWaitMinutes);
+        while (true)
+        {
+            var r = Measure(seconds, phases, capMib);
+            if (!(r.Shared && r.Verdict == LabResult.Pass) || DateTime.UtcNow > until || StopAsked) return r;
+            log?.Invoke(Inv($"other work shared the GPU ({r.BusyBeforePct:0} % busy before, {r.BusyAfterPct:0} % after, others hold {r.OthersVramMib} MiB): measuring again in {SharedRetrySeconds} s"));
+            for (int i = 0; i < SharedRetrySeconds && !StopAsked; i++) Thread.Sleep(1000);
+        }
+    }
+
+    public const int SharedRetrySeconds = 30, SharedWaitMinutes = 10;
+
     protected static LabResult Failed(DateTime started, string why) =>
         new("", "", 0, 0, started, DateTime.UtcNow, [], LabResult.Fail, [why]);
 

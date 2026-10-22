@@ -18,7 +18,7 @@ namespace Clocktail.Mcp;
 public sealed partial class TuningTools
 {
     public const int MaxLabSeconds = 600;
-    private static readonly string[] LabPhases = ["burn", "light", "pulse", "memory", "latency"];
+    private static readonly string[] LabPhases = ["burn", "light", "pulse", "memory", "latency", "l2"];
     private static readonly JsonSerializerOptions SnakeJson = new() { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
     /// <summary>The lab: CLOCKTAIL_LAB_EXE, or clocktail-lab.exe beside this server (setup installs them together).</summary>
@@ -38,10 +38,11 @@ public sealed partial class TuningTools
         "and spread per order), latency (a pointer chase: ns per DRAM round trip). Any wrong bit, wrong chain end or dead " +
         "context fails it; while a trial is in force the failure is recorded as its crash and the daily profile goes back on. " +
         "Memory runs are kept per memory offset and compared with the last at the same offset and buffer: a drop is the " +
-        "memory retrying (ST02). It says when other work shared the GPU (a local AI model, a game): then its speeds are not " +
-        "the card's alone. Blocks for the run's length.")]
+        "memory retrying (ST02). It says when other work shared the GPU (over 4 GiB of others' video memory, over half busy " +
+        "before the load or over 10 % just after it, with the clocks still up: a local AI model, a game, a screen saver " +
+        "drawing): then its speeds are not the card's alone. Blocks for the run's length.")]
     public string LabTest(
-        [Description("Phases, comma-separated: burn, light, pulse, memory, latency (default all five).")] string phases = "burn,pulse,light,memory,latency",
+        [Description("Phases, comma-separated: burn, light, pulse, memory, latency, l2 (the crossbar: a 32 MiB region walked over and over; default the first five).")] string phases = "burn,pulse,light,memory,latency",
         [Description("Run length in seconds, 10..600 (default 60), split evenly between the phases.")] int seconds = 60,
         [Description("Steer burn to this board power, W (default: no steering, every thread).")] double? targetW = null,
         [Description("Light: one thread in this many (default 64: 64 SMs busy).")] int lightDiv = 64,
@@ -106,7 +107,9 @@ public sealed partial class TuningTools
         var reasons = lab is { } l2 && l2.TryGetProperty("reasons", out var rs) ? rs.EnumerateArray().Select(x => x.GetString() ?? "").ToList() : [];
         double? busy = lab is { } l3 && l3.TryGetProperty("busy_before_pct", out var bb) && bb.ValueKind == JsonValueKind.Number ? bb.GetDouble() : null;
         double? others = lab is { } l6 && l6.TryGetProperty("others_vram_mib", out var ov) && ov.ValueKind == JsonValueKind.Number ? ov.GetDouble() : null;
-        bool shared = others > 4096 || busy > 50;
+        double? busyAfter = lab is { } l7 && l7.TryGetProperty("busy_after_pct", out var ba) && ba.ValueKind == JsonValueKind.Number ? ba.GetDouble() : null;
+        bool shared = lab is { } l8 && l8.TryGetProperty("shared", out var sh) && sh.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? sh.GetBoolean() : others > 4096 || busy > 50 || busyAfter > 10;
         bool failed = resets > 0 || hung || labVerdict == "fail" || !hot && code is not (0 or 4 or 5);
         string verdict = resets > 0 ? $"driver reset ({resets}) during the run"
             : hung ? $"the lab did not finish within {seconds + grace + 30} s: a hang"
@@ -149,7 +152,7 @@ public sealed partial class TuningTools
             reasons,
             exit_code = code,
             driver_resets = resets,
-            shared = shared ? $"other programs held {others:0} MiB of video memory and kept the GPU {busy:0} % busy before the run (a local AI model, a game): speeds are not the card's alone; bits are judged all the same" : null,
+            shared = shared ? $"other programs held {others:0} MiB of video memory and kept the GPU {busy:0} % busy before the run and {busyAfter:0} % after (a local AI model, a game, a screen saver drawing): speeds are not the card's alone; bits are judged all the same" : null,
             phases = lab is { } l4 && l4.TryGetProperty("phases", out var ph) ? ph : (JsonElement?)null,
             buffer_mib = lab is { } l5 && l5.TryGetProperty("buffer_mib", out var bmb) ? bmb.GetInt64() : (long?)null,
             card = new
@@ -220,13 +223,16 @@ public sealed partial class TuningTools
         "the daily profile goes back on at the end, nothing is kept. CUDA work alone ran in P1 on the reference card (Boost Lock " +
         "did not change that) and the memory offset is a P0 offset, so each step checks NVML's memory clock rose with the " +
         "offset: if it did not, the sweep stops and says the offset was not in force. Needs an open session " +
-        "(begin_session) with no trial in force, and an otherwise idle GPU (close games and local AI models). Follow it with " +
+        "(begin_session) with no trial in force, and an otherwise idle GPU (close games and local AI models; a run another " +
+        "program shared, a screen saver drawing too, is measured again every 30 s for up to 10 minutes). Follow it with " +
         "lab_status; lab_stop ends it. Tell the person first: it raises the memory past what has been tested.")]
     public string TuneMemory(
         [Description("The highest memory offset to try, MHz.")] int toMhz,
         [Description("MHz per step, 25..100 (default 50).")] int stepMhz = 50,
         [Description("The first offset, MHz (default the daily one on the card).")] int? fromMhz = null,
-        [Description("Seconds the lab measures each step, 30..300 (default 60).")] int seconds = 60) => Guard(() =>
+        [Description("Seconds the lab measures each step, 30..300 (default 60).")] int seconds = 60,
+        [Description("true: a slower step does not stop the sweep, only a failure does, so it shows the whole trend of " +
+            "bandwidth and latency up to toMhz (up to 2000 MHz past the first offset); the best is still the step before the first slower one.")] bool trend = false) => Guard(() =>
     {
         if (stepMhz is < 25 or > 100) throw new ArgumentException("stepMhz is 25..100");
         if (seconds is < 30 or > 300) throw new ArgumentException("seconds is 30..300");
@@ -235,19 +241,19 @@ public sealed partial class TuningTools
         int daily = p0.DeltaKhz / 1000, from = fromMhz ?? daily;
         if (from * 1000 < p0.MinKhz || toMhz * 1000 > p0.MaxKhz) throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000}..{p0.MaxKhz / 1000} MHz");
         if (toMhz <= from) throw new ArgumentException($"toMhz must be above the first offset ({from} MHz)");
-        if (toMhz - from > 1000) throw new ArgumentException("a sweep covers at most 1000 MHz");
+        if (toMhz - from > (trend ? 2000 : 1000)) throw new ArgumentException($"a sweep covers at most {(trend ? 2000 : 1000)} MHz");
         if (Math.Abs(from - daily) > 250) throw new ArgumentException($"the first offset is at most 250 MHz from the daily one ({daily} MHz)");
 
         var (job, dir, detached) = StartJob(exe, "sweep", "sweep-memory", new
         {
             stable_id = card.StableId, pci = card.PciBusId, curve = VfOffsets.Encode(look.Curve.Offsets()), daily_mhz = daily,
-            from_mhz = from, to_mhz = toMhz, step_mhz = stepMhz, seconds, warmup_seconds = 60, grace_seconds = 45,
+            from_mhz = from, to_mhz = toMhz, step_mhz = stepMhz, seconds, warmup_seconds = 60, grace_seconds = 45, trend,
         });
         int steps = (toMhz - from) / stepMhz + 1;
         card.Broker(BrokerRequest.OpExperiment, "note", string.Create(CultureInfo.InvariantCulture, $"tune_memory started: {from:+0;-0;0} → {toMhz:+0;-0;0} MHz in {stepMhz} MHz steps, {seconds} s each ({job})"));
         return Out(new
         {
-            started = true, job, dir, from_mhz = from, to_mhz = toMhz, step_mhz = stepMhz, steps,
+            started = true, job, dir, from_mhz = from, to_mhz = toMhz, step_mhz = stepMhz, steps, trend,
             minutes_at_most = Math.Ceiling((60 + steps * (seconds + 20)) / 60.0),
             detached = detached ? null : StaysInJob,
             next = "lab_status to follow it (each step adds a line); lab_stop ends it. The daily profile goes back on at the end; nothing is kept without the person",
@@ -292,18 +298,20 @@ public sealed partial class TuningTools
     }
 
     [McpServerTool(Name = "tune_uncore", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Start the uncore tuner, which runs by itself in the background (about an hour; it carries on when the agent goes " +
+        "Start the uncore tuner, which runs by itself in the background (about 1 min 45 s a comparison at 20 s runs, 18 minutes on the reference card; it carries on when the agent goes " +
         "away where its host allows): from the settings on the card, one axis at a time, one step at a time, each candidate " +
         "a trial through the service compared A B B A against the best so far by the lab: L2 bandwidth (a 32 MiB region walked " +
         "over and over: the crossbar XBAR clocks), DRAM bandwidth, and the memory phase's core clock. A candidate is kept only " +
         "when L2 bandwidth rose in both pairs and by 0.5 % or more, DRAM bandwidth did not fall and the core did not fall 1 % " +
         "(5 % is the cliff: MSVDD at its floor pins it near 1610 MHz). Axes in order: XBAR's offset, each step with the demand " +
         "adjust_xbar's rule asks for (above +250 MHz +20 mV, above +300 +50 mV; more where a step still hits the cliff), the " +
-        "XBAR/core clock ratio (its 0.9 x core floor), MSVDD's REL (up to +20 mV; its reliability limit is XBAR's ceiling), in " +
-        "rounds: an axis runs again when another has moved the best since. An axis stops at a " +
+        "XBAR/core clock ratio (its 0.9 x core floor), MSVDD's REL (up to +20 mV; its reliability limit is XBAR's ceiling), then " +
+        "the ratio and MSVDD a step each together (XBAR's window up as a whole: on the reference card neither alone moved it), " +
+        "in rounds: an axis runs again when another has moved the best since. An axis stops at a " +
         "failure (recorded as its trial's crash) or two candidates in a row that are not faster. The daily profile goes back " +
         "on at the end; nothing is kept: lab_status names the best setting to try. Needs an open session (begin_session) with " +
-        "no trial in force, and the GPU to itself. On the reference card XBAR +300 with +20 mV made Blender 6-7 % faster; a " +
+        "no trial in force, and the GPU to itself (a run another program shared, a screen saver drawing too, is measured again " +
+        "every 30 s for up to 10 minutes). On the reference card XBAR +300 with +20 mV made Blender 6-7 % faster; a " +
         "short check of this tuner found +2.8 % L2 at MSVDD REL +10 mV, ratio 0.925, XBAR +300 / +20 mV (manual xbar-msvdd); " +
         "games not measured. Tell the person first: it raises voltages and clocks past their daily ones.")]
     public string TuneUncore(
@@ -317,7 +325,12 @@ public sealed partial class TuningTools
         int xbarMax = Math.Min(xbarMaxMhz, Math.Min(xbarTop, MaxXbarMhz));
         if (xbarMax <= xbarKhz / 1000) throw new ArgumentException($"xbarMaxMhz must be above the XBAR offset on the card ({xbarKhz / 1000} MHz)");
         uint ratioRaw = card.WithDriver(ClockRatio.Read).Raw;
-        int relMv = (look.Msvdd ?? throw new InvalidOperationException("the MSVDD rail is unreadable")).Offsets.RelUv / 1000;
+        var msvdd = look.Msvdd ?? throw new InvalidOperationException("the MSVDD rail is unreadable");
+        int relMv = msvdd.Offsets.RelUv / 1000;
+        // ALT's limit above REL's with no offsets: a REL offset past it goes on with ALT raised by the rest (the rail's top is
+        // the lowest of the two). Only while ALT holds no offset of its own.
+        int? altGapMv = msvdd.Limits.AltOpUv != 0 && msvdd.Offsets.AltUv == 0
+            ? (int)(((long)msvdd.Limits.AltOpUv - msvdd.Offsets.AltUv - ((long)msvdd.Limits.RelUv - msvdd.Offsets.RelUv)) / 1000) : null;
         var start = new { xbar_mhz = xbarKhz / 1000, demand_mv = demandUv / 1000, ratio_raw = ratioRaw, msvdd_rel_mv = relMv };
         var (job, dir, detached) = StartJob(exe, "uncore", "tune-uncore", new
         {
@@ -325,7 +338,7 @@ public sealed partial class TuningTools
             xbar_max_mhz = xbarMax, xbar_step_mhz = 50, demand_max_mv = MaxVdemandMv, demand_step_mv = 10,
             cliff_mhz = XbarCliffMhz, cliff_demand_mv = XbarCliffDemandMv, high_mhz = XbarHighMhz, high_demand_mv = XbarHighDemandMv,
             ratio_max = 0.95, ratio_step = 0.025, msvdd_rel_max_mv = MsvddRelMaxMv, msvdd_rel_step_mv = 10,
-            seconds, warmup_seconds = 60, grace_seconds = 45,
+            seconds, warmup_seconds = 60, grace_seconds = 45, msvdd_alt_gap_mv = altGapMv,
         });
         card.Broker(BrokerRequest.OpExperiment, "note", string.Create(CultureInfo.InvariantCulture,
             $"tune_uncore started from XBAR {xbarKhz / 1000:+0;-0;0} MHz / {demandUv / 1000:+0;-0;0} mV, ratio {ratioRaw / 65536.0:0.0000}, MSVDD REL {relMv:+0;-0;0} mV; XBAR up to {xbarMax:+0} MHz ({job})"));

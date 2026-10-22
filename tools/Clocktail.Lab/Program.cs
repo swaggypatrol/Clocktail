@@ -35,13 +35,18 @@ try
             using var cu = CudaApi.Load();
             int ordinal = Ordinal(cu, O("gpu-pci"));
             using var sampler = new NvmlSampler(cu.DevicePciBusId(cu.Device(ordinal)));
-            // What else is using the GPU before the lab allocates: utilization over a second (the median of five looks: one
-            // look at 100 % is the tail of the run before, the work of a moment), and the video memory others hold. The
-            // buffer never takes more than is free: WDDM lets CUDA allocate past the card and pages the rest to system
-            // memory (a 21.6 GiB buffer beside a 30 GiB llama-server took 10 s a pass instead of 30 ms).
-            var looks = new List<double>();
-            for (int i = 0; i < 5; i++) { looks.Add(sampler.Read(0, -1).UtilPct ?? 0); Thread.Sleep(200); }
-            double busy = looks.Order().ElementAt(looks.Count / 2);
+            // What else is using the GPU before the lab allocates, and again after its load (work that started during the run,
+            // a screen saver): utilization over a second, the median of five looks (one look at 100 % is the tail of the run
+            // before, the work of a moment), and the video memory others hold. The buffer never takes more than is free:
+            // WDDM lets CUDA allocate past the card and pages the rest to system memory (a 21.6 GiB buffer beside a 30 GiB
+            // llama-server took 10 s a pass instead of 30 ms).
+            double Busy()
+            {
+                var looks = new List<double>();
+                for (int i = 0; i < 5; i++) { looks.Add(sampler.Read(0, -1).UtilPct ?? 0); Thread.Sleep(200); }
+                return looks.Order().ElementAt(looks.Count / 2);
+            }
+            double busy = Busy();
             var (vramUsed, vramTotal) = sampler.Vram() ?? (0UL, 0UL);
             ulong cap = (ulong)(D("mem-cap-mib", 0) * (1 << 20));
             if (vramTotal > 0)
@@ -56,8 +61,10 @@ try
             var runner = new LabRunner(cfg, engine, sampler, log: Console.Error.WriteLine);
             var results = runner.Run(cts.Token);
             var (verdict, reasons) = LabRunner.Judge(results, phases.Count);
-            var r = new LabResult(engine.Name, engine.PciBusId, engine.MemoryBufferBytes >> 20, engine.SmCount, started, DateTime.UtcNow, results, verdict, reasons, busy,
-                vramTotal > 0 ? vramUsed >> 20 : null);
+            var finished = DateTime.UtcNow;
+            Thread.Sleep(1000);   // the utilization window past the lab's own last launch
+            var r = new LabResult(engine.Name, engine.PciBusId, engine.MemoryBufferBytes >> 20, engine.SmCount, started, finished, results, verdict, reasons, busy,
+                vramTotal > 0 ? vramUsed >> 20 : null, Busy());
             string json = JsonSerializer.Serialize(r, LabJson.Options);
             if (O("json") is { } path) File.WriteAllText(path, json); else Console.WriteLine(json);
             return r.ExitCode;

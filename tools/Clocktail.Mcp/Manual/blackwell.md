@@ -30,7 +30,7 @@ Stock on the reference card: **MSVDD REL is -50 mV** (not 0), so MSVDD MAX is 10
 
 Ceilings Clocktail holds and you must respect:
 - No raise may push a rail's MAX above min(the domain's own max, **1150 mV**). Hardware already above it (stock NVVDD OV is 1200 mV) may stay or go down.
-- REL above 0 is past NVIDIA's own reliability limit. REL +20 on MSVDD tops out at 1115 mV unless ALT/OP is raised too.
+- REL above 0 is past NVIDIA's own reliability limit. REL +20 on MSVDD tops out at 1115 mV unless ALT/OP is raised too: `adjust_msvdd` raises ALT with REL past that (and lowers it again with REL), up to REL +50 / ALT +30 = 1145 mV, under the rail's 1150 mV ceiling the service enforces.
 - "Voltage boost" percentages (`set_voltage_boost`) had no measurable effect on this card at 1 % and 10 %. Do not sell them as a feature.
 - `adjust_nvvdd` and `adjust_msvdd` move these offsets; `card_settings` shows each slot and the MAX it gives.
 

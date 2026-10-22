@@ -57,12 +57,18 @@ public sealed class PhaseResult
 }
 
 public sealed record LabResult(string Device, string Pci, ulong BufferMib, int SmCount, DateTime StartedUtc, DateTime FinishedUtc,
-    IReadOnlyList<PhaseResult> Phases, string Verdict, IReadOnlyList<string> Reasons, double? BusyBeforePct = null, ulong? OthersVramMib = null)
+    IReadOnlyList<PhaseResult> Phases, string Verdict, IReadOnlyList<string> Reasons, double? BusyBeforePct = null, ulong? OthersVramMib = null,
+    double? BusyAfterPct = null)
 {
     /// <summary>Other work shares the GPU, so speeds (bandwidth, latency, Gflop/s) are not the card's alone: other programs held
-    /// over 4 GiB of video memory before the lab started (a local AI model, a game; the desktop holds 1-2), or kept it over
-    /// half busy (the desktop alone read ~22 % on the reference card). Bits are judged all the same.</summary>
-    public bool Shared => OthersVramMib > 4096 || BusyBeforePct > 50;
+    /// over 4 GiB of video memory before the lab started (a local AI model, a game; the desktop holds 1-2), kept it over half
+    /// busy before the load, or over <see cref="BusyAfterPct"/>'s 10 % just after it. Utilization is time, so it reads by the
+    /// clock the GPU runs at: on the reference card the idle desktop read 12-15 % at idle clocks before a run and 2-3 % just
+    /// after one, with the clocks still up; Windows' Mystify screen saver read 21-25 % there and cost the L2 test 19 % and
+    /// DRAM 21 %. Bits are judged all the same.</summary>
+    public bool Shared => OthersVramMib > 4096 || BusyBeforePct > BusyBeforeMax || BusyAfterPct > BusyAfterMax;
+
+    public const double BusyBeforeMax = 50, BusyAfterMax = 10;
 
     public const string Pass = "pass", Fail = "fail", Inconclusive = "inconclusive";
     public int ExitCode => Verdict switch { Pass => 0, Fail => 4, _ => 5 };

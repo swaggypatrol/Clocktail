@@ -11,8 +11,10 @@ namespace Clocktail.Lab;
 /// <summary>What tune_memory asks for. CUDA work alone ran in P1 on the reference card, also with Boost Lock held (2026-10-21),
 /// and the memory offset is a P0 offset: each step checks the memory clock rose with the offset, so an offset that is not in
 /// force while the lab runs stops the sweep instead of misleading it.</summary>
+/// Trend: a slower step does not stop the sweep (only a failure, a shared GPU or an offset not in force does), so it shows
+/// the whole curve of bandwidth and latency against the offset; the best is still the step before the first slower one.
 public sealed record SweepSpec(string StableId, string Pci, string Curve, int DailyMhz, int FromMhz, int ToMhz, int StepMhz,
-    int Seconds = 60, int WarmupSeconds = 60, int GraceSeconds = 45);
+    int Seconds = 60, int WarmupSeconds = 60, int GraceSeconds = 45, bool Trend = false);
 
 /// <summary>One step of the sweep: the offset, how the lab judged it, and the numbers the stop rules read.</summary>
 public sealed record SweepStep(int OffsetMhz, string Verdict, double? Gbps, double? LatencyNs, double? MemMhz, double? TempP50,
@@ -55,7 +57,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
         var last = steps[^1];
         if (last.Verdict != LabResult.Pass) return last.Detail ?? $"the step {last.Verdict}";
         if (last.Shared)
-            return Inv($"other work shared the GPU before the step ({last.OthersVramMib} MiB of video memory, {last.BusyBeforePct:0} % busy): its speed is not the memory's alone; close it and run again");
+            return Inv($"other work kept sharing the GPU at this step for {SharedWaitMinutes} minutes ({last.OthersVramMib} MiB of video memory, {last.BusyBeforePct:0} % busy): its speed is not the memory's alone; close it (a screen saver too) and run again");
         if (steps.Count < 2) return null;
         var prev = steps[^2];
         // NVML's memory clock follows the offset 1:1 (13801 → 14159 MHz at +358 on the reference card). One that did not move
@@ -103,7 +105,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 return Finish(SweepStatus.Failed, "a trial is in force: back_to_daily (or keep_as_daily) first, so the sweep starts from the daily profile", null);
 
             Save(SweepStatus.Running, null, null, $"warming the memory for {spec.WarmupSeconds} s at the daily offset");
-            var warm = Measure(spec.WarmupSeconds, "memory", null);
+            var warm = MeasureAlone(spec.WarmupSeconds, "memory", null, log);
             if (warm.Verdict != LabResult.Pass)
                 return Finish(SweepStatus.Failed, $"the warm-up at the daily offset ({spec.DailyMhz:+0;-0;0} MHz) did not pass: {string.Join("; ", warm.Reasons)}", null);
             _bufferMib = warm.BufferMib;
@@ -120,7 +122,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 }
                 Save(SweepStatus.Running, offset, null, $"measuring {offset:+0;-0;0} MHz for {spec.Seconds} s");
                 var started = DateTime.UtcNow;
-                var r = Measure(spec.Seconds, "memory,latency", _bufferMib);
+                var r = MeasureAlone(spec.Seconds, "memory,latency", _bufferMib, log);
                 int? resets = OperatingSystem.IsWindows() ? TryCount(started) : null;
                 var step = Step(offset, r, resets);
                 _steps.Add(step);
@@ -139,9 +141,11 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 if (trial) Broker("stable", $"tune_memory: {line}");
                 // Shared GPU or an offset not in force: the step says nothing about the memory, so there is no result.
                 bool unjudged = step.Shared || signal?.Contains("not in force", StringComparison.Ordinal) == true;
-                if (signal != null) return Finish(unjudged ? SweepStatus.Failed : SweepStatus.Done, $"{offset:+0;-0;0} MHz: {signal}", offset);
+                if (signal != null && (unjudged || !spec.Trend)) return Finish(unjudged ? SweepStatus.Failed : SweepStatus.Done, $"{offset:+0;-0;0} MHz: {signal}", offset);
             }
-            return Finish(SweepStatus.Done, $"reached {spec.ToMhz:+0;-0;0} MHz with nothing slower", null);
+            return Finish(SweepStatus.Done, _steps.Any(s => s.Signal != null)
+                ? Inv($"reached {spec.ToMhz:+0;-0;0} MHz (the trend: the first slower step was {_steps.First(s => s.Signal != null).OffsetMhz:+0;-0;0} MHz)")
+                : $"reached {spec.ToMhz:+0;-0;0} MHz with nothing slower", null);
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {

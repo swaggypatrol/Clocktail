@@ -17,15 +17,32 @@ public sealed record UncoreSetting(int XbarMhz, int DemandMv, uint RatioRaw, int
 /// What tune_uncore asks for: the card, its curve, where the settings are now, and the limits. The demand rule is
 /// adjust_xbar's (measured on the reference card): above CliffMhz of XBAR offset the demand must be CliffDemandMv or more,
 /// above HighMhz HighDemandMv, or memory-bound work drops MSVDD to its floor and pins the core near 1610 MHz.
+/// MsvddAltGapMv: how far MSVDD's ALT limit sits above its REL limit with no offsets (20 mV on the reference card: 1115
+/// against 1095). The rail's top is the lowest of REL, ALT and OV, so a REL offset past the gap goes on with ALT raised by
+/// the rest, or it would change nothing; null leaves ALT alone. Candidates: a list to compare, each against Start, instead
+/// of the search.
 /// </summary>
 public sealed record UncoreSpec(string StableId, string Pci, string Curve, UncoreSetting Start,
     int XbarMaxMhz = 500, int XbarStepMhz = 50, int DemandMaxMv = 50, int DemandStepMv = 10,
     int CliffMhz = 250, int CliffDemandMv = 20, int HighMhz = 300, int HighDemandMv = 50,
     double RatioMax = 0.95, double RatioStep = 0.025, int MsvddRelMaxMv = 20, int MsvddRelStepMv = 10,
-    int Seconds = 20, int WarmupSeconds = 60, int GraceSeconds = 45)
+    int Seconds = 20, int WarmupSeconds = 60, int GraceSeconds = 45, int? MsvddAltGapMv = null,
+    IReadOnlyList<UncoreSetting>? Candidates = null)
 {
     /// <summary>The least voltage demand an XBAR offset needs.</summary>
     public int Needed(int xbarMhz) => xbarMhz > HighMhz ? HighDemandMv : xbarMhz > CliffMhz ? CliffDemandMv : 0;
+
+    /// <summary>MSVDD's ALT offset a setting goes on with (null: ALT is left alone).</summary>
+    public int? AltMv(UncoreSetting s) => MsvddAltGapMv is { } gap ? Math.Max(0, s.MsvddRelMv - gap) : null;
+
+    /// <summary>Why a setting is outside the limits or the demand rule; null when it may be tried.</summary>
+    public string? Outside(UncoreSetting s) =>
+        s.XbarMhz > XbarMaxMhz ? $"XBAR past +{XbarMaxMhz} MHz"
+        : s.DemandMv > DemandMaxMv ? $"demand past +{DemandMaxMv} mV"
+        : s.DemandMv < Needed(s.XbarMhz) ? $"XBAR +{s.XbarMhz} MHz needs +{Needed(s.XbarMhz)} mV of demand (the cliff)"
+        : s.RatioRaw > (uint)Math.Round(RatioMax * 65536) ? FormattableString.Invariant($"the ratio past {RatioMax:0.000}")
+        : s.MsvddRelMv > MsvddRelMaxMv ? $"MSVDD REL past +{MsvddRelMaxMv} mV"
+        : null;
 }
 
 /// <summary>One run of the comparison, as the rules read it: the L2 (crossbar) bandwidth, DRAM bandwidth, the core clock in
@@ -52,10 +69,10 @@ public sealed record Comparison(string Stage, UncoreSetting A, UncoreSetting B, 
 /// <summary>
 /// The uncore search, without the card: safe-ratchet coordinate ascent from the settings on the card, one axis at a time,
 /// one step at a time, a candidate kept only when the A B B A comparison says it is faster. XBAR first, each step with the
-/// voltage demand the rule asks for it and more where it hits the cliff, then the clock ratio, then MSVDD's REL, in rounds:
-/// the axes hold each other (XBAR runs between the ratio's floor, 0.9 x the core, and the clock MSVDD's reliability limit
-/// allows, which on the reference card is what pins it at the daily +250 MHz), so an axis runs again when another one has
-/// moved the best since it last ran. An axis stops at a failure or at two candidates in a row that are not faster; an
+/// voltage demand the rule asks for it and more where it hits the cliff, then the clock ratio, then MSVDD's REL, then the
+/// two together, in rounds: the axes hold each other (XBAR runs between the ratio's floor, 0.9 x the core, and the clock
+/// MSVDD's reliability limit allows, ~30 MHz apart on the reference card at the daily +250 MHz, so neither alone moves it
+/// much), and an axis runs again when another one has moved the best since it last ran. An axis stops at a failure or at two candidates in a row that are not faster; an
 /// unjudged comparison (a shared GPU, the incumbent itself failing) or lab_stop ends the search.
 /// </summary>
 public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, UncoreSetting, Comparison> compare, Func<bool> stopAsked)
@@ -65,7 +82,7 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
     public string? Ended { get; private set; }
     public string Stage { get; private set; } = "xbar";
 
-    /// <summary>The most rounds over the three axes; each after the first runs only the axes something has moved since.</summary>
+    /// <summary>The most rounds over the axes; each after the first runs only the axes something has moved since.</summary>
     public const int Rounds = 4;
 
     public void Run()
@@ -74,7 +91,7 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
         for (int round = 0; round < Rounds && Ended == null; round++)
         {
             bool ran = false;
-            foreach (var (axis, climb) in new (string, Action)[] { ("xbar", Xbar), ("ratio", Ratio), ("msvdd", Msvdd) })
+            foreach (var (axis, climb) in new (string, Action)[] { ("xbar", Xbar), ("ratio", Ratio), ("msvdd", Msvdd), ("window", Window) })
             {
                 if (Ended != null) break;
                 if (after.TryGetValue(axis, out var last) && last == Best) continue;
@@ -144,10 +161,41 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
         Climb(s => s.RatioRaw + step <= top ? s with { RatioRaw = s.RatioRaw + step } : null);
     }
 
+    /// <summary>The list instead of the search: each candidate against the start, A B B A, in order; one outside the limits is
+    /// skipped. The best is the fastest that was better; an unjudged comparison or lab_stop ends the list.</summary>
+    public void RunList(IEnumerable<UncoreSetting> candidates)
+    {
+        Stage = "list";
+        double bestGain = 0;
+        foreach (var c in candidates)
+        {
+            if (Ended != null) break;
+            if (spec.Outside(c) is { } why)
+            {
+                Log.Add(new Comparison(Stage, spec.Start, c, Comparison.Failed, $"not tried: {why}", null, null, null, []));
+                continue;
+            }
+            var r = compare(Stage, spec.Start, c);
+            Log.Add(r);
+            if (r.Outcome == Comparison.Better && r.L2GainPct is { } g && g > bestGain) { bestGain = g; Best = c; }
+            if (r.Outcome == Comparison.Unjudged) Ended = r.Why;
+            if (Ended == null && stopAsked()) Ended = "stopped (lab_stop)";
+        }
+    }
+
     private void Msvdd()
     {
         Stage = "msvdd";
         Climb(s => s.MsvddRelMv + spec.MsvddRelStepMv <= spec.MsvddRelMaxMv ? s with { MsvddRelMv = s.MsvddRelMv + spec.MsvddRelStepMv } : null);
+    }
+
+    /// <summary>XBAR's window up as a whole: the ratio (its floor) and MSVDD's REL (its ceiling) a step each, together.</summary>
+    private void Window()
+    {
+        Stage = "window";
+        uint step = (uint)Math.Round(spec.RatioStep * 65536), top = (uint)Math.Round(spec.RatioMax * 65536);
+        Climb(s => s.RatioRaw + step <= top && s.MsvddRelMv + spec.MsvddRelStepMv <= spec.MsvddRelMaxMv
+            ? s with { RatioRaw = s.RatioRaw + step, MsvddRelMv = s.MsvddRelMv + spec.MsvddRelStepMv } : null);
     }
 
     /// <summary>
@@ -162,7 +210,7 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
             if (b.Verdict != LabResult.Pass) return (Comparison.Failed, b.Detail ?? $"the candidate's run {b.Verdict}", null, null, null);
         foreach (var a in new[] { a1, a2 })
             if (a.Verdict != LabResult.Pass) return (Comparison.Unjudged, "the incumbent's own run did not pass: " + (a.Detail ?? a.Verdict), null, null, null);
-        if (new[] { a1, b1, b2, a2 }.Any(r => r.Shared)) return (Comparison.Unjudged, "other work shared the GPU: speeds are not the card's alone; close it and run again", null, null, null);
+        if (new[] { a1, b1, b2, a2 }.Any(r => r.Shared)) return (Comparison.Unjudged, $"other work kept sharing the GPU for {LabJob.SharedWaitMinutes} minutes: speeds are not the card's alone; close it (a screen saver too) and run again", null, null, null);
         if (new[] { a1, b1, b2, a2 }.Any(r => r.L2Gbps is not > 0 || r.DramGbps is not > 0 || r.MemSmMhz is not > 0))
             return (Comparison.Unjudged, "a reading is missing", null, null, null);
         double r1 = b1.L2Gbps!.Value / a1.L2Gbps!.Value, r2 = b2.L2Gbps!.Value / a2.L2Gbps!.Value;
@@ -173,7 +221,7 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
         if (core < -CoreFall * 100)
             return (Comparison.NotBetter, Inv($"the memory phase's core clock fell {core:0.0} %: the cliff (MSVDD at its floor pins the core near 1610 MHz)"), d.Item1, d.Item2, d.Item3);
         if (core < -CoreLoss * 100)
-            return (Comparison.NotBetter, Inv($"the memory phase's core clock fell {core:0.00} %: XBAR could not follow the ratio, and a slower core costs compute-bound work more than the uncore gains"), d.Item1, d.Item2, d.Item3);
+            return (Comparison.NotBetter, Inv($"the memory phase's core clock fell {core:0.00} %: a slower core costs compute-bound work more than the uncore gains"), d.Item1, d.Item2, d.Item3);
         if (dram < -DramFall * 100)
             return (Comparison.NotBetter, Inv($"DRAM bandwidth fell {dram:0.00} %"), d.Item1, d.Item2, d.Item3);
         if (r1 > 1 + Eps / 2 && r2 > 1 + Eps / 2 && l2 >= Eps * 100)
@@ -221,13 +269,13 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
                 return Finish(SweepStatus.Failed, "a trial is in force: back_to_daily (or keep_as_daily) first, so the tuner starts from the daily profile");
 
             Save(SweepStatus.Running, null, $"warming the card for {spec.WarmupSeconds} s at {spec.Start}");
-            var warm = Measure(spec.WarmupSeconds, "l2,memory", null);
+            var warm = MeasureAlone(spec.WarmupSeconds, "l2,memory", null, log);
             if (warm.Verdict != LabResult.Pass) return Finish(SweepStatus.Failed, $"the warm-up at the daily settings did not pass: {string.Join("; ", warm.Reasons)}");
             if (warm.Shared) return Finish(SweepStatus.Failed, "other work shared the GPU during the warm-up: close it and run again");
             _bufferMib = warm.BufferMib;
 
             var search = new UncoreSearch(spec, Compare, () => StopAsked);
-            search.Run();
+            if (spec.Candidates is { Count: > 0 } list) search.RunList(list); else search.Run();
             _best = search.Best;
             if (search.Ended != null) return Finish(search.Ended.StartsWith("stopped", StringComparison.Ordinal) ? SweepStatus.Stopped : SweepStatus.Failed, search.Ended);
             return Finish(SweepStatus.Done, _best == spec.Start ? "nothing beat the daily settings" : $"best {_best}");
@@ -246,17 +294,12 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         var runs = new List<UncoreRun>();
         UncoreRun Run(UncoreSetting s)
         {
-            for (int attempt = 0; ; attempt++)
-            {
-                var started = DateTime.UtcNow;
-                var r = Measure(spec.Seconds, "l2,memory", _bufferMib);
-                int? resets = OperatingSystem.IsWindows() ? Resets(started) : null;
-                var run = UncoreRun.Of(r, resets);
-                // A moment of other work (a window drawn, a screen saver) is measured again once before it ends the search.
-                if (run.Shared && run.Verdict == LabResult.Pass && attempt == 0) { log?.Invoke($"other work shared the GPU during a run at {s}: measuring it again"); Thread.Sleep(5000); continue; }
-                runs.Add(run);
-                return run;
-            }
+            var started = DateTime.UtcNow;
+            var r = MeasureAlone(spec.Seconds, "l2,memory", _bufferMib, log);
+            int? resets = OperatingSystem.IsWindows() ? Resets(started) : null;
+            var run = UncoreRun.Of(r, resets);
+            runs.Add(run);
+            return run;
         }
         Comparison Done(string outcome, string why, double? l2 = null, double? dram = null, double? core = null)
         {
@@ -294,11 +337,16 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
     /// <summary>The setting on the card as a trial (all four cells, absolute); the service's refusal, or null when it landed.</summary>
     private string? Write(UncoreSetting s)
     {
+        // ALT goes on with every setting when the spec moves it (back to 0 under the gap), so a setting never inherits the
+        // last trial's.
+        var writes = new List<object> { new { kind = "clockratio", key = "msvdd", value = s.RatioRaw.ToString(System.Globalization.CultureInfo.InvariantCulture) } };
+        int? alt = spec.AltMv(s);
+        if (alt is { } a) writes.Add(new { kind = "rails", key = "msvdd", value = Inv($"alt={a * 1000}") });
         var args = new Dictionary<string, object?>
         {
-            ["curve"] = spec.Curve, ["change"] = $"uncore: {s} (tune_uncore)", ["keep_curve"] = true,
+            ["curve"] = spec.Curve, ["change"] = $"uncore: {s}{(alt > 0 ? Inv($" (ALT {alt:+0} mV)") : "")} (tune_uncore)", ["keep_curve"] = true,
             ["xbar_khz"] = s.XbarMhz * 1000, ["xbar_vdemand_uv"] = s.DemandMv * 1000, ["msvdd_rel_uv"] = s.MsvddRelMv * 1000,
-            ["writes"] = new[] { new { kind = "clockratio", key = "msvdd", value = s.RatioRaw.ToString(System.Globalization.CultureInfo.InvariantCulture) } },
+            ["writes"] = writes,
             ["context"] = new[] { "tune_uncore: the lab compares settings A B B A" },
         };
         var r = Broker("try", JsonSerializer.Serialize(args));
@@ -318,7 +366,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         // The daily profile goes back on whatever happened (after a driver reset the service has done it already).
         if (_log.Count > 0) Broker("apply", "tune_uncore finished", BrokerRequest.OpProfile);
         string? next = state == SweepStatus.Done && _best != spec.Start
-            ? Inv($"best {_best}: tell the person; to try it, adjust_xbar to {_best.XbarMhz:+0;-0;0} MHz and {_best.DemandMv:+0;-0;0} mV, set_clock_ratio {_best.Ratio:0.000}, adjust_msvdd to REL {_best.MsvddRelMv:+0;-0;0} mV (each in its own steps), then lab_test, stress_test and their games; keep_as_daily (ask)")
+            ? Inv($"best {_best}: tell the person; to try it, adjust_xbar to {_best.XbarMhz:+0;-0;0} MHz and {_best.DemandMv:+0;-0;0} mV, set_clock_ratio {_best.Ratio:0.000}, adjust_msvdd to REL {_best.MsvddRelMv:+0;-0;0} mV{(spec.AltMv(_best) is > 0 and var alt ? Inv($" and ALT {alt:+0} mV") : "")} (each in its own steps), then lab_test, stress_test and their games; keep_as_daily (ask)")
             : null;
         Save(state, why, null, next);
         log?.Invoke($"{state}: {why}");
