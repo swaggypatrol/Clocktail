@@ -173,16 +173,81 @@ public class LabTests
     }
 
     [Theory]
-    [InlineData(1490, 498, 13901, LabResult.Pass, null, "bandwidth fell")]
-    [InlineData(1520, 510, 13901, LabResult.Pass, null, "latency rose")]
     [InlineData(1510, 498, 13851, LabResult.Pass, null, "did not follow the offset")]
     [InlineData(1510, 498, 13901, LabResult.Fail, null, "a bad word")]
     [InlineData(1510, 498, 13901, LabResult.Pass, 30000.0, "other work kept sharing the GPU")]
-    public void A_slower_failing_or_unjudgeable_step_stops_the_sweep_and_the_best_is_the_one_before(double gbps, double lat, double mem, string verdict, double? othersMib, string why)
+    public void A_failing_or_unjudgeable_step_stops_the_sweep_and_the_best_is_the_one_before(double gbps, double lat, double mem, string verdict, double? othersMib, string why)
     {
         var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(50, 1505, 499, 13851), S(100, gbps, lat, mem, verdict, othersMib) };
         Assert.Contains(why, MemorySweep.Signal(steps));
         Assert.Equal(50, MemorySweep.Best(steps));
+    }
+
+    /// <summary>One slower step is watched, not trusted: bandwidth under the best once, or latency jumping once.</summary>
+    [Theory]
+    [InlineData(1490, 498, "bandwidth -1.0 % under the best")]
+    [InlineData(1520, 510, "latency +2.4 % over the lowest")]
+    public void One_slower_step_is_watched_and_the_sweep_goes_on(double gbps, double lat, string watch)
+    {
+        var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(50, 1505, 498, 13851), S(100, gbps, lat, 13901) };
+        Assert.Null(MemorySweep.Signal(steps));
+        Assert.Contains(watch, MemorySweep.Watch(steps));
+    }
+
+    [Fact]
+    public void Bandwidth_under_the_best_twice_in_a_row_stops_the_sweep_and_the_best_is_before_the_first()
+    {
+        var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(50, 1505, 499, 13851), S(100, 1490, 498, 13901), S(150, 1488, 497, 13951) };
+        Assert.Contains("bandwidth stayed under the best step's", MemorySweep.Signal(steps));
+        Assert.Equal(50, MemorySweep.Best(steps));
+    }
+
+    /// <summary>A timing change and then retrying: latency jumps, and instead of falling with the clock it rises again.</summary>
+    [Fact]
+    public void Latency_that_jumps_and_rises_again_stops_the_sweep_and_the_best_is_before_the_jump()
+    {
+        var steps = new List<SweepStep> { S(758, 1734, 463.3, 14559), S(858, 1745, 460.6, 14659), S(958, 1749, 477.7, 14759), S(1058, 1750, 481.0, 14859) };
+        Assert.Contains("latency rose again to 481 ns", MemorySweep.Signal(steps));
+        Assert.Equal(858, MemorySweep.Best(steps));
+    }
+
+    /// <summary>The reference card on 2026-10-22 (XBAR +400 / +50 mV, ratio 0.95, MSVDD REL +50), +358 to +1958 in 100 MHz
+    /// steps, every one free of errors: latency jumped 17 ns at +958 (a timing change) and fell with the clock after it to
+    /// 451.8 ns, under +858's; bandwidth dipped once at +1558 and +1658 was the best yet. Nothing in it is retrying.</summary>
+    [Fact]
+    public void The_reference_cards_sweep_to_1958_runs_through_a_timing_change_and_a_dip()
+    {
+        double[][] data =
+        [
+            [358, 1692.8, 475.2], [458, 1703.8, 471.9], [558, 1713.3, 468.8], [658, 1727.0, 466.0], [758, 1734.4, 463.3],
+            [858, 1744.8, 460.6], [958, 1749.1, 477.7], [1058, 1761.0, 475.3], [1158, 1766.1, 472.3], [1258, 1773.1, 469.7],
+            [1358, 1778.9, 467.1], [1458, 1778.2, 464.4], [1558, 1757.1, 461.8], [1658, 1788.1, 459.1], [1758, 1800.5, 456.7],
+            [1858, 1794.6, 454.1], [1958, 1798.0, 451.8],
+        ];
+        var steps = new List<SweepStep>();
+        var watched = new List<int>();
+        foreach (var d in data)
+        {
+            steps.Add(S((int)d[0], d[1], d[2], 13801 + d[0]));
+            Assert.Null(MemorySweep.Signal(steps));
+            if (MemorySweep.Watch(steps) != null) watched.Add((int)d[0]);
+        }
+        Assert.Equal([958, 1558], watched);
+        Assert.Equal(1958, MemorySweep.Best(steps));
+    }
+
+    /// <summary>The reference card on 2026-10-21 (the daily before: XBAR +250, MSVDD REL 0), +358 to +858 in 50 MHz steps.</summary>
+    [Fact]
+    public void The_reference_cards_sweep_to_858_goes_on_all_the_way()
+    {
+        double[][] data =
+        [
+            [358, 1570.7, 498.7], [408, 1577.8, 497.8], [458, 1586.7, 496.2], [508, 1586.7, 494.9], [558, 1591.5, 493.5],
+            [608, 1598.2, 491.9], [658, 1599.6, 489.8], [708, 1603.0, 488.7], [758, 1608.6, 487.6], [808, 1613.3, 486.4], [858, 1616.2, 484.5],
+        ];
+        var steps = data.Select(d => S((int)d[0], d[1], d[2], 13801 + d[0])).ToList();
+        for (int i = 1; i <= steps.Count; i++) Assert.Null(MemorySweep.Signal(steps.Take(i).ToList()));
+        Assert.Equal(858, MemorySweep.Best(steps));
     }
 
     /// <summary>The reference card's +0/+179/+358: bandwidth flat (the crossbar sets it), latency down. A healthy sweep goes on.</summary>
@@ -194,12 +259,13 @@ public class LabTests
         Assert.Equal(358, MemorySweep.Best(steps));
     }
 
-    /// <summary>Slower than the best step, not just the one before: a slow drift over two steps stops it too.</summary>
+    /// <summary>A slow drift stops it too: latency rising step after step until it is 1 % over the lowest. The drift began at
+    /// +100 (498 → 501), so the best is +50.</summary>
     [Fact]
     public void Latency_drifting_up_from_the_lowest_stops_the_sweep()
     {
         var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(50, 1500, 498, 13851), S(100, 1500, 501, 13901), S(150, 1500, 503.5, 13951) };
         Assert.Contains("over the lowest step's 498", MemorySweep.Signal(steps));
-        Assert.Equal(100, MemorySweep.Best(steps));
+        Assert.Equal(50, MemorySweep.Best(steps));
     }
 }
