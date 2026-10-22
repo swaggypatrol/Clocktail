@@ -314,14 +314,19 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
 
         if (Write(a) is { } wa) return Done(Comparison.Unjudged, $"the service did not write the incumbent: {wa}");
         var a1 = Run(a);
+        // lab_stop kills the measuring child: its run reads as failed, and that is not the candidate's failure.
+        if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
         if (a1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the incumbent's own run did not pass: " + (a1.Detail ?? a1.Verdict));
         if (Write(b) is { } wb) return Done(Comparison.Failed, $"the service refused the candidate: {wb}");
         var b1 = Run(b);
+        if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
         if (b1.Verdict != LabResult.Pass) return Crash(b1);
         var b2 = Run(b);
+        if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
         if (b2.Verdict != LabResult.Pass) return Crash(b2);
         if (Write(a) is { } wa2) return Done(Comparison.Unjudged, $"the service did not write the incumbent back: {wa2}");
         var a2 = Run(a);
+        if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
         var (outcome, why, l2, dram, core) = UncoreSearch.Judge(a1, b1, b2, a2);
         return Done(outcome, why, l2, dram, core);
 

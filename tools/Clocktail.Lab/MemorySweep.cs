@@ -154,7 +154,11 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 return Finish(SweepStatus.Failed, $"the warm-up at the daily offset ({spec.DailyMhz:+0;-0;0} MHz) did not pass: {string.Join("; ", warm.Reasons)}", null);
             _bufferMib = warm.BufferMib;
 
-            for (int offset = spec.FromMhz; offset <= spec.ToMhz; offset += spec.StepMhz)
+            // The steps from FromMhz by StepMhz, and ToMhz itself when the steps do not land on it (+358 by 100 to +3000: +2958, +3000).
+            var offsets = new List<int>();
+            for (int o = spec.FromMhz; o <= spec.ToMhz; o += spec.StepMhz) offsets.Add(o);
+            if (offsets.Count > 0 && offsets[^1] != spec.ToMhz) offsets.Add(spec.ToMhz);
+            foreach (int offset in offsets)
             {
                 if (StopAsked) return Finish(SweepStatus.Stopped, "stopped (lab_stop)", null);
                 bool trial = offset != spec.DailyMhz;
@@ -167,6 +171,8 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 Save(SweepStatus.Running, offset, null, $"measuring {offset:+0;-0;0} MHz for {spec.Seconds} s");
                 var started = DateTime.UtcNow;
                 var r = MeasureAlone(spec.Seconds, "memory,latency", _bufferMib, log);
+                // lab_stop kills the measuring child: its run reads as failed, and that is not the memory's failure.
+                if (StopAsked) return Finish(SweepStatus.Stopped, "stopped (lab_stop)", offset);
                 int? resets = OperatingSystem.IsWindows() ? TryCount(started) : null;
                 var step = Step(offset, r, resets);
                 _steps.Add(step);
