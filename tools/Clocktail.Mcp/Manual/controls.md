@@ -45,6 +45,8 @@ MSVDD feeds the crossbar (XBAR), L2, SYS and Video; it runs at what the core ask
 ## Memory
 - `set_memory_offset mhz`: the GDDR7 P0 offset (250 MHz per call; NVML shows it doubled). The write zeroes the curve's offsets, so the curve is written again right after it in the same trial. Judge by a benchmark as well as `stress_test` (exit code 6 is a data error): past its edge memory retries errors and gets slower before it crashes. Watch `memory_c`. `manual memory`.
 
+- `tune_memory toMhz [stepMhz fromMhz seconds]`: the memory sweep (ST02), each step a trial the lab measures; it runs in the background and stops where the memory gets slower or fails. `lab_status` follows it, `lab_stop` ends it. It keeps nothing. `manual memory`.
+
 ## Fans
 - `set_fan_curve`: the firmware fan curve, three points `degC:duty%`; the last must be 100 % at 88 C or lower. It sets the temperature the curve is tested at: set it before the curve (`manual method`, phase 2).
 - `set_fan_start startC [stopC]`: the zero-RPM band (fans stop under 43 C and start at 50 C on a 5090 FE). Only earlier: a start no later than the curve's first point, stop at least 3 C under the start. A card with stopped fans warms itself at idle until the start temperature; a lower one keeps it cooler.

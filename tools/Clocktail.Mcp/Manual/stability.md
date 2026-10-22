@@ -10,6 +10,12 @@ What nvgwls is and how to run it, why games need 30-60 MHz more margin, what a c
 - `load` under 100: a 250 Hz square wave at that duty. `load=50` ran ~385 W at ~3055 MHz, the curve's top. Use it to test high-voltage points the wall never lets full load reach.
 - Combine with `set_power_limit` / `set_current_limit` to pin it lower down the curve.
 
+## The lab (`lab_test`), a second judge
+- StabilityLab's engine as part of Clocktail: CUDA kernels the driver compiles, every result recomputed and compared bit for bit on the CPU (a chunk must equal the CPU-checked reference chunk byte for byte), every memory word checked, the first bad word named.
+- Phases: `burn` (every thread on an FMA chain; `targetW` steers it to a board power), `light` (one thread in `lightDiv`: few SMs busy, the card climbs to the curve's top: 2910 MHz at ~410 W at stock on the reference card), `pulse` (one short full launch per game-like frame at 30-120 fps), `memory` (five access orders), `latency` (a pointer chase, ~500 ns per round trip at stock).
+- It complements nvgwls: nvgwls covers raster, ray tracing and its own golden images; the lab covers exact arithmetic, every memory word, chosen load shapes and speed. Burn reached ~515 W and ~62 TFLOP/s at stock on the reference card.
+- A failure while a trial is in force is that trial's crash, as with `stress_test`. Other work sharing the GPU (a local AI model, a game) is reported: bits are judged all the same, speeds are not the card's alone.
+
 ## Why games need more margin than the stressor
 Measured, not assumed:
 - Moving the curve down in 15 MHz steps from the nvgwls boundary: "boundary -15" crashed a game (550 W, 915-930 mV, after about a minute); "boundary -30" held.

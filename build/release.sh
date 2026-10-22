@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Builds the release: three self-contained single-file executables, the npm package (the setup genie plus the server
+# Builds the release: four self-contained single-file executables, the npm package (the setup genie plus the server
 # and the service) and a zip for manual installs. Usage: build/release.sh 0.1.0   (output in ./out)
 set -euo pipefail
 ver="${1:?version, e.g. 0.1.0}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="$root/out"
 rm -rf "$out" && mkdir -p "$out/bin"
-for p in src/Clocktail.Broker tools/Clocktail.Mcp src/Clocktail.Cli; do
+for p in src/Clocktail.Broker tools/Clocktail.Mcp tools/Clocktail.Lab src/Clocktail.Cli; do
   dotnet publish "$root/$p" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true \
     -p:EnableCompressionInSingleFile=true -p:DebugType=none -p:Version="$ver" -o "$out/bin" -nologo -v quiet
 done
@@ -28,11 +28,11 @@ for f in LICENSE THIRD_PARTY; do
   curl -fsSL -o "$out/bin/PresentMon-$f.txt" "https://raw.githubusercontent.com/GameTechDev/PresentMon/v$pm_ver/$f.txt"
 done
 
-# npm: the genie ships the server and the service (the CLI stays in the zip).
+# npm: the genie ships the server, the lab beside it and the service (the CLI stays in the zip).
 pkg="$out/npm"
 cp -r "$root/npm" "$pkg"
 mkdir -p "$pkg/dist"
-cp "$out/bin/clocktail-mcp.exe" "$out/bin/Clocktail.Broker.exe" "$out/bin"/PresentMon* "$pkg/dist/"
+cp "$out/bin/clocktail-mcp.exe" "$out/bin/clocktail-lab.exe" "$out/bin/Clocktail.Broker.exe" "$out/bin"/PresentMon* "$pkg/dist/"
 cp "$root/README.md" "$root/LICENSE" "$root/THIRD_PARTY_NOTICES.md" "$pkg/"
 (cd "$pkg" && npm pkg set version="$ver" >/dev/null && npm pack --pack-destination "$out" >/dev/null)
 
