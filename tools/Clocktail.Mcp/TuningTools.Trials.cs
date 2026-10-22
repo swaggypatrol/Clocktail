@@ -177,8 +177,10 @@ public sealed partial class TuningTools
 
     [McpServerTool(Name = "adjust_xbar", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Move XBAR's clock offset and/or its voltage demand (on MSVDD) as a new trial. XBAR is the crossbar between the GPCs, " +
-        "L2 and memory; under load it is held to about 0.9 x the core clock (set_clock_ratio moves that ratio), and about +250 MHz of offset reaches that, after " +
-        "which more offset only lowers the MSVDD voltage it needs. On the reference card (MSVDD REL 0): +250 made Blender 6.3 % " +
+        "L2 and memory; under load it runs between about 0.9 x the core clock (set_clock_ratio moves that ratio) and the clock " +
+        "MSVDD's reliability limit allows (adjust_msvdd's REL, ALT following past +20). At ratio 0.9 and REL 0 about +250 MHz " +
+        "reaches that window and more offset only lowers the MSVDD voltage it needs; with the ratio and REL raised the offset " +
+        "pays further (the reference card: +400 / +50 mV at ratio 0.95, REL +50 made the lab's crossbar test 5.6 % faster than +250 there). On the reference card (MSVDD REL 0): +250 made Blender 6.3 % " +
         "faster than stock, +300 with +20 mV of demand 6-7 %. The cliff: above +250 with no demand, memory-bound work lets " +
         "MSVDD fall to its 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand keeps " +
         "it off up to +300, so above +250 the demand must be +20 mV or more, and above +300 +50 mV (at +400 the memory phase " +
@@ -354,10 +356,12 @@ public sealed partial class TuningTools
     [McpServerTool(Name = "set_clock_ratio", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set XBAR's clock ratio to the core (the driver's NVVDD/MSVDD clock propagation ratio, the original's --xbar-ratio) " +
         "as a new trial. 0.8999 on a 5090 (58976/65536): under load XBAR is held to about 0.9 x the core clock, which is " +
-        "why adjust_xbar stops paying past +250 MHz. A higher ratio lets XBAR follow the core closer (about +29 MHz of XBAR " +
+        "why adjust_xbar stops paying past +250 MHz unless the ratio and MSVDD go up with it. A higher ratio lets XBAR follow the core closer (about +29 MHz of XBAR " +
         "per +0.01 at a 2900 MHz core) and asks MSVDD for the voltage that clock needs, so adjust_xbar's demand rules apply " +
         "to the clock it reaches. On the reference card 0.92 ran XBAR 2595 MHz against a 2850 MHz core at the 600 W wall " +
-        "(2535 / 2865 at stock), MSVDD 980 → 1005 mV; its gain in frames is unmeasured: judge by a benchmark that uses " +
+        "(2535 / 2865 at stock), MSVDD 980 → 1005 mV. Alone it can pull the core down where MSVDD holds XBAR (0.95 at REL 0: " +
+        "the core -3.5 %); with MSVDD REL +50 and XBAR +400 / +50 mV, 0.95 made the lab's crossbar test 5-6 % faster and the " +
+        "memory's bandwidth 7.8 % higher (tune_uncore finds the mix). Its gain in frames is unmeasured: judge by a benchmark that uses " +
         "memory. 0.5..1.0, at most 0.025 per call. keep_as_daily keeps it; back_to_daily, " +
         "end_session and a crash put the daily profile's back.")]
     public string SetClockRatio(

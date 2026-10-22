@@ -47,8 +47,8 @@ Under a tight wall the card throttles faster than an overlay samples: at 450 W, 
 ## NVML says "idle" or "power cap" while I'm gaming. Why?
 On a tuned curve with a flat top, NVML reports gpu_idle at full load. It reports sw_power_cap far under the wall when a power sub-policy (often memory-heavy work) holds the clock. Read board power against the limit instead; `limiter` does.
 
-## Why only +358 on the memory?
-It was carried over from an earlier hand tune and never searched. On the reference it lowered latency 2.4 % and left bandwidth flat. Higher may work on their card; step it and judge each step by a benchmark (`manual method`, phase 6).
+## Why this memory offset?
++358 was carried over from an earlier hand tune: it lowered latency 2.4 % and left bandwidth flat, because the crossbar held it. Once the uncore was raised, the lab swept the reference card's memory error-free to the driver's +3000; bandwidth stopped rising near +1758 and latency kept falling, so it went to +2918, the best of a fine sweep around +2858. Games decide: if one shows artifacts or stutter, step it down (`manual method`, phase 7).
 
 ## Why raise MSVDD? Is that safe?
 NVIDIA ships the 5090's MSVDD 50 mV inside its own reliability limit (REL -50). REL 0 is that limit itself, not past it. It made the crossbar faster and Blender ~2 % faster for ~2 W. REL +20, past NVIDIA's limit, bought ~1 % more; Clocktail goes no further.

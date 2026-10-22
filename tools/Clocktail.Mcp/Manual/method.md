@@ -2,13 +2,14 @@
 How the reference card was tuned to its safe maximum, phase by phase: what to do, what to tell the person, and why the order matters. Follow it from stock.
 
 ## The idea, in one paragraph
-Under heavy load a modern GPU is held by its power limit, not by its clock. At a fixed wall the only way to more clock is less voltage per MHz: a V/F curve that runs each clock at a lower voltage lets the same watts buy a higher point. How far each voltage can go is a property of this one chip, found by stress testing at the temperature the card will actually run at; the game-safe curve sits 30-60 MHz under what the stressor passes. The wall and the temperature decide where on the curve the card runs, so they are set first. Memory, MSVDD and XBAR come after the curve and are judged by a benchmark, not by a clock.
+Under heavy load a modern GPU is held by its power limit, not by its clock. At a fixed wall the only way to more clock is less voltage per MHz: a V/F curve that runs each clock at a lower voltage lets the same watts buy a higher point. How far each voltage can go is a property of this one chip, found by stress testing at the temperature the card will actually run at; the game-safe curve sits 30-60 MHz under what the stressor passes. The wall and the temperature decide where on the curve the card runs, so they are set first. The uncore (MSVDD, XBAR and XBAR's ratio to the core) and then the memory come after the curve, in that order, and are judged by speed, not by a clock: the lab measures them by itself (`tune_uncore`, `tune_memory`), and a benchmark or a game confirms.
 
 ## Before you start, tell the person
 - Time: one to three evenings. Stress runs need nobody at the keyboard; game checks need them for 5-10 minutes each.
 - Expect a few driver resets: a 30-second freeze or black screen, then the desktop. Harmless; the service puts the daily profile back by itself.
-- What the reference RTX 5090 got: about +200 MHz under the wall at the same power, Blender 6-7 % faster with MSVDD and XBAR. Their chip may do more or less; that is what the testing finds out.
+- What the reference RTX 5090 got: about +200 MHz under the wall at the same power; Blender 6-7 % faster with MSVDD and XBAR's first settings; then, with the ratio and MSVDD raised along with XBAR, the crossbar 5-6 % faster again and the memory's bandwidth 7.8 % higher at the same offset; the memory error-free in the lab up to the driver's +3000, kept at +2918. Their chip may do more or less; that is what the testing finds out.
 - Close other tools that write clocks (MSI Afterburner, NVIDIA App's auto-tune) for the whole process.
+- For the lab's jobs (phases 6 and 7) also close whatever else uses the GPU (a local AI model, a game, a launcher's download) and set the screen saver to none: a screen saver drawing cost the crossbar test 19 % on the reference card. The lab notices and measures again, for up to 10 minutes a run.
 - Case airflow matters more than fan speed: every degree cooler case air is a degree cooler GPU.
 
 ## Phase 0: baseline at stock
@@ -72,22 +73,27 @@ Do: 2-4 of their most demanding games, the heaviest scenes, 5-10 minutes each. B
 - All hold: `keep_as_daily` (ask).
 Why: a stress pass is necessary, not sufficient. Their own games are the final judge.
 
-## Phase 6: memory
-Do: `set_memory_offset` in steps of 100-250 MHz. Each step: `stress_test` 60 s (a data error is exit code 6) and the same repeatable benchmark (a game's built-in one, or the same scene with `watch`, which gives its fps and lows). Compare A B B A at one temperature (see 'Comparing two settings'). Stop when the score stops rising, then go back one step.
-Reference: +358 cut latency 2.4 % and left bandwidth flat. Nothing higher was tested on it.
-Why a benchmark and not just a pass: past its edge, memory can retry errors and get slower before it crashes. A higher offset that scores lower is past the edge.
-Why after the curve: a memory write zeroes the curve (the tool writes it back in the same trial), and a failure should not be confused with the curve's.
+## Phase 6: the uncore (MSVDD, XBAR, the ratio)
+Why before the memory: the crossbar XBAR clocks carries every byte between the GPCs, the L2 and the memory, and it can hold the memory's bandwidth. On the reference card at XBAR +250 / MSVDD REL 0 the memory's bandwidth stayed flat from +0 to +358 (1437-1440 GB/s) and +358 to +858 gave only 2.9 %; after the uncore below, the same +358 read 7.8 % more (1571 → 1693 GB/s) and the memory kept climbing to about +1758. A memory sweep before the uncore measures the crossbar.
+How XBAR is held: under load it runs in a window about 30 MHz wide, its floor the ratio x the core (0.9 stock) and its ceiling the clock MSVDD's reliability limit allows (`card_settings` perf_limits, `RELIABILITY_MSVDD_0`). Raise one alone and little moves; the ratio alone can even pull the core down (0.95 at REL 0: -3.5 %). They go up together, and then XBAR's offset pays.
+Do:
+1. Close other GPU work, screen saver to none, `begin_session` (`unattended=true` if they will be away).
+2. `tune_uncore` (20-40 minutes; it keeps nothing): XBAR with its voltage demand, the ratio, MSVDD REL up to +50 mV (ALT goes up with it past +20), and the ratio and MSVDD together, each candidate A B B A against the best so far on the lab's crossbar (L2) test. `lab_status` names the best. To check particular settings, `tune_uncore candidates=...` compares each A B B A against the settings on the card.
+3. Put the best on in the tools' steps: `adjust_msvdd` REL +25 per call, `set_clock_ratio` 0.025 per call, `adjust_xbar` demand +10 per call first, then the offset +50 per call.
+4. `stress_test` at load 100 and 50, `lab_test phases=l2,memory,latency`, then `keep_as_daily` (ask). Their games confirm it, judged on frames.
+By hand instead: `adjust_msvdd` REL to 0 (NVIDIA's own limit), `adjust_xbar` +20 mV and +250..+300, each judged by a benchmark A B B A (Blender: REL 0 ~2 % faster, XBAR +300 / +20 mV 6-7 %).
+Reference result: XBAR +400 / +50 mV, ratio 0.95, MSVDD REL +50 / ALT +30 (1145 mV): the crossbar test 5-6 % faster than XBAR +250 / REL 0 / ratio 0.9, the memory's bandwidth 7.8 % higher at the same offset. +500 was 0.2 % more; +400 was kept for margin. It passed `stress_test` at 100 and 50; games not measured yet.
+The trap: above +250 with no voltage demand, memory-bound work drops MSVDD to its floor and pins the core near 1610 MHz. The tools refuse it. If something is unstable here, step XBAR down 50 MHz before touching the curve.
 
-## Phase 7: MSVDD and XBAR (the uncore)
-Do, in order:
-1. `adjust_msvdd` REL +25, then +25 again (stock -50 → 0, NVIDIA's own limit).
-2. `adjust_xbar` demand +10, then +10 again (+20 mV).
-3. `adjust_xbar` offset +50 per call, up to +250..+300.
-4. Optionally, `set_clock_ratio` +0.025 per call (0.8999 stock), if XBAR under load still sits at 0.9 x the core: it lets XBAR follow the core closer. Its gain is not measured on the reference card; judge it the same way.
-Judge each step with a render or compute benchmark (Blender), a memory-heavy game, and `stress_test` at load 100 and 50, A B B A at one temperature (see 'Comparing two settings').
-Reference: REL 0 made Blender ~2 % faster. XBAR +300 with +20 mV made it 6-7 % faster.
-Why it works: the crossbar between the GPCs, L2 and memory runs off MSVDD, and NVIDIA ships MSVDD 50 mV inside its own limit. Under load XBAR is held to ~0.9 x the core clock, and +250 reaches that.
-The trap: above +250 with no voltage demand, memory-bound work drops MSVDD to its floor and pins the core near 1610 MHz. The tool refuses it. If something is unstable here, step XBAR down 50 MHz before touching the curve.
+## Phase 7: memory
+Do:
+1. `tune_memory` from the daily offset in 100 MHz steps up to the driver's limit (+3000 on a 5090), 30 s a step. It stops where the memory fails, or gets slower and stays slower (two steps in a row; one slower step is only watched). `trend=true` draws the whole curve; then only a failure stops it.
+2. A fine sweep around its best: `tune_memory fromMhz=<best-90> toMhz=<best+90> stepMhz=30 seconds=60 trend=true`. Take the step with the most bandwidth; latency falls with every MHz, so between equals take the higher.
+3. `set_memory_offset` to it (250 MHz per call), `stress_test` at load 100 and 50 (a data error is exit code 6), `lab_test phases=memory,latency,l2`, then `keep_as_daily` (ask).
+4. Their games have the last word. Artifacts, a crash or stutter: step down. Where bandwidth stopped rising (+1758 on the reference) costs only latency.
+Reading a sweep: GDDR7 hides its errors by retrying them, so past its edge the memory gets slower before it fails: bandwidth falling while the clock rises, latency rising and not coming back down. One jump is not that. The memory changes its timings at some clocks (latency +17 ns at +958 on the reference, the same in three sweeps, then falling with the clock again), and one run can dip (+1558: -0.9 to -1.2 %, then the best yet at +1658). The spread between runs rising (1 % at +358, 6-9 % past +2700 on the reference) may be the memory starting to retry where the lab cannot see it, which is what the games are for.
+Reference (on the uncore above): +358 to +3000 with no error; bandwidth 1693 → about 1795 GB/s at +1758, then flat; latency 475 → 429 ns, about 2.2 ns per 100 MHz. The fine sweep around +2858 was flat in bandwidth (1782-1802 GB/s); daily +2918 (1802 GB/s, 430 ns), to be confirmed in games.
+Why after the curve: a memory write zeroes the curve (the tool writes it back in the same trial), and a failure should not be confused with the curve's.
 
 ## Comparing two settings: A B B A at one temperature
 Use it whenever the question is "is B faster than A" (an undervolt, MSVDD, XBAR, memory, two curves), not "does B hold".
@@ -99,6 +105,7 @@ On the reference card:
 - MSVDD REL -50 → -175 under the 600 W wall, run as a ladder while the card heated from 68 to 83 C: "no gain" (2835-2850 MHz throughout). The same change A B B A at 83-84 C: +40-60 MHz, one to two curve points. The ladder had measured the warm-up.
 - Blender (2560x1440, 384 samples, OptiX, median of 7), REL -50 / -25 / 0 in A B C C B A: 6.774 / 6.697 / 6.646 s, with repeats within 0.4 %, so the 2 % is real. A ray-tracing score that moved between 0.95 and 1.05 from one round to the next decided nothing.
 Use `log_note` for each step's number and temperature as you go, so the comparison survives the session.
+The lab's jobs do this by themselves: `tune_uncore` runs each candidate A B B A, and both jobs measure a run again when other work shared the GPU.
 
 ## Phase 8: keep it, live with it
 - `keep_as_daily` (ask). The service puts it back after every boot and driver reset.

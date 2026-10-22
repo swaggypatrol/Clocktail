@@ -92,10 +92,13 @@ RTX 5090 Founders Edition, driver 617.42, Windows 11. Your card is different. Yo
 | XBAR +300 MHz with +20 mV of voltage demand | Blender +6–7 % over stock. |
 | XBAR past ~+300 MHz without the extra voltage | MSVDD drops to its floor and memory-heavy work loses up to 16 %. Don't. We did, so you don't have to. |
 | XBAR +400 MHz / +50 mV, ratio 0.95, MSVDD REL +50 / ALT +30 mV | The lab's crossbar test 5–6 % faster than the card's previous daily settings, and it passed the stress tester at full and light load. It's that card's daily now. Games not measured yet. |
+| Memory +2918 MHz, on top of that | Not a single error in the lab all the way to +3000. Bandwidth stops climbing around +1758; past that you only get lower latency. Passed the stress tester; games next. |
 
 For a while we thought XBAR offsets past +300 bought nothing. Turns out they do, just not on their own. XBAR sits squeezed between 0.9 × the core clock below and whatever MSVDD's voltage allows above, and the two are only about 30 MHz apart. Raise one and nothing happens. Raise the ratio and MSVDD together and the window opens up, and then the XBAR offset starts paying. The tuner figured that out, not us. Higher numbers still aren't always better numbers. Sometimes they just need friends.
 
-The founders preset has the first two rows. The last one is new.
+And once the crossbar stopped holding it back, the memory had room too: 7.8 % more bandwidth at the very same offset, and for the first time it actually scaled with the memory clock.
+
+The founders preset has the first two rows. The last two are new.
 
 ![3DMark Steel Nomad result page: score 15 757, valid result, RTX 5090 with an Intel Core i9-14900K, average clock frequency 2,878 MHz](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/steel-nomad-result.jpg)
 

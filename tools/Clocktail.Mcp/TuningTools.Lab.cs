@@ -227,14 +227,16 @@ public sealed partial class TuningTools
         "offset: if it did not, the sweep stops and says the offset was not in force. Needs an open session " +
         "(begin_session) with no trial in force, and an otherwise idle GPU (close games and local AI models; a run another " +
         "program shared, a screen saver drawing too, is measured again every 30 s for up to 10 minutes). Follow it with " +
-        "lab_status; lab_stop ends it. Tell the person first: it raises the memory past what has been tested.")]
+        "lab_status; lab_stop ends it. It covers the driver's whole range (the reference card ran error-free to +3000, bandwidth " +
+        "flat past +1758, latency falling all the way). A fine sweep around a best found before: fromMhz and toMhz 90 MHz either " +
+        "side, stepMhz 30, seconds 60, trend true. Tell the person first: it raises the memory past what has been tested.")]
     public string TuneMemory(
-        [Description("The highest memory offset to try, MHz.")] int toMhz,
+        [Description("The highest memory offset to try, MHz (up to the driver's limit, +3000 on a 5090).")] int toMhz,
         [Description("MHz per step, 25..100 (default 50).")] int stepMhz = 50,
-        [Description("The first offset, MHz (default the daily one on the card).")] int? fromMhz = null,
+        [Description("The first offset, MHz (default the daily one on the card; anywhere in the driver's range, so a fine sweep can start 90 MHz under a best found before).")] int? fromMhz = null,
         [Description("Seconds the lab measures each step, 30..300 (default 60).")] int seconds = 60,
         [Description("true: a slower step does not stop the sweep, only a failure does, so it shows the whole trend of " +
-            "bandwidth and latency up to toMhz (up to 2000 MHz past the first offset); the best is still the step before the first slower one.")] bool trend = false) => Guard(() =>
+            "bandwidth and latency up to toMhz; the best is still the step before the first slowdown that lasted.")] bool trend = false) => Guard(() =>
     {
         if (stepMhz is < 25 or > 100) throw new ArgumentException("stepMhz is 25..100");
         if (seconds is < 30 or > 300) throw new ArgumentException("seconds is 30..300");
@@ -243,8 +245,6 @@ public sealed partial class TuningTools
         int daily = p0.DeltaKhz / 1000, from = fromMhz ?? daily;
         if (from * 1000 < p0.MinKhz || toMhz * 1000 > p0.MaxKhz) throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000}..{p0.MaxKhz / 1000} MHz");
         if (toMhz <= from) throw new ArgumentException($"toMhz must be above the first offset ({from} MHz)");
-        if (toMhz - from > (trend ? 2000 : 1000)) throw new ArgumentException($"a sweep covers at most {(trend ? 2000 : 1000)} MHz");
-        if (Math.Abs(from - daily) > 250) throw new ArgumentException($"the first offset is at most 250 MHz from the daily one ({daily} MHz)");
 
         var (job, dir, detached) = StartJob(exe, "sweep", "sweep-memory", new
         {
@@ -299,6 +299,26 @@ public sealed partial class TuningTools
         return (job, dir, answer.Contains("detached", StringComparison.Ordinal));
     }
 
+    /// <summary>tune_uncore's candidates, "XBAR MHz/demand mV/ratio/MSVDD REL mV;..." as the lab's settings (the ratio raw,
+    /// U16.16); null when none are given.</summary>
+    public static List<object>? Candidates(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var list = new List<object>();
+        foreach (var c in text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var p = c.Split('/', StringSplitOptions.TrimEntries);
+            var inv = CultureInfo.InvariantCulture;
+            if (p.Length != 4 || !int.TryParse(p[0], NumberStyles.Integer, inv, out var x) || !int.TryParse(p[1], NumberStyles.Integer, inv, out var d)
+                || !double.TryParse(p[2], NumberStyles.Float, inv, out var r) || !int.TryParse(p[3], NumberStyles.Integer, inv, out var m))
+                throw new ArgumentException($"'{c}' is not XBAR MHz/demand mV/ratio/MSVDD REL mV");
+            if (r is < 0.5 or > 1.0) throw new ArgumentException($"'{c}': the ratio is 0.5..1.0");
+            list.Add(new { xbar_mhz = x, demand_mv = d, ratio_raw = (uint)Math.Round(r * 65536), msvdd_rel_mv = m });
+        }
+        if (list.Count is 0 or > 30) throw new ArgumentException("candidates: 1 to 30 settings");
+        return list;
+    }
+
     [McpServerTool(Name = "tune_uncore", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Start the uncore tuner, which runs by itself in the background (about 1 min 45 s a comparison at 20 s runs, 18 minutes on the reference card; it carries on when the agent goes " +
         "away where its host allows): from the settings on the card, one axis at a time, one step at a time, each candidate " +
@@ -318,14 +338,18 @@ public sealed partial class TuningTools
         "games not measured. Tell the person first: it raises voltages and clocks past their daily ones.")]
     public string TuneUncore(
         [Description("The highest XBAR offset to try, MHz (default 500; the driver allows 1000; past +400 is unmeasured).")] int xbarMaxMhz = 500,
-        [Description("Seconds the lab measures each run, 15..60 (default 20; a comparison is four runs).")] int seconds = 20) => Guard(() =>
+        [Description("Seconds the lab measures each run, 15..60 (default 20; a comparison is four runs).")] int seconds = 20,
+        [Description("Settings to compare instead of the search, each A B B A against the settings on the card: " +
+            "'XBAR MHz/demand mV/ratio/MSVDD REL mV' separated by ';', e.g. '400/50/0.95/50;500/50/0.95/50'. One outside the " +
+            "limits or the cliff rule is skipped; at most 30.")] string? candidates = null) => Guard(() =>
     {
         if (seconds is < 15 or > 60) throw new ArgumentException("seconds is 15..60");
+        var list = Candidates(candidates);
         var (exe, look) = JobPreflight();
         var (xbarKhz, demandUv) = SettingsTools.Domain(card, ClockDomainId.Xbar);
         var (_, xbarTop) = OffsetRange(ClockDomainId.Xbar);
         int xbarMax = Math.Min(xbarMaxMhz, Math.Min(xbarTop, MaxXbarMhz));
-        if (xbarMax <= xbarKhz / 1000) throw new ArgumentException($"xbarMaxMhz must be above the XBAR offset on the card ({xbarKhz / 1000} MHz)");
+        if (list == null && xbarMax <= xbarKhz / 1000) throw new ArgumentException($"xbarMaxMhz must be above the XBAR offset on the card ({xbarKhz / 1000} MHz)");
         uint ratioRaw = card.WithDriver(ClockRatio.Read).Raw;
         var msvdd = look.Msvdd ?? throw new InvalidOperationException("the MSVDD rail is unreadable");
         int relMv = msvdd.Offsets.RelUv / 1000;
@@ -340,7 +364,7 @@ public sealed partial class TuningTools
             xbar_max_mhz = xbarMax, xbar_step_mhz = 50, demand_max_mv = MaxVdemandMv, demand_step_mv = 10,
             cliff_mhz = XbarCliffMhz, cliff_demand_mv = XbarCliffDemandMv, high_mhz = XbarHighMhz, high_demand_mv = XbarHighDemandMv,
             ratio_max = 0.95, ratio_step = 0.025, msvdd_rel_max_mv = MsvddRelMaxMv, msvdd_rel_step_mv = 10,
-            seconds, warmup_seconds = 60, grace_seconds = 45, msvdd_alt_gap_mv = altGapMv,
+            seconds, warmup_seconds = 60, grace_seconds = 45, msvdd_alt_gap_mv = altGapMv, candidates = list,
         });
         card.Broker(BrokerRequest.OpExperiment, "note", string.Create(CultureInfo.InvariantCulture,
             $"tune_uncore started from XBAR {xbarKhz / 1000:+0;-0;0} MHz / {demandUv / 1000:+0;-0;0} mV, ratio {ratioRaw / 65536.0:0.0000}, MSVDD REL {relMv:+0;-0;0} mV; XBAR up to {xbarMax:+0} MHz ({job})"));

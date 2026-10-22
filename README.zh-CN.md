@@ -92,10 +92,13 @@ npm 下载慢的话，先换国内镜像：`npm config set registry https://regi
 | XBAR +300 MHz，电压需求 +20 mV | Blender 比出厂快 6–7 %。 |
 | XBAR 超过 +300 左右却不加电压 | MSVDD 掉到底，吃显存的负载最多慢 16 %。别这么干，我们替你干过了。 |
 | XBAR +400 MHz / +50 mV，比例 0.95，MSVDD REL +50 / ALT +30 mV | 实验室的 crossbar 测试比这张卡之前的日常设置快 5–6 %，满载和轻载压测都过了，现在就是它的日常设置。游戏里还没测。 |
+| 在此基础上显存 +2918 MHz | 实验室里一路到 +3000 一个错都没有。带宽到 +1758 左右就不涨了，再往上只剩延迟更低。压测过了，游戏下一步测。 |
 
 我们一度以为 XBAR 偏移过了 +300 就白给。其实不是，只是它一个人使不上劲：XBAR 被夹在中间，下面是核心频率的 0.9 倍，上面是 MSVDD 电压能撑到的频率，两头只差 30 MHz 左右。只抬一头，纹丝不动；比例和 MSVDD 一起抬，窗口才打开，XBAR 偏移这才开始见效。这是调参工具自己摸出来的，不是我们。数字大不一定就好，有时候它只是缺个帮手。
 
-founders 预设里有前两行，最后一行是新的。
+crossbar 一松开，显存也跟着有了余地：同样的偏移，带宽多了 7.8 %，而且头一回真的跟着显存频率往上涨。
+
+founders 预设里有前两行，后两行是新的。
 
 ![3DMark Steel Nomad 成绩页：15 757 分，有效成绩，RTX 5090 搭配 Intel Core i9-14900K，平均频率 2,878 MHz](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/steel-nomad-result.jpg)
 

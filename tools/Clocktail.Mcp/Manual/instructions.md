@@ -14,8 +14,8 @@ Tuning follows the method (manual 'method'), in this order, because each step ch
 3. Map the V/F boundary with stress_test: full load for the middle, a lower wall for the knee, light load (30-50) for the top.
 4. Daily curve = the boundary minus 30-60 MHz, flat where the chip stops scaling.
 5. Games, watched live: live_start when they start playing (in Claude Code, follow its log with the Monitor tool and comment as lines arrive; otherwise live_read when they talk), live_stop at the end. Each line carries the game's fps and lows: judge changes on frames, and ask the person only when it says there are none.
-6. Memory.
-7. MSVDD, XBAR and the XBAR/core ratio.
+6. MSVDD, XBAR and the XBAR/core ratio (tune_uncore): before the memory, because the crossbar can hold the memory's bandwidth.
+7. Memory (tune_memory, then a fine sweep around its best).
 8. Keep.
 Read 'start', 'method' and 'controls' before your first session, and 'why' when the person asks why.
 
