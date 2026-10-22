@@ -28,18 +28,19 @@ public sealed record SweepStatus(string Job, string State, DateTime StartedUtc, 
 /// <summary>
 /// ST02, the memory sweep: raise the memory offset a step at a time, each as a trial through the service, and measure each
 /// with the lab at the same buffer: bit errors and chain errors, bandwidth in five access orders, latency. GDDR7 hides its
-/// errors by retrying them (EDR): past its edge the memory does not fail, it gets slower, first in latency and the spread
-/// of a pattern, then in bandwidth. So a step stops the sweep when it fails, or when it is slower than the step before
+/// errors by retrying them (EDR): past its edge the memory does not fail, it gets slower, first in latency, then in
+/// bandwidth. So a step stops the sweep when it fails, or when it is slower than the best step so far
 /// (<see cref="Signal"/>); the best offset is the step before that. It runs in a process of its own with no GPU library
 /// loaded: each measurement is a child lab process, so a hang or a driver reset ends a measurement, not the sweep.
 /// </summary>
 public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<string>? log = null)
 {
-    /// <summary>A step slower than the one before by more than this (0.5 %) is retrying: each step raises the clock ~0.7 %.</summary>
+    /// <summary>Bandwidth under the best step so far by more than this (0.5 %): the memory is retrying. It need not rise: on the
+    /// reference card +0/+179/+358 gave 1437/1440/1439 GB/s, the crossbar and not the DRAM setting the rate (XBAR +250 gave
+    /// 1455 → 1474), so a rule that wanted bandwidth to follow the memory clock would stop a healthy sweep.</summary>
     public const double BandwidthFall = 0.005;
-    /// <summary>Bandwidth per MHz of memory clock below the first step's by more than this (1.5 %): the clock rose, the data did not.</summary>
-    public const double EfficiencyFall = 0.015;
-    /// <summary>Latency above the step before by more than this (1 %): a retried burst costs a round trip before bandwidth moves.</summary>
+    /// <summary>Latency over the lowest step so far by more than this (1 %): a retried burst costs a round trip first. Latency
+    /// is the signal that follows the DRAM: 531 → 518 ns (-2.4 %) for +0 → +358 on the reference card.</summary>
     public const double LatencyRise = 0.01;
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
@@ -50,8 +51,8 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     public string StatusPath => Path.Combine(jobDir, "status.json");
     public string StopPath => Path.Combine(jobDir, "stop");
 
-    /// <summary>Why the last step stops the sweep, or null to go on: it failed (a bad bit, a wrong chain, a crash), or it is
-    /// slower than the step before (bandwidth, latency) or than the first per MHz of memory clock.</summary>
+    /// <summary>Why the last step stops the sweep, or null to go on: it failed (a bad bit, a wrong chain, a crash), it could not
+    /// be judged (a shared GPU, an offset not in force), or it is slower than the best step so far (latency up, bandwidth down).</summary>
     public static string? Signal(IReadOnlyList<SweepStep> steps)
     {
         var last = steps[^1];
@@ -60,18 +61,15 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
             return Inv($"other work shared the GPU before the step ({last.OthersVramMib} MiB of video memory, {last.BusyBeforePct:0} % busy): its speed is not the memory's alone; close it and run again");
         if (steps.Count < 2) return null;
         var prev = steps[^2];
-        var first = steps[0];
         // NVML's memory clock follows the offset 1:1 (13801 → 14159 MHz at +358 on the reference card). One that did not move
         // means the offset is not in force while the lab runs (a P-state without it): nothing after can be judged.
         if (last.OffsetMhz > prev.OffsetMhz && last.MemMhz is { } mm && prev.MemMhz is { } pm && mm - pm < (last.OffsetMhz - prev.OffsetMhz) / 2.0)
             return Inv($"the memory clock did not follow the offset ({pm:0} → {mm:0} MHz for {last.OffsetMhz - prev.OffsetMhz:+0} MHz, {last.PState ?? "P?"}): the offset is not in force while the lab runs");
-        if (last.Gbps is { } g && prev.Gbps is { } pg && g < pg * (1 - BandwidthFall))
-            return Inv($"bandwidth fell {pg:0.#} → {g:0.#} GB/s ({(g / pg - 1) * 100:+0.0;-0.0} %): the memory is retrying");
-        if (last.Gbps is { } g2 && last.MemMhz is > 0 && first.Gbps is { } fg && first.MemMhz is > 0
-            && g2 / last.MemMhz.Value < fg / first.MemMhz.Value * (1 - EfficiencyFall))
-            return Inv($"bandwidth per MHz fell {(g2 / last.MemMhz.Value / (fg / first.MemMhz.Value) - 1) * 100:0.0} % from the first step: the clock rose, the data did not");
-        if (last.LatencyNs is { } l && prev.LatencyNs is { } pl && l > pl * (1 + LatencyRise))
-            return Inv($"latency rose {pl:0.#} → {l:0.#} ns: the memory is retrying");
+        var before = steps.Take(steps.Count - 1).ToList();
+        if (last.Gbps is { } g && before.Max(s => s.Gbps) is { } bg && g < bg * (1 - BandwidthFall))
+            return Inv($"bandwidth fell to {g:0.#} GB/s, {(g / bg - 1) * 100:+0.0;-0.0} % under the best step's {bg:0.#}: the memory is retrying");
+        if (last.LatencyNs is { } l && before.Min(s => s.LatencyNs) is { } bl && l > bl * (1 + LatencyRise))
+            return Inv($"latency rose to {l:0.#} ns, {(l / bl - 1) * 100:+0.0} % over the lowest step's {bl:0.#}: the memory is retrying");
         return null;
     }
 

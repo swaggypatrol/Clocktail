@@ -174,12 +174,21 @@ public class LabTests
         Assert.Equal(50, MemorySweep.Best(steps));
     }
 
+    /// <summary>The reference card's +0/+179/+358: bandwidth flat (the crossbar sets it), latency down. A healthy sweep goes on.</summary>
     [Fact]
-    public void Bandwidth_that_stops_following_the_clock_stops_the_sweep()
+    public void Flat_bandwidth_with_falling_latency_goes_on()
     {
-        // Every step a little faster than the last, but far less than the clock: per MHz 2 % under the first step.
-        var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(100, 1501, 499, 13901), S(200, 1502, 498, 14001), S(300, 1503, 497, 14101) };
-        Assert.Contains("per MHz", MemorySweep.Signal(steps));
-        Assert.Equal(200, MemorySweep.Best(steps));
+        var steps = new List<SweepStep> { S(0, 1437, 531, 13801), S(179, 1440, 524, 13980), S(358, 1439, 518, 14159) };
+        Assert.Null(MemorySweep.Signal(steps));
+        Assert.Equal(358, MemorySweep.Best(steps));
+    }
+
+    /// <summary>Slower than the best step, not just the one before: a slow drift over two steps stops it too.</summary>
+    [Fact]
+    public void Latency_drifting_up_from_the_lowest_stops_the_sweep()
+    {
+        var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(50, 1500, 498, 13851), S(100, 1500, 501, 13901), S(150, 1500, 503.5, 13951) };
+        Assert.Contains("over the lowest step's 498", MemorySweep.Signal(steps));
+        Assert.Equal(100, MemorySweep.Best(steps));
     }
 }

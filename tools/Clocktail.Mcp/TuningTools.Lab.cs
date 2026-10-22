@@ -214,8 +214,9 @@ public sealed partial class TuningTools
         "goes away): from the daily memory offset (or fromMhz) up to toMhz in stepMhz steps, each a trial through the service, " +
         "each measured by the lab for `seconds` at one fixed buffer: bit errors, bandwidth in five access orders, latency. " +
         "GDDR7 hides its errors by retrying them, so past its edge the memory gets slower before it fails: a step stops the " +
-        "sweep when it fails (a bad bit, a driver reset: the service records it), when bandwidth falls or latency rises against " +
-        "the step before, or bandwidth per MHz of memory clock falls against the first step. The best offset is the step before; " +
+        "sweep when it fails (a bad bit, a driver reset: the service records it), or when latency rises or bandwidth falls against " +
+        "the best step so far (latency follows the DRAM; bandwidth was set by the crossbar on the reference card, flat from +0 " +
+        "to +358). The best offset is the step before; " +
         "the daily profile goes back on at the end, nothing is kept. CUDA work alone ran in P1 on the reference card (Boost Lock " +
         "did not change that) and the memory offset is a P0 offset, so each step checks NVML's memory clock rose with the " +
         "offset: if it did not, the sweep stops and says the offset was not in force. Needs an open session " +
