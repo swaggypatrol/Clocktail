@@ -256,6 +256,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
 {
     private readonly DateTime _started = DateTime.UtcNow;
     private readonly List<Comparison> _log = [];
+    private bool _wrote;
     private UncoreSetting _best = spec.Start;
     private string _stage = "warm-up";
     private ulong? _bufferMib;
@@ -381,6 +382,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         };
         var r = Broker("try", JsonSerializer.Serialize(args));
         if (r is not { Ok: true }) return r?.Error ?? "no answer";
+        _wrote = true;   // the end puts the daily profile back over it, however the job ends
         Thread.Sleep(3000);
         return null;
     }
@@ -395,7 +397,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
     {
         // The daily profile goes back on whatever happened (after a driver reset the service has done it already), and the
         // status says so when it did not.
-        if (_log.Count > 0 && DailyBack("tune_uncore finished") is { } notBack) why += "; " + notBack;
+        if (_wrote && DailyBack("tune_uncore finished") is { } notBack) why += "; " + notBack;
         string? next = state == SweepStatus.Done && _best != spec.Start
             ? Inv($"best {_best}: tell the person; to try it, adjust_xbar to {_best.XbarMhz:+0;-0;0} MHz and {_best.DemandMv:+0;-0;0} mV, set_clock_ratio {_best.Ratio:0.000}, adjust_msvdd to REL {_best.MsvddRelMv:+0;-0;0} mV{(spec.AltMv(_best) is > 0 and var alt ? Inv($" and ALT {alt:+0} mV") : "")} (each in its own steps), then lab_test, stress_test and their games; keep_as_daily (ask)")
             : null;

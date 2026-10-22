@@ -53,6 +53,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     public const double LatencyNoise = 0.002;
 
     private readonly List<SweepStep> _steps = [];
+    private bool _wrote;
     private readonly DateTime _started = DateTime.UtcNow;
     private ulong? _bufferMib;
 
@@ -247,7 +248,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     {
         // The daily offset goes back on whatever happened (after a driver reset the service has done it already), and the
         // status says so when it did not.
-        if (_steps.Any(s => s.OffsetMhz != spec.DailyMhz) && DailyBack("tune_memory finished") is { } notBack) why += "; " + notBack;
+        if (_wrote && DailyBack("tune_memory finished") is { } notBack) why += "; " + notBack;
         int? best = Best(_steps);
         string? next = state == SweepStatus.Done && best is { } b
             ? Inv($"the edge's side is {b:+0;-0;0} MHz (the step before any slowdown that lasted). Read the steps for where bandwidth stops rising: past that an offset buys latency only, which frames did not feel on the reference card (3DMark Speedway and Steel Nomad at +2900 were no better than at +1758). Tell the person; set_memory_offset there in steps of at most 250 MHz, judge it against the daily offset with a memory-sensitive benchmark A B B A (a ray-traced one, as Speedway), their games have the last word, keep_as_daily (ask); if a game fails, step down")
@@ -270,7 +271,10 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
             ["curve"] = spec.Curve, ["change"] = Inv($"memory offset → {offsetMhz:+0;-0;0} MHz (tune_memory)"), ["keep_curve"] = true,
             ["memory_khz"] = offsetMhz * 1000, ["context"] = new[] { "tune_memory: the lab measures each step" },
         };
-        return Broker("try", JsonSerializer.Serialize(args));
+        var r = Broker("try", JsonSerializer.Serialize(args));
+        // Written, whether or not its step is ever recorded (a stop between the write and the run): the end puts it back.
+        if (r is { Ok: true }) _wrote = true;
+        return r;
     }
 
 }
