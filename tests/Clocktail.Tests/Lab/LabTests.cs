@@ -102,6 +102,7 @@ public class LabTests
         public ChunkOutcome RunMemory(uint seed, AccessPattern pattern) =>
             new(pattern is AccessPattern.Linear or AccessPattern.BlockXor ? 1.4 : 25, ++Launches == BadAt ? 3 : 0, 2.0 * MemoryBufferBytes, null, Launches == BadAt ? 4096UL : null);
         public ChunkOutcome RunLatency(uint hops) { Launches++; return new(hops / 2000.0, 0, hops * 512.0); }
+        public ChunkOutcome RunL2(uint seed) { Launches++; return new(4, 0, 2.0 * (32 << 20) * 256); }
         public void Dispose() { }
     }
 

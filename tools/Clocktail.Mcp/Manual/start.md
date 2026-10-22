@@ -24,6 +24,7 @@ Every number in this manual was measured on one reference card: RTX 5090 Founder
 | The daily wall | `set_daily_power_limit` |
 | Judge it | `stress_test` (NVIDIA's nvgwls.exe); `lab_test` (the lab: every result checked bit for bit, burn, light, pulse, memory, latency) |
 | Find the memory's best offset by itself | `tune_memory`, then `lab_status` / `lab_stop` |
+| Find the best XBAR, ratio and MSVDD by itself | `tune_uncore`, then `lab_status` / `lab_stop` |
 | Watch them play | `live_start` / `live_read` / `live_stop` (a whole session, live: a line every 10 s, hangs as they happen); `watch` (one stretch, summarized) |
 | Record the outcome | `mark_stable`, `mark_crash`, `log_note` |
 | Undo / keep | `back_to_daily`; `preview_daily`, then `keep_as_daily` |

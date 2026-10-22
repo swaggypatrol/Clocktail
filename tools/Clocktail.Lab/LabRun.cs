@@ -6,9 +6,10 @@ namespace Clocktail.Lab;
 /// The lab's phases. Burn: every thread on fma_rot (steady power; steered to a board power when one is asked for). Light:
 /// one thread in LightDiv, so few SMs draw current and the card climbs to the top of its curve (64 SMs: 2887 MHz at 360 W
 /// on the reference card at stock). Pulse: one short full-grid launch per game-like frame at 30-120 fps (the load step at
-/// the top of the curve). Memory: fill and verify the buffer in the five access orders. Latency: the pointer chase.
+/// the top of the curve). Memory: fill and verify the buffer in the five access orders. Latency: the pointer chase. L2: fill
+/// and verify a 32 MiB region over and over, which stays in L2: the crossbar's bandwidth, the path XBAR clocks.
 /// </summary>
-public enum LabPhase { Burn, Light, Pulse, Memory, Latency }
+public enum LabPhase { Burn, Light, Pulse, Memory, Latency, L2 }
 
 public sealed record LabConfig(IReadOnlyList<(LabPhase Kind, double Seconds)> Phases, double TargetW = 0, int LightDiv = 64,
     uint Seed = 0x5EED, int SampleMs = 100, int ChunkMs = 150, double PulseDuty = 0.6)
@@ -16,7 +17,7 @@ public sealed record LabConfig(IReadOnlyList<(LabPhase Kind, double Seconds)> Ph
     public static IReadOnlyList<(LabPhase, double)> Parse(string list, double seconds)
     {
         var kinds = list.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(s => Enum.TryParse<LabPhase>(s, true, out var k) ? k : throw new ArgumentException($"'{s}' is not a phase (burn, light, pulse, memory, latency)"))
+            .Select(s => Enum.TryParse<LabPhase>(s, true, out var k) ? k : throw new ArgumentException($"'{s}' is not a phase (burn, light, pulse, memory, latency, l2)"))
             .ToList();
         if (kinds.Count == 0) throw new ArgumentException("no phase given");
         return kinds.Select(k => (k, seconds / kinds.Count)).ToList();
@@ -141,6 +142,7 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         int lastThreads = -1, rounds = 0;
         var frozenMs = new List<double>();
         var perPattern = Enum.GetValues<AccessPattern>().ToDictionary(p => p, _ => new List<double>());
+        var l2Gbps = new List<double>();
         double t0 = _now();
         _phase = index;
         log?.Invoke($"phase {index + 1}/{cfg.Phases.Count} {kind} for {seconds:F0} s");
@@ -185,6 +187,22 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
                 case LabPhase.Latency:
                     alive = Compute(0);
                     break;
+                case LabPhase.L2:
+                    // Like the memory phase: rounds of at least RoundMs, the first five only warming the clocks.
+                    double l2Spent = 0;
+                    do
+                    {
+                        var m = engine.RunL2(seed++);
+                        pr.Launches++;
+                        if (m.Error != null) { pr.Error = m.Error; alive = false; break; }
+                        pr.MemoryErrors += m.Mismatches;
+                        if (m.FirstBadWord is { } fb && (pr.FirstBadWord == null || fb < pr.FirstBadWord)) pr.FirstBadWord = fb;
+                        l2Spent += m.ElapsedMs;
+                        if (m.ElapsedMs > 0 && rounds >= 5) l2Gbps.Add(m.WorkUnits / (m.ElapsedMs / 1000.0) / 1e9);
+                    }
+                    while (l2Spent < RoundMs && !ct.IsCancellationRequested);
+                    rounds++;
+                    break;
                 case LabPhase.Memory:
                     // A round gives each pattern passes for at least RoundMs: a linear pass over 21.6 GiB takes ~27 ms and a
                     // strided one ~370 ms, so equal pass counts left linear with 9 passes and a 4 % spread in 10 s. The first
@@ -219,7 +237,12 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         pr.TempP50 = P50(mine.Select(x => (double?)x.TempC));
         pr.TempMax = mine.Select(x => (double?)x.TempC).Max();
         pr.PState = mine.Where(x => x.PState != null).GroupBy(x => x.PState).OrderByDescending(g => g.Count()).Select(g => $"P{g.Key}").FirstOrDefault();
-        if (kind == LabPhase.Memory)
+        if (kind == LabPhase.L2)
+        {
+            pr.Gbps = P50(l2Gbps.Select(x => (double?)x));
+            pr.Patterns = l2Gbps.Count > 0 ? [new PatternResult("L2", pr.Gbps ?? 0, Math.Round(Cv(l2Gbps), 2), l2Gbps.Count)] : [];
+        }
+        else if (kind == LabPhase.Memory)
         {
             pr.Patterns = perPattern.Where(p => p.Value.Count > 0)
                 .Select(p => new PatternResult(p.Key.ToString(), P50(p.Value.Select(x => (double?)x)) ?? 0, Math.Round(Cv(p.Value), 2), p.Value.Count)).ToList();

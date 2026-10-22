@@ -8,9 +8,10 @@ using Clocktail.Lab;
 if (args.Length == 0 || args[0] is "-h" or "--help")
 {
     Console.WriteLine("""
-        clocktail-lab run --phases burn,light,pulse,memory,latency --seconds N [--json FILE] [--gpu-pci ID] [--target-w W]
+        clocktail-lab run --phases burn,light,pulse,memory,latency,l2 --seconds N [--json FILE] [--gpu-pci ID] [--target-w W]
                           [--light-div N] [--mem-fraction F] [--mem-cap-mib M] [--inject-at N]
         clocktail-lab sweep-memory --job DIR      (the job's spec.json; detaches itself; status in DIR\status.json)
+        clocktail-lab tune-uncore --job DIR       (the same, for the uncore tuner)
         clocktail-lab probe [--gpu-pci ID]
         """);
     return 64;
@@ -60,6 +61,7 @@ try
             return r.ExitCode;
         }
         case "sweep-memory":
+        case "tune-uncore":
         {
             string dir = O("job") ?? throw new ArgumentException("--job DIR is needed");
             string self = Environment.ProcessPath ?? throw new InvalidOperationException("no process path");
@@ -68,14 +70,16 @@ try
                 // Start the sweep from a process that exits at once, so it is nobody's child, and out of its host's job
                 // (Detach): the MCP server's worker ends with its whole process tree when the driver goes away, and a
                 // sweep past the memory's edge can do that.
-                var (pid, inJob) = Detach.Start(self, ["sweep-memory", "--job", dir, "--attached"]);
+                var (pid, inJob) = Detach.Start(self, [args[0], "--job", dir, "--attached"]);
                 Console.WriteLine($"{pid.ToString(CultureInfo.InvariantCulture)} {(inJob ? "in-job" : "detached")}");
                 return 0;
             }
-            var spec = JsonSerializer.Deserialize<SweepSpec>(File.ReadAllText(Path.Combine(dir, "spec.json")), LabJson.Options)
-                ?? throw new InvalidDataException("spec.json is empty");
+            string specJson = File.ReadAllText(Path.Combine(dir, "spec.json"));
             using var logFile = new StreamWriter(Path.Combine(dir, "sweep.log"), append: true) { AutoFlush = true };
-            return new MemorySweep(spec, dir, self, line => logFile.WriteLine($"{DateTime.Now:HH:mm:ss} {line}")).Run();
+            void Log(string line) => logFile.WriteLine($"{DateTime.Now:HH:mm:ss} {line}");
+            return args[0] == "tune-uncore"
+                ? new UncoreTune(JsonSerializer.Deserialize<UncoreSpec>(specJson, LabJson.Options) ?? throw new InvalidDataException("spec.json is empty"), dir, self, Log).Run()
+                : new MemorySweep(JsonSerializer.Deserialize<SweepSpec>(specJson, LabJson.Options) ?? throw new InvalidDataException("spec.json is empty"), dir, self, Log).Run();
         }
         case "probe":
         {

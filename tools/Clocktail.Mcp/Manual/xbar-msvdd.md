@@ -34,5 +34,10 @@ Blender Cycles (2560x1440, 384 spp, median of 7, lower is better), stock 6.774 s
 - An overclocker reported +450 MHz without extra voltage giving a grey screen and artefacts.
 - **If anything is unstable with XBAR raised, step XBAR down 50 MHz at a time** before touching the curve.
 
+## The tuner (`tune_uncore`)
+- It searches what this topic describes, on this card: XBAR's offset a step at a time with the demand the cliff rule asks for (+20 mV above +250, +50 above +300; more when a step still hits the cliff), then the ratio, then MSVDD REL, each candidate a trial compared A B B A against the best so far.
+- The measure is the lab's L2 test: a 32 MiB region (a third of the 5090's L2) filled and verified over and over, so the traffic is the crossbar's and not the DRAM's (~4780 GB/s at the daily profile on the reference card, against ~1575 for DRAM). A candidate is kept when it is faster in both pairs and by 0.5 % or more, DRAM bandwidth does not fall, and the memory phase's core clock does not drop 5 % (the cliff).
+- It keeps nothing: `lab_status` names the best setting; set it with `adjust_xbar`, `set_clock_ratio` and `adjust_msvdd`, then `lab_test`, `stress_test` and games, then `keep_as_daily` (ask). Its gains in games are not measured; the reference card's XBAR +300 with +20 mV made Blender 6-7 % faster.
+
 ## Reading it
 `card_settings` shows each domain's offset and demand and MSVDD's REL/ALT/OV/VMIN offsets and limits; `gpu_status` shows MSVDD's mV, amps and watts; `stress_test` and `watch` report the XBAR clock under load. `card_settings` `clock_ratio` shows the ratio. `adjust_msvdd`, `adjust_xbar`, `set_clock_ratio` and `adjust_clock_domain` change them (`manual method`, phase 7). A memory-bound game on a large XBAR offset with MSVDD at exactly 825 mV and the core stuck near 1600 MHz is the cliff.

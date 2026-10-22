@@ -34,6 +34,7 @@ public sealed record SweepStatus(string Job, string State, DateTime StartedUtc, 
 /// loaded: each measurement is a child lab process, so a hang or a driver reset ends a measurement, not the sweep.
 /// </summary>
 public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<string>? log = null)
+    : LabJob(spec.StableId, spec.Pci, spec.GraceSeconds, jobDir, labExe)
 {
     /// <summary>Bandwidth under the best step so far by more than this (0.5 %): the memory is retrying. It need not rise: on the
     /// reference card +0/+179/+358 gave 1437/1440/1439 GB/s, the crossbar and not the DRAM setting the rate (XBAR +250 gave
@@ -43,13 +44,9 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     /// is the signal that follows the DRAM: 531 → 518 ns (-2.4 %) for +0 → +358 on the reference card.</summary>
     public const double LatencyRise = 0.01;
 
-    private static readonly JsonSerializerOptions Json = new() { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
     private readonly List<SweepStep> _steps = [];
     private readonly DateTime _started = DateTime.UtcNow;
     private ulong? _bufferMib;
-
-    public string StatusPath => Path.Combine(jobDir, "status.json");
-    public string StopPath => Path.Combine(jobDir, "stop");
 
     /// <summary>Why the last step stops the sweep, or null to go on: it failed (a bad bit, a wrong chain, a crash), it could not
     /// be judged (a shared GPU, an offset not in force), or it is slower than the best step so far (latency up, bandwidth down).</summary>
@@ -96,7 +93,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
 
     public int Run()
     {
-        using var heartbeat = new Timer(_ => Broker("alive"), null, TimeSpan.Zero, TimeSpan.FromMinutes(1));
+        using var heartbeat = Heartbeat();
         try
         {
             var show = Broker("show");
@@ -113,7 +110,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
 
             for (int offset = spec.FromMhz; offset <= spec.ToMhz; offset += spec.StepMhz)
             {
-                if (File.Exists(StopPath)) return Finish(SweepStatus.Stopped, "stopped (lab_stop)", null);
+                if (StopAsked) return Finish(SweepStatus.Stopped, "stopped (lab_stop)", null);
                 bool trial = offset != spec.DailyMhz;
                 if (trial)
                 {
@@ -129,7 +126,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 _steps.Add(step);
                 string? signal = Signal(_steps);
                 _steps[^1] = step with { Signal = signal };
-                File.AppendAllText(Path.Combine(jobDir, "steps.jsonl"), JsonSerializer.Serialize(_steps[^1], JsonLine) + "\n");
+                File.AppendAllText(Path.Combine(JobDir, "steps.jsonl"), JsonSerializer.Serialize(_steps[^1], JsonLine) + "\n");
                 string line = Line(_steps[^1]);
                 log?.Invoke(line);
                 Broker("note", $"tune_memory: {line}");
@@ -181,10 +178,8 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
 
     private void Save(string state, int? at, string? why, string? next, int? best = null)
     {
-        var s = new SweepStatus(Path.GetFileName(jobDir), state, _started, DateTime.UtcNow, at, _bufferMib, _steps, best ?? Best(_steps), why, next);
-        var tmp = StatusPath + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(s, Json));
-        File.Move(tmp, StatusPath, overwrite: true);
+        var s = new SweepStatus(Path.GetFileName(JobDir), state, _started, DateTime.UtcNow, at, _bufferMib, _steps, best ?? Best(_steps), why, next);
+        SaveStatus(s);
     }
 
     private BrokerResponse? Try(int offsetMhz)
@@ -197,40 +192,6 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
         return Broker("try", JsonSerializer.Serialize(args));
     }
 
-    private BrokerResponse? Broker(string kind, string? value = null, string op = BrokerRequest.OpExperiment)
-    {
-        try { return BrokerClient.TryCall(new BrokerRequest(op, spec.StableId, Kind: kind, Value: value)); }
-        catch (Exception e) when (e is IOException or InvalidDataException or ObjectDisposedException or TimeoutException) { return null; }
-    }
-
-    /// <summary>One measurement in a child lab process; a child that hangs past its time and the grace, dies, or writes no
-    /// result is a failed measurement.</summary>
-    private LabResult Measure(int seconds, string phases, ulong? capMib)
-    {
-        string json = Path.Combine(jobDir, $"run-{DateTime.UtcNow:HHmmss}.json");
-        var psi = new ProcessStartInfo(labExe) { UseShellExecute = false, CreateNoWindow = true };
-        foreach (var a in new[] { "run", "--phases", phases, "--seconds", seconds.ToString(CultureInfo.InvariantCulture), "--json", json, "--gpu-pci", spec.Pci })
-            psi.ArgumentList.Add(a);
-        if (capMib is { } c) { psi.ArgumentList.Add("--mem-cap-mib"); psi.ArgumentList.Add(c.ToString(CultureInfo.InvariantCulture)); }
-        var started = DateTime.UtcNow;
-        using var p = Process.Start(psi) ?? throw new InvalidOperationException("the lab did not start");
-        var deadline = started.AddSeconds(seconds + spec.GraceSeconds + 30);
-        while (!p.WaitForExit(1000))
-        {
-            if (File.Exists(StopPath) || DateTime.UtcNow > deadline)
-            {
-                try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-                return Failed(started, File.Exists(StopPath) ? "stopped" : $"the lab did not finish within {seconds + spec.GraceSeconds + 30} s: a hang");
-            }
-        }
-        try { return JsonSerializer.Deserialize<LabResult>(File.ReadAllText(json), LabJson.Options) ?? Failed(started, "an empty result"); }
-        catch (Exception e) when (e is IOException or JsonException) { return Failed(started, $"the lab ended without a result (exit code {p.ExitCode})"); }
-    }
-
-    private static LabResult Failed(DateTime started, string why) =>
-        new("", "", 0, 0, started, DateTime.UtcNow, [], LabResult.Fail, [why]);
-
-    private static string Inv(FormattableString s) => s.ToString(CultureInfo.InvariantCulture);
 }
 
 public static class LabJson

@@ -228,19 +228,9 @@ public sealed partial class TuningTools
         [Description("The first offset, MHz (default the daily one on the card).")] int? fromMhz = null,
         [Description("Seconds the lab measures each step, 30..300 (default 60).")] int seconds = 60) => Guard(() =>
     {
-        string exe = LabExe() ?? throw new InvalidOperationException("clocktail-lab.exe is not beside this server: run npx -y clocktail@latest setup");
         if (stepMhz is < 25 or > 100) throw new ArgumentException("stepMhz is 25..100");
         if (seconds is < 30 or > 300) throw new ArgumentException("seconds is 30..300");
-        var show = card.Broker(BrokerRequest.OpExperiment, "show");
-        if (!(show.Ok && show.Result is { } sr && sr.TryGetProperty("experiment", out var exp) && exp.ValueKind == JsonValueKind.Object))
-            throw new InvalidOperationException("no session is open: begin_session first");
-        if (TrialInForce(show) == true) throw new InvalidOperationException("a trial is in force: back_to_daily (or keep_as_daily) first, so the sweep starts from the daily profile");
-        if (Running() is { } running) throw new InvalidOperationException($"a sweep is running already ({Path.GetFileName(running)}): lab_status, or lab_stop");
-        var look = card.Read();
-        if (look.Telemetry?.VramUsedBytes is > 4UL << 30 and var used)
-            throw new InvalidOperationException($"other programs hold {used >> 20} MiB of video memory (a local AI model, a game): the sweep measures the memory's speed and needs the card to itself, so close them first");
-        if (look.Telemetry?.GpuUtilPercent is > 50 and var u)
-            throw new InvalidOperationException($"the GPU is {u} % busy with other work: the sweep measures speed, so close it first");
+        var (exe, look) = JobPreflight();
         var p0 = card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Memory) ?? throw new InvalidOperationException("the memory offset is unreadable");
         int daily = p0.DeltaKhz / 1000, from = fromMhz ?? daily;
         if (from * 1000 < p0.MinKhz || toMhz * 1000 > p0.MaxKhz) throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000}..{p0.MaxKhz / 1000} MHz");
@@ -248,33 +238,100 @@ public sealed partial class TuningTools
         if (toMhz - from > 1000) throw new ArgumentException("a sweep covers at most 1000 MHz");
         if (Math.Abs(from - daily) > 250) throw new ArgumentException($"the first offset is at most 250 MHz from the daily one ({daily} MHz)");
 
-        string job = $"sweep-{DateTime.Now:yyyyMMdd-HHmmss}";
-        string dir = Path.Combine(LabDir(), job);
-        Directory.CreateDirectory(dir);
-        var spec = new
+        var (job, dir, detached) = StartJob(exe, "sweep", "sweep-memory", new
         {
             stable_id = card.StableId, pci = card.PciBusId, curve = VfOffsets.Encode(look.Curve.Offsets()), daily_mhz = daily,
             from_mhz = from, to_mhz = toMhz, step_mhz = stepMhz, seconds, warmup_seconds = 60, grace_seconds = 45,
-        };
-        File.WriteAllText(Path.Combine(dir, "spec.json"), JsonSerializer.Serialize(spec, SnakeJson));
-        var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
-        foreach (var a in new[] { "sweep-memory", "--job", dir }) psi.ArgumentList.Add(a);
-        bool detached;
-        using (var p = Process.Start(psi) ?? throw new InvalidOperationException("the lab did not start"))
-        {
-            string answer = p.StandardOutput.ReadToEnd();
-            p.WaitForExit(10_000);
-            if (p.ExitCode != 0) throw new InvalidOperationException($"the lab did not start the sweep (exit code {p.ExitCode})");
-            detached = answer.Contains("detached", StringComparison.Ordinal);
-        }
+        });
         int steps = (toMhz - from) / stepMhz + 1;
         card.Broker(BrokerRequest.OpExperiment, "note", string.Create(CultureInfo.InvariantCulture, $"tune_memory started: {from:+0;-0;0} → {toMhz:+0;-0;0} MHz in {stepMhz} MHz steps, {seconds} s each ({job})"));
         return Out(new
         {
             started = true, job, dir, from_mhz = from, to_mhz = toMhz, step_mhz = stepMhz, steps,
             minutes_at_most = Math.Ceiling((60 + steps * (seconds + 20)) / 60.0),
-            detached = detached ? null : "the sweep stays in this agent's job (its host does not let a process leave it): closing the agent may end it; lab_status says where it got to",
+            detached = detached ? null : StaysInJob,
             next = "lab_status to follow it (each step adds a line); lab_stop ends it. The daily profile goes back on at the end; nothing is kept without the person",
+        });
+    });
+
+    private const string StaysInJob = "the job stays in this agent's job object (its host does not let a process leave it): closing the agent may end it; lab_status says where it got to";
+
+    /// <summary>What a background lab job needs before it starts: the lab, an open session with no trial in force, no other
+    /// job running, and the GPU to itself (it measures speed). The lab and the card as read now.</summary>
+    private (string Exe, Card.Look Look) JobPreflight()
+    {
+        string exe = LabExe() ?? throw new InvalidOperationException("clocktail-lab.exe is not beside this server: run npx -y clocktail@latest setup");
+        var show = card.Broker(BrokerRequest.OpExperiment, "show");
+        if (!(show.Ok && show.Result is { } sr && sr.TryGetProperty("experiment", out var exp) && exp.ValueKind == JsonValueKind.Object))
+            throw new InvalidOperationException("no session is open: begin_session first");
+        if (TrialInForce(show) == true) throw new InvalidOperationException("a trial is in force: back_to_daily (or keep_as_daily) first, so the job starts from the daily profile");
+        if (Running() is { } running) throw new InvalidOperationException($"a lab job is running already ({Path.GetFileName(running)}): lab_status, or lab_stop");
+        var look = card.Read();
+        if (look.Telemetry?.VramUsedBytes is > 4UL << 30 and var used)
+            throw new InvalidOperationException($"other programs hold {used >> 20} MiB of video memory (a local AI model, a game): the job measures speed and needs the card to itself, so close them first");
+        if (look.Telemetry?.GpuUtilPercent is > 50 and var u)
+            throw new InvalidOperationException($"the GPU is {u} % busy with other work: the job measures speed, so close it first");
+        return (exe, look);
+    }
+
+    /// <summary>Writes the job's spec.json under lab\{prefix}-{time} and has the lab start it out of this process's tree (and its
+    /// job, where the host allows that). The job's name, folder, and whether it left the job.</summary>
+    private (string Job, string Dir, bool Detached) StartJob(string exe, string prefix, string command, object spec)
+    {
+        string job = $"{prefix}-{DateTime.Now:yyyyMMdd-HHmmss}";
+        string dir = Path.Combine(LabDir(), job);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "spec.json"), JsonSerializer.Serialize(spec, SnakeJson));
+        var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+        foreach (var a in new[] { command, "--job", dir }) psi.ArgumentList.Add(a);
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException("the lab did not start");
+        string answer = p.StandardOutput.ReadToEnd();
+        p.WaitForExit(10_000);
+        if (p.ExitCode != 0) throw new InvalidOperationException($"the lab did not start the job (exit code {p.ExitCode})");
+        return (job, dir, answer.Contains("detached", StringComparison.Ordinal));
+    }
+
+    [McpServerTool(Name = "tune_uncore", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Start the uncore tuner, which runs by itself in the background (about an hour; it carries on when the agent goes " +
+        "away where its host allows): from the settings on the card, one axis at a time, one step at a time, each candidate " +
+        "a trial through the service compared A B B A against the best so far by the lab: L2 bandwidth (a 32 MiB region walked " +
+        "over and over: the crossbar XBAR clocks), DRAM bandwidth, and the memory phase's core clock. A candidate is kept only " +
+        "when L2 bandwidth rose in both pairs and by 0.5 % or more, DRAM bandwidth did not fall and the core did not drop 5 % " +
+        "(the cliff: MSVDD at its floor pins it near 1610 MHz). Axes in order: XBAR's offset on a ladder of voltage demands " +
+        "(adjust_xbar's rule: above +250 MHz +20 mV, above +300 +50 mV; a demand that buys nothing ends the climb), the " +
+        "XBAR/core clock ratio (the 0.9 x core ceiling; XBAR again when it moved), MSVDD's REL (up to +20 mV). An axis stops at a " +
+        "failure (recorded as its trial's crash) or two candidates in a row that are not faster. The daily profile goes back " +
+        "on at the end; nothing is kept: lab_status names the best setting to try. Needs an open session (begin_session) with " +
+        "no trial in force, and the GPU to itself. On the reference card XBAR +300 with +20 mV made Blender 6-7 % faster; " +
+        "this tuner's own gains are not measured yet. Tell the person first: it raises voltages and clocks past their daily ones.")]
+    public string TuneUncore(
+        [Description("The highest XBAR offset to try, MHz (default 500; the driver allows 1000; past +400 is unmeasured).")] int xbarMaxMhz = 500,
+        [Description("Seconds the lab measures each run, 15..60 (default 20; a comparison is four runs).")] int seconds = 20) => Guard(() =>
+    {
+        if (seconds is < 15 or > 60) throw new ArgumentException("seconds is 15..60");
+        var (exe, look) = JobPreflight();
+        var (xbarKhz, demandUv) = SettingsTools.Domain(card, ClockDomainId.Xbar);
+        var (_, xbarTop) = OffsetRange(ClockDomainId.Xbar);
+        int xbarMax = Math.Min(xbarMaxMhz, Math.Min(xbarTop, MaxXbarMhz));
+        if (xbarMax <= xbarKhz / 1000) throw new ArgumentException($"xbarMaxMhz must be above the XBAR offset on the card ({xbarKhz / 1000} MHz)");
+        uint ratioRaw = card.WithDriver(ClockRatio.Read).Raw;
+        int relMv = (look.Msvdd ?? throw new InvalidOperationException("the MSVDD rail is unreadable")).Offsets.RelUv / 1000;
+        var start = new { xbar_mhz = xbarKhz / 1000, demand_mv = demandUv / 1000, ratio_raw = ratioRaw, msvdd_rel_mv = relMv };
+        var (job, dir, detached) = StartJob(exe, "uncore", "tune-uncore", new
+        {
+            stable_id = card.StableId, pci = card.PciBusId, curve = VfOffsets.Encode(look.Curve.Offsets()), start,
+            xbar_max_mhz = xbarMax, xbar_step_mhz = 50, demand_max_mv = MaxVdemandMv, demand_step_mv = 10,
+            cliff_mhz = XbarCliffMhz, cliff_demand_mv = XbarCliffDemandMv, high_mhz = XbarHighMhz, high_demand_mv = XbarHighDemandMv,
+            ratio_max = 0.95, ratio_step = 0.025, msvdd_rel_max_mv = MsvddRelMaxMv, msvdd_rel_step_mv = 10,
+            seconds, warmup_seconds = 60, grace_seconds = 45,
+        });
+        card.Broker(BrokerRequest.OpExperiment, "note", string.Create(CultureInfo.InvariantCulture,
+            $"tune_uncore started from XBAR {xbarKhz / 1000:+0;-0;0} MHz / {demandUv / 1000:+0;-0;0} mV, ratio {ratioRaw / 65536.0:0.0000}, MSVDD REL {relMv:+0;-0;0} mV; XBAR up to {xbarMax:+0} MHz ({job})"));
+        return Out(new
+        {
+            started = true, job, dir, start, xbar_max_mhz = xbarMax,
+            detached = detached ? null : StaysInJob,
+            next = "lab_status to follow it (each comparison adds a line); lab_stop ends it. The daily profile goes back on at the end; nothing is kept without the person",
         });
     });
 
@@ -284,7 +341,8 @@ public sealed partial class TuningTools
         && DateTime.UtcNow - at < TimeSpan.FromMinutes(10));
 
     private IEnumerable<string> Jobs() => Directory.Exists(LabDir())
-        ? Directory.GetDirectories(LabDir(), "sweep-*").OrderByDescending(d => d, StringComparer.Ordinal) : [];
+        ? Directory.GetDirectories(LabDir()).Where(d => Path.GetFileName(d) is var n && (n.StartsWith("sweep-", StringComparison.Ordinal) || n.StartsWith("uncore-", StringComparison.Ordinal)))
+            .OrderByDescending(d => Directory.GetCreationTimeUtc(d)) : [];
 
     private static JsonObject? Status(string dir)
     {

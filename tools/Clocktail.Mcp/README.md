@@ -47,6 +47,7 @@ What the agent starts is a relay that loads no driver library and runs the same 
 | `stress_test` | Run NVIDIA's `nvgwls.exe` on what is on the card; a failure is recorded as the trial's crash. |
 | `lab_test` | Run the lab (StabilityLab's engine) on what is on the card: burn, light, pulse, memory in five access orders, latency; every result checked bit for bit; a failure is the trial's crash. |
 | `tune_memory` / `lab_status` / `lab_stop` | The memory sweep (ST02) in the background: a step at a time, each a trial the lab measures, stopping where the memory gets slower or fails; follow it, end it. |
+| `tune_uncore` | The uncore tuner in the background: XBAR with its voltage demand, the XBAR/core ratio and MSVDD, each candidate a trial compared A B B A on the crossbar's (L2) bandwidth; keeps nothing. |
 | `mark_stable` / `mark_crash` | Record the trial's outcome. |
 | `back_to_daily` | Put the daily profile back now. |
 | `stock` / `load_daily` | The card to stock and kept there (the daily profile suspended) / the daily profile back on. |

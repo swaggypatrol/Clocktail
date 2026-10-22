@@ -127,9 +127,10 @@ public static class Kernels
         "    add.s64 %rd6, %rd26, 3;\n" + Hash("%rd6", "%r13", "%r20");
 
     /// <summary>
-    /// mem_fill(u32* buf, u64 nVectors, u32 seed, u64 mul, u64 delta, u64 xorFull) writes every 16-byte vector its pattern
-    /// words; mem_verify(..., u64* errs) reads them back, errs = { u32 bad words, u32 pad, u64 lowest bad word index }. Both
-    /// walk the buffer in one <see cref="PatternPlan"/> order: thread gid takes vectors v = gid, gid + G, ...; its first m =
+    /// mem_fill(u32* buf, u64 nVectors, u32 seed, u64 mul, u64 delta, u64 xorFull, u64 limit) writes every 16-byte vector its
+    /// pattern words; mem_verify(..., u64* errs) reads them back, errs = { u32 bad words, u32 pad, u64 lowest bad word index }. Both
+    /// walk the buffer in one <see cref="PatternPlan"/> order: thread gid takes vectors v = gid, gid + G, ... up to limit (n for one
+    /// pass; a multiple of n walks a small region over and over, the L2 test); its first m =
     /// (gid·mul) mod n is one division, each next one the last plus delta, less n once if it wrapped; then m ^ 128 under
     /// xorFull. Loads and stores are .cg (L2 only, as the tester's -dlcm=cg): an L1 hit would hide the DRAM.
     /// </summary>
@@ -141,7 +142,8 @@ public static class Kernels
             .param .u32 p_seed,
             .param .u64 p_mul,
             .param .u64 p_delta,
-            .param .u64 p_xor{{(verify ? ",\n    .param .u64 p_errs" : "")}}
+            .param .u64 p_xor,
+            .param .u64 p_limit{{(verify ? ",\n    .param .u64 p_errs" : "")}}
         )
         {
             .reg .pred %p<8>;
@@ -154,6 +156,7 @@ public static class Kernels
             ld.param.u64 %rd20, [p_mul];
             ld.param.u64 %rd21, [p_delta];
             ld.param.u64 %rd22, [p_xor];
+            ld.param.u64 %rd27, [p_limit];
             cvta.to.global.u64 %rd3, %rd1;
             mov.u32 %r2, %ctaid.x;
             mov.u32 %r3, %ntid.x;
@@ -167,7 +170,7 @@ public static class Kernels
             rem.u64 %rd23, %rd23, %rd2;
         {{(verify ? "    ld.param.u64 %rd10, [p_errs];\n    cvta.to.global.u64 %rd10, %rd10;\n    add.s64 %rd11, %rd10, 8;\n" : "")}}
         WALK:
-            setp.ge.u64 %p1, %rd4, %rd2;
+            setp.ge.u64 %p1, %rd4, %rd27;
             @%p1 bra WALK_DONE;
             setp.lt.u64 %p1, %rd23, %rd22;
             xor.b64 %rd25, %rd23, 128;

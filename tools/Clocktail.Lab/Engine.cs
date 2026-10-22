@@ -24,6 +24,10 @@ public interface ILoadEngine : IDisposable
 
     /// <summary>One pointer-chase launch: every chain takes <paramref name="hops"/> dependent loads; errors = chains that ended on the wrong slot.</summary>
     ChunkOutcome RunLatency(uint hops);
+
+    /// <summary>One fill and verify of a region that fits in L2, walked many times over in one launch: what it measures is the
+    /// crossbar between the SMs and L2, the path XBAR clocks, not the DRAM. WorkUnits = bytes moved.</summary>
+    ChunkOutcome RunL2(uint seed);
 }
 
 /// <summary>
@@ -178,17 +182,31 @@ public sealed unsafe class CudaEngine : ILoadEngine
         return bad;
     }
 
-    public ChunkOutcome RunMemory(uint seed, AccessPattern pattern)
+    /// <summary>The L2 test's region: 32 MiB, a third of the 5090's 96 MB L2, walked <see cref="L2Passes"/> times a launch.</summary>
+    public const ulong L2RegionBytes = 32UL << 20;
+    public const ulong L2Passes = 1024;
+
+    public ChunkOutcome RunMemory(uint seed, AccessPattern pattern) =>
+        Pass(seed, _plans[pattern], MemoryBufferBytes / PatternPlan.VectorBytes, 1);
+
+    public ChunkOutcome RunL2(uint seed)
+    {
+        ulong region = Math.Min(L2RegionBytes, MemoryBufferBytes) / PatternPlan.VectorBytes;
+        return Pass(seed, PatternPlan.Of(AccessPattern.Linear, region, (ulong)_memGrid * Block), region, L2Passes);
+    }
+
+    /// <summary>Fill and verify the first <paramref name="n"/> vectors in <paramref name="plan"/>'s order, <paramref name="passes"/> times
+    /// over in one launch each.</summary>
+    private ChunkOutcome Pass(uint seed, PatternPlan plan, ulong n, ulong passes)
     {
         if (_dead) return ChunkOutcome.Failed("the CUDA context is already dead");
         _chaseReady = false; // the pass overwrites the chase table
         ulong* init = stackalloc ulong[2] { 0, ulong.MaxValue };
         _cu.MemcpyHtoD(_dErr, init, 16);
-        var plan = _plans[pattern];
-        ulong dMem = _dMem, n = MemoryBufferBytes / PatternPlan.VectorBytes, mul = plan.Multiplier, delta = plan.Delta, xor = plan.XorFull, dErr = _dErr;
+        ulong dMem = _dMem, mul = plan.Multiplier, delta = plan.Delta, xor = plan.XorFull, limit = n * passes, dErr = _dErr;
         uint sd = seed;
-        void** fillArgs = stackalloc void*[6] { &dMem, &n, &sd, &mul, &delta, &xor };
-        void** verifyArgs = stackalloc void*[7] { &dMem, &n, &sd, &mul, &delta, &xor, &dErr };
+        void** fillArgs = stackalloc void*[7] { &dMem, &n, &sd, &mul, &delta, &xor, &limit };
+        void** verifyArgs = stackalloc void*[8] { &dMem, &n, &sd, &mul, &delta, &xor, &limit, &dErr };
         int rc;
         if ((rc = _cu.EventRecordRaw(_evStart)) != 0) return Dead("cuEventRecord", rc);
         if ((rc = _cu.LaunchRaw(_fFill, _memGrid, Block, fillArgs)) != 0) return Dead("cuLaunchKernel(mem_fill)", rc);
@@ -203,14 +221,14 @@ public sealed unsafe class CudaEngine : ILoadEngine
         ulong? first = errs[1] == ulong.MaxValue ? null : errs[1];
 
         // A window checked on the host: catches a verify kernel that lies (a broken compare or atomics) and late flips.
-        ulong words = MemoryBufferBytes / 4, windowWords = (ulong)_window.Length;
+        ulong words = n * 4, windowWords = (ulong)_window.Length;
         ulong maxStart = words > windowWords ? words - windowWords : 0;
         ulong start = maxStart == 0 ? 0 : Reference.MemoryPattern(seed, 0x51A6u) % (maxStart / 4) * 4;
         fixed (uint* w = _window)
             if ((rc = _cu.MemcpyDtoHRaw(w, _dMem + start * 4, windowWords * 4)) != 0) return Dead("cuMemcpyDtoH(window)", rc);
         long hostBad = Reference.VerifyWindow(_window, start, seed);
         if (hostBad > 0 && bad == 0) { bad = hostBad; first ??= start; }
-        return new ChunkOutcome(ms, bad, 2.0 * MemoryBufferBytes, null, first);
+        return new ChunkOutcome(ms, bad, 2.0 * n * passes * PatternPlan.VectorBytes, null, first);
     }
 
     /// <summary>The chase table over the memory buffer: the largest power of two of 32-byte slots that fits.</summary>
