@@ -48,6 +48,9 @@ public sealed class Card : IDisposable
 
     public string StableId => _gpu.Identity.StableId;
 
+    /// <summary>The card's PCI address as CUDA writes it ("0000:01:00.0"): how the lab finds the same GPU.</summary>
+    public string PciBusId => $"0000:{_gpu.Identity.Bus:x2}:00.0";
+
     /// <summary>NVIDIA's temperature thresholds for this GPU, absolute °C: where it slows down to stay safe (max operating; the
     /// driver's T.Limit margin counts down to it), the hardware slowdown and the shutdown (90 / 93 / 96 on the reference
     /// card). Null each where NVML does not answer.</summary>

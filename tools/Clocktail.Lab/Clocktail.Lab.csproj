@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The lab: StabilityLab's load engine (CUDA driver API, kernels as PTX the driver compiles, every result checked bit
+       for bit on the CPU) as a process of its own, so a GPU that hangs takes the load down and not the MCP server or the
+       service. It reads the card through NVML only and writes nothing: a sweep's trials go through the broker. Not in
+       Clocktail.sln, like the other tools. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Clocktail.Domain\Clocktail.Domain.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>clocktail-lab</AssemblyName>
+    <RootNamespace>Clocktail.Lab</RootNamespace>
+  </PropertyGroup>
+
+</Project>
