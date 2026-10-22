@@ -96,6 +96,10 @@ All of it is in the founders preset.
 
 That 0.9 is a setting too, and your agent can raise it. At 0.92 XBAR ran 60 MHz higher, for 25 mV more on MSVDD and 15 MHz off the core. Whether that buys frames, nobody has measured. Yet.
 
+![3DMark Steel Nomad result page: score 15 757, valid result, RTX 5090 with an Intel Core i9-14900K, average clock frequency 2,878 MHz](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/steel-nomad-result.jpg)
+
+*3DMark Steel Nomad on an RTX 5090 tuned with Clocktail: 15 757, a valid result, at an average 2,878 MHz. The reference card's earlier run on the founders profile scored 15 177.*
+
 ## Uninstall
 
 ```

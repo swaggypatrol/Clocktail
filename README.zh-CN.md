@@ -81,6 +81,10 @@ npm 下载慢的话，先换国内镜像：`npm config set registry https://regi
 
 测试平台只有一张卡：RTX 5090 公版，驱动 617.42，Windows 11。你的卡不一样，每张卡都不一样。
 
+![3DMark Steel Nomad 成绩页：15 757 分，有效成绩，RTX 5090 搭配 Intel Core i9-14900K，平均频率 2,878 MHz](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/steel-nomad-result.jpg)
+
+*用 Clocktail 调过的 RTX 5090 跑 3DMark Steel Nomad：15 757 分，有效成绩，平均频率 2,878 MHz。参考卡之前用 founders 预设跑过 15 177 分。*
+
 你的卡要是读出来跟我们的对不上，让 AI 助手生成一份诊断报告（diagnostic report），附在 [GitHub issue](https://github.com/swaggypatrol/Clocktail/issues) 里发给我们。就一个纯文本的 JSON 文件：版本号、显卡、每个开关在你的卡上能不能调、驱动对每次读取是怎么回答的。生成它不会往显卡写任何东西，里面没有用户名、路径或文件，你不发，它哪儿也不去。
 
 ## 卸载
