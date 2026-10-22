@@ -39,8 +39,11 @@ public static class Controls
         new("domain V/F points", null, c => c.DomainVf, Slot.ClockClkVfPointsSetControl, NotOffered: "its rule is unknown"),
     ];
 
-    public static IReadOnlyList<Control> Map(Capabilities caps, WritePolicySet policy) =>
-        Table.Select(e => Describe(e, e.Has(caps), e.Setter is { } s ? policy.Get(s) : null)).ToList();
+    /// <param name="driver">NVAPI's driver version, for what a driver is known to drop (<see cref="VerifiedOn.RailWritesDropped"/>); 0 when unknown.</param>
+    public static IReadOnlyList<Control> Map(Capabilities caps, WritePolicySet policy, uint driver = 0) =>
+        Table.Select(e => e.Setter == Slot.VoltVoltRailsSetControl && VerifiedOn.RailWritesDroppedBy(driver) is { } dropped
+            ? new Control(e.Name, e.Tool, false, dropped)
+            : Describe(e, e.Has(caps), e.Setter is { } s ? policy.Get(s) : null)).ToList();
 
     private static Control Describe(Entry e, Capability has, WritePolicy? setter)
     {

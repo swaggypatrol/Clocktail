@@ -110,7 +110,7 @@ public sealed partial class SettingsTools(Card card)
                 var cr = card.WithDriver(ClockRatio.Read);
                 return new { ratio = Math.Round(cr.Ratio, 4), raw = cr.Raw, stock_raw = c.Stock(ClockRatio.Kind, ClockRatio.Key, Str((int)cr.Raw)), daily_raw = c.Daily(ClockRatio.Kind, ClockRatio.Key) };
             }),
-            controls = Section(() => Controls.Map(card.WithDriver(Capabilities.Probe), WritePolicySet.Default)
+            controls = Section(() => Controls.Map(card.WithDriver(Capabilities.Probe), WritePolicySet.Default, card.DriverVersion)
                 .Select(x => new { control = x.Name, tool = x.Tool, can = x.Can, why = x.Why }).ToList()),
             fans = new
             {

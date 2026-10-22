@@ -35,7 +35,7 @@ public sealed partial class SettingsTools
             branch = card.DriverBranch,
             tested_on = VerifiedOn.Describe(card.DriverVersion, card.Name, card.Vbios),
             tdr = Section(() => OperatingSystem.IsWindows() && Clocktail.Domain.Platform.TdrSettings.Read() is { } tdr ? tdr.Describe() : null),
-            controls = Section(() => Controls.Map(card.WithDriver(Capabilities.Probe), WritePolicySet.Default)
+            controls = Section(() => Controls.Map(card.WithDriver(Capabilities.Probe), WritePolicySet.Default, card.DriverVersion)
                 .Select(x => new { control = x.Name, tool = x.Tool, can = x.Can, why = x.Why }).ToList()),
             reads = sweep,
             journal_holds = held,

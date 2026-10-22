@@ -489,6 +489,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         [Description("Why this step (what you saw, what you expect).")] string? reason = null) => Guard(() =>
     {
         if (relDeltaMv == 0 && vminDeltaMv == 0) throw new ArgumentException("both deltas are 0: nothing to try");
+        if (Clocktail.Domain.VerifiedOn.RailWritesDroppedBy(card.DriverVersion) is { } dropped) throw new InvalidOperationException(dropped);
         if (-relDeltaMv > MsvddStepMv || -vminDeltaMv > MsvddStepMv)
             throw new ArgumentException($"a step down is at most {MsvddStepMv} mV per offset (CLOCKTAIL_MCP_MSVDD_STEP_MV); split it into several trials");
         if (relDeltaMv > MsvddRaiseStepMv || vminDeltaMv > MsvddRaiseStepMv)
@@ -555,6 +556,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         [Description("mV to add to NVVDD's VMIN offset (the floor); default 0.")] double vminDeltaMv = 0,
         [Description("Why this step (what you saw, what you expect).")] string? reason = null) => Guard(() =>
     {
+        if (Clocktail.Domain.VerifiedOn.RailWritesDroppedBy(card.DriverVersion) is { } dropped) throw new InvalidOperationException(dropped);
         double[] deltas = [relDeltaMv, altDeltaMv, ovDeltaMv, vminDeltaMv];
         if (deltas.All(x => x == 0)) throw new ArgumentException("every delta is 0: nothing to try");
         if (deltas.Any(x => -x > MsvddStepMv))

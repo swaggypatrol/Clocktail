@@ -14,6 +14,16 @@ public static class VerifiedOn
     /// <summary>NVAPI's driver version (61742 = 617.42).</summary>
     public static readonly uint[] Drivers = [61742];
 
+    /// <summary>Drivers that take a voltage-rail write (NVVDD's and MSVDD's offsets) and change nothing: the call answers OK
+    /// and the readback is the same. 621.01 on the reference card, 2026-10-22, both rails, up and down, after a reboot too;
+    /// a report traces it to a flag the driver sets when it loads, which its rail setter honours by skipping the offsets.</summary>
+    public static readonly uint[] RailWritesDropped = [62101];
+
+    /// <summary>Why rail writes cannot go on with this driver; null where they can.</summary>
+    public static string? RailWritesDroppedBy(uint driver) => RailWritesDropped.Contains(driver)
+        ? $"driver {Driver(driver)} takes NVVDD's and MSVDD's offsets and changes nothing (the call answers OK, the readback is the same; measured on the reference card, 2026-10-22): they stay where they are; go back to driver {Driver(Drivers[^1])} to set them"
+        : null;
+
     public static string Driver(uint version) => $"{version / 100}.{version % 100:00}";
 
     /// <summary>Each of the three, compared with what was tested (the VBIOS without regard to case).</summary>

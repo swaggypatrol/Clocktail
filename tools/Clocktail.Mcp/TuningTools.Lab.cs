@@ -399,9 +399,8 @@ public sealed partial class TuningTools
         [Description("Settings to compare instead of the search, each A B B A against the settings on the card: " +
             "'XBAR MHz/demand mV/ratio/MSVDD REL mV' separated by ';', e.g. '400/50/0.95/50;500/50/0.95/50'. One outside the " +
             "limits or the cliff rule is skipped; at most 30.")] string? candidates = null,
-        [Description("The highest MSVDD REL offset to try, mV (default the service's limit, +50). The offset on the card holds " +
-            "MSVDD where it is and tunes XBAR and the ratio alone: on driver 621.01, which drops every rail write, pass the card's " +
-            "REL offset (-50 at stock on a 5090).")] int? msvddRelMaxMv = null) => Guard(() =>
+        [Description("The highest MSVDD REL offset to try, mV (default the service's limit, +50; on a driver that drops rail " +
+            "writes, 621.01, the offset on the card). The offset on the card holds MSVDD where it is and tunes XBAR and the ratio alone.")] int? msvddRelMaxMv = null) => Guard(() =>
     {
         if (seconds is < 15 or > 60) throw new ArgumentException("seconds is 15..60");
         var list = Candidates(candidates);
@@ -414,7 +413,8 @@ public sealed partial class TuningTools
         uint ratioRaw = card.WithDriver(ClockRatio.Read).Raw;
         var msvdd = look.Msvdd ?? throw new InvalidOperationException("the MSVDD rail is unreadable");
         int relMv = msvdd.Offsets.RelUv / 1000;
-        int relMax = Math.Min(msvddRelMaxMv ?? MsvddRelMaxMv, MsvddRelMaxMv);
+        // A driver that drops rail writes (621.01) would refuse every MSVDD candidate: MSVDD stays where it is.
+        int relMax = Math.Min(msvddRelMaxMv ?? (Clocktail.Domain.VerifiedOn.RailWritesDroppedBy(card.DriverVersion) != null ? relMv : MsvddRelMaxMv), MsvddRelMaxMv);
         if (relMax < relMv) throw new ArgumentException($"msvddRelMaxMv is below MSVDD's REL offset on the card ({relMv:+0;-0;0} mV)");
         // ALT's limit above REL's with no offsets: a REL offset past it goes on with ALT raised by the rest (the rail's top is
         // the lowest of the two). Only while ALT holds no offset of its own.

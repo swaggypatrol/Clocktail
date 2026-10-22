@@ -70,6 +70,16 @@ public class CapabilitiesTests
         Assert.Contains("for each write the tool makes", curve.Why);
         Assert.True(Assert.Single(map, c => c.Name == "MSVDD voltage").Can);
 
+        // Driver 621.01 takes rail writes and changes nothing: both rail controls say so, the rest stand.
+        var on621 = Controls.Map(Capabilities.Probe(new NvClient(api), new GpuSession(1, "fake")), WritePolicySet.Default, 62101);
+        foreach (var rail in new[] { "MSVDD voltage", "NVVDD offsets" })
+        {
+            var c = Assert.Single(on621, x => x.Name == rail);
+            Assert.False(c.Can);
+            Assert.StartsWith("driver 621.01 takes NVVDD's and MSVDD's offsets and changes nothing", c.Why);
+        }
+        Assert.True(Assert.Single(on621, c => c.Name == "V/F curve").Can);
+
         var fans = Assert.Single(map, c => c.Name == "fixed fan speed");
         Assert.False(fans.Can);
         Assert.Contains("does not have it: missing", fans.Why);
