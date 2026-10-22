@@ -182,6 +182,10 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                         Thread.Sleep(3000);
                     }
                     string? stamp = TrialAt();
+                    // A step that writes nothing measures the daily profile: no trial may be in force then (one another
+                    // agent wrote during the warm-up would be measured as this offset).
+                    if (!trial && stamp != null)
+                        return Finish(SweepStatus.Failed, "a trial this sweep did not write is in force: back_to_daily, then run it again", offset);
                     Save(SweepStatus.Running, offset, null, $"measuring {offset:+0;-0;0} MHz for {spec.Seconds} s");
                     started = DateTime.UtcNow;
                     r = MeasureAlone(spec.Seconds, "memory,latency", _bufferMib, log);
