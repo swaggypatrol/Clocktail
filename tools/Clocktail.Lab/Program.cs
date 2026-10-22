@@ -65,12 +65,11 @@ try
             string self = Environment.ProcessPath ?? throw new InvalidOperationException("no process path");
             if (O("attached") == null)
             {
-                // Start the sweep from a process that exits at once, so it is nobody's child: the MCP server's worker ends
-                // with its whole process tree when the driver goes away, and a sweep past the memory's edge can do that.
-                var psi = new ProcessStartInfo(self) { UseShellExecute = false, CreateNoWindow = true };
-                foreach (var a in new[] { "sweep-memory", "--job", dir, "--attached" }) psi.ArgumentList.Add(a);
-                using var p = Process.Start(psi) ?? throw new InvalidOperationException("the sweep did not start");
-                Console.WriteLine(p.Id.ToString(CultureInfo.InvariantCulture));
+                // Start the sweep from a process that exits at once, so it is nobody's child, and out of its host's job
+                // (Detach): the MCP server's worker ends with its whole process tree when the driver goes away, and a
+                // sweep past the memory's edge can do that.
+                var (pid, inJob) = Detach.Start(self, ["sweep-memory", "--job", dir, "--attached"]);
+                Console.WriteLine($"{pid.ToString(CultureInfo.InvariantCulture)} {(inJob ? "in-job" : "detached")}");
                 return 0;
             }
             var spec = JsonSerializer.Deserialize<SweepSpec>(File.ReadAllText(Path.Combine(dir, "spec.json")), LabJson.Options)

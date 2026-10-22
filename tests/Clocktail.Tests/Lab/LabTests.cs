@@ -40,6 +40,16 @@ public class LabTests
         }
     }
 
+    /// <summary>The detached sweep's command line reads back as the arguments it was given, paths with spaces included.</summary>
+    [Theory]
+    [InlineData("plain", "plain")]
+    [InlineData(@"C:\Users\MING\AppData\Local\Clocktail\x\lab\sweep-1", @"C:\Users\MING\AppData\Local\Clocktail\x\lab\sweep-1")]
+    [InlineData(@"C:\Program Files\Clocktail\lab dir", "\"C:\\Program Files\\Clocktail\\lab dir\"")]
+    [InlineData(@"ends with slash\", "\"ends with slash\\\\\"")]
+    [InlineData("say \"hi\"", "\"say \\\"hi\\\"\"")]
+    [InlineData("", "\"\"")]
+    public void The_sweep_command_line_quotes_as_windows_reads_it(string arg, string quoted) => Assert.Equal(quoted, Detach.Quote(arg));
+
     [Fact]
     public void The_strides_are_the_testers()
     {

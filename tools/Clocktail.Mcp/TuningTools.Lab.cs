@@ -259,10 +259,13 @@ public sealed partial class TuningTools
         File.WriteAllText(Path.Combine(dir, "spec.json"), JsonSerializer.Serialize(spec, SnakeJson));
         var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
         foreach (var a in new[] { "sweep-memory", "--job", dir }) psi.ArgumentList.Add(a);
+        bool detached;
         using (var p = Process.Start(psi) ?? throw new InvalidOperationException("the lab did not start"))
         {
+            string answer = p.StandardOutput.ReadToEnd();
             p.WaitForExit(10_000);
             if (p.ExitCode != 0) throw new InvalidOperationException($"the lab did not start the sweep (exit code {p.ExitCode})");
+            detached = answer.Contains("detached", StringComparison.Ordinal);
         }
         int steps = (toMhz - from) / stepMhz + 1;
         card.Broker(BrokerRequest.OpExperiment, "note", string.Create(CultureInfo.InvariantCulture, $"tune_memory started: {from:+0;-0;0} → {toMhz:+0;-0;0} MHz in {stepMhz} MHz steps, {seconds} s each ({job})"));
@@ -270,6 +273,7 @@ public sealed partial class TuningTools
         {
             started = true, job, dir, from_mhz = from, to_mhz = toMhz, step_mhz = stepMhz, steps,
             minutes_at_most = Math.Ceiling((60 + steps * (seconds + 20)) / 60.0),
+            detached = detached ? null : "the sweep stays in this agent's job (its host does not let a process leave it): closing the agent may end it; lab_status says where it got to",
             next = "lab_status to follow it (each step adds a line); lab_stop ends it. The daily profile goes back on at the end; nothing is kept without the person",
         });
     });
