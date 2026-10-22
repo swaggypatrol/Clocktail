@@ -35,11 +35,13 @@ try
             using var cu = CudaApi.Load();
             int ordinal = Ordinal(cu, O("gpu-pci"));
             using var sampler = new NvmlSampler(cu.DevicePciBusId(cu.Device(ordinal)));
-            // What else is using the GPU before the lab allocates: utilization over a second, and the video memory others
-            // hold. The buffer never takes more than is free: WDDM lets CUDA allocate past the card and pages the rest to
-            // system memory (a 21.6 GiB buffer beside a 30 GiB llama-server took 10 s a pass instead of 30 ms).
-            double busy = 0;
-            for (int i = 0; i < 5; i++) { busy = Math.Max(busy, sampler.Read(0, -1).UtilPct ?? 0); Thread.Sleep(200); }
+            // What else is using the GPU before the lab allocates: utilization over a second (the median of five looks: one
+            // look at 100 % is the tail of the run before, the work of a moment), and the video memory others hold. The
+            // buffer never takes more than is free: WDDM lets CUDA allocate past the card and pages the rest to system
+            // memory (a 21.6 GiB buffer beside a 30 GiB llama-server took 10 s a pass instead of 30 ms).
+            var looks = new List<double>();
+            for (int i = 0; i < 5; i++) { looks.Add(sampler.Read(0, -1).UtilPct ?? 0); Thread.Sleep(200); }
+            double busy = looks.Order().ElementAt(looks.Count / 2);
             var (vramUsed, vramTotal) = sampler.Vram() ?? (0UL, 0UL);
             ulong cap = (ulong)(D("mem-cap-mib", 0) * (1 << 20));
             if (vramTotal > 0)

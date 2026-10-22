@@ -52,9 +52,11 @@ public sealed record Comparison(string Stage, UncoreSetting A, UncoreSetting B, 
 /// <summary>
 /// The uncore search, without the card: safe-ratchet coordinate ascent from the settings on the card, one axis at a time,
 /// one step at a time, a candidate kept only when the A B B A comparison says it is faster. XBAR first, each step with the
-/// voltage demand the rule asks for it and more where it hits the cliff, then the clock ratio (the 0.9 x core ceiling XBAR's
-/// offset runs into; XBAR again if it moved), then MSVDD's REL. An axis stops at a failure or at two candidates in a row that
-/// are not faster; an unjudged comparison (a shared GPU, the incumbent itself failing) or lab_stop ends the search.
+/// voltage demand the rule asks for it and more where it hits the cliff, then the clock ratio, then MSVDD's REL, in rounds:
+/// the axes hold each other (XBAR runs between the ratio's floor, 0.9 x the core, and the clock MSVDD's reliability limit
+/// allows, which on the reference card is what pins it at the daily +250 MHz), so an axis runs again when another one has
+/// moved the best since it last ran. An axis stops at a failure or at two candidates in a row that are not faster; an
+/// unjudged comparison (a shared GPU, the incumbent itself failing) or lab_stop ends the search.
 /// </summary>
 public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, UncoreSetting, Comparison> compare, Func<bool> stopAsked)
 {
@@ -63,13 +65,25 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
     public string? Ended { get; private set; }
     public string Stage { get; private set; } = "xbar";
 
+    /// <summary>The most rounds over the three axes; each after the first runs only the axes something has moved since.</summary>
+    public const int Rounds = 4;
+
     public void Run()
     {
-        Xbar();
-        var beforeRatio = Best;
-        if (Ended == null) Ratio();
-        if (Ended == null && Best.RatioRaw != beforeRatio.RatioRaw) Xbar();
-        if (Ended == null) Msvdd();
+        var after = new Dictionary<string, UncoreSetting>();
+        for (int round = 0; round < Rounds && Ended == null; round++)
+        {
+            bool ran = false;
+            foreach (var (axis, climb) in new (string, Action)[] { ("xbar", Xbar), ("ratio", Ratio), ("msvdd", Msvdd) })
+            {
+                if (Ended != null) break;
+                if (after.TryGetValue(axis, out var last) && last == Best) continue;
+                climb();
+                after[axis] = Best;
+                ran = true;
+            }
+            if (!ran) break;
+        }
     }
 
     private string Try(UncoreSetting candidate)
@@ -158,6 +172,8 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
         (double, double, double) d = (Math.Round(l2, 2), Math.Round(dram, 2), Math.Round(core, 2));
         if (core < -CoreFall * 100)
             return (Comparison.NotBetter, Inv($"the memory phase's core clock fell {core:0.0} %: the cliff (MSVDD at its floor pins the core near 1610 MHz)"), d.Item1, d.Item2, d.Item3);
+        if (core < -CoreLoss * 100)
+            return (Comparison.NotBetter, Inv($"the memory phase's core clock fell {core:0.00} %: XBAR could not follow the ratio, and a slower core costs compute-bound work more than the uncore gains"), d.Item1, d.Item2, d.Item3);
         if (dram < -DramFall * 100)
             return (Comparison.NotBetter, Inv($"DRAM bandwidth fell {dram:0.00} %"), d.Item1, d.Item2, d.Item3);
         if (r1 > 1 + Eps / 2 && r2 > 1 + Eps / 2 && l2 >= Eps * 100)
@@ -167,7 +183,10 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
 
     /// <summary>The least gain kept (0.5 %): a pass of the L2 test spreads ~1-5 %, the A B B A median well under that.</summary>
     public const double Eps = 0.005;
-    public const double DramFall = 0.005, CoreFall = 0.05;
+
+    /// <summary>The most DRAM bandwidth may fall (0.5 %); the most the core may (1 %: one V/F bin is ~0.5 %; on the reference
+    /// card ratio 0.925 with XBAR held under MSVDD's limit cost it 1.9 %); a fall past <see cref="CoreFall"/> is the cliff.</summary>
+    public const double DramFall = 0.005, CoreLoss = 0.01, CoreFall = 0.05;
 
     private static string Inv(FormattableString s) => s.ToString(System.Globalization.CultureInfo.InvariantCulture);
 }
@@ -227,12 +246,17 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         var runs = new List<UncoreRun>();
         UncoreRun Run(UncoreSetting s)
         {
-            var started = DateTime.UtcNow;
-            var r = Measure(spec.Seconds, "l2,memory", _bufferMib);
-            int? resets = OperatingSystem.IsWindows() ? Resets(started) : null;
-            var run = UncoreRun.Of(r, resets);
-            runs.Add(run);
-            return run;
+            for (int attempt = 0; ; attempt++)
+            {
+                var started = DateTime.UtcNow;
+                var r = Measure(spec.Seconds, "l2,memory", _bufferMib);
+                int? resets = OperatingSystem.IsWindows() ? Resets(started) : null;
+                var run = UncoreRun.Of(r, resets);
+                // A moment of other work (a window drawn, a screen saver) is measured again once before it ends the search.
+                if (run.Shared && run.Verdict == LabResult.Pass && attempt == 0) { log?.Invoke($"other work shared the GPU during a run at {s}: measuring it again"); Thread.Sleep(5000); continue; }
+                runs.Add(run);
+                return run;
+            }
         }
         Comparison Done(string outcome, string why, double? l2 = null, double? dram = null, double? core = null)
         {

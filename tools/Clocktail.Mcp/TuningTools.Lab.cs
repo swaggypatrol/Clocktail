@@ -296,14 +296,16 @@ public sealed partial class TuningTools
         "away where its host allows): from the settings on the card, one axis at a time, one step at a time, each candidate " +
         "a trial through the service compared A B B A against the best so far by the lab: L2 bandwidth (a 32 MiB region walked " +
         "over and over: the crossbar XBAR clocks), DRAM bandwidth, and the memory phase's core clock. A candidate is kept only " +
-        "when L2 bandwidth rose in both pairs and by 0.5 % or more, DRAM bandwidth did not fall and the core did not drop 5 % " +
-        "(the cliff: MSVDD at its floor pins it near 1610 MHz). Axes in order: XBAR's offset on a ladder of voltage demands " +
-        "(adjust_xbar's rule: above +250 MHz +20 mV, above +300 +50 mV; a demand that buys nothing ends the climb), the " +
-        "XBAR/core clock ratio (the 0.9 x core ceiling; XBAR again when it moved), MSVDD's REL (up to +20 mV). An axis stops at a " +
+        "when L2 bandwidth rose in both pairs and by 0.5 % or more, DRAM bandwidth did not fall and the core did not fall 1 % " +
+        "(5 % is the cliff: MSVDD at its floor pins it near 1610 MHz). Axes in order: XBAR's offset, each step with the demand " +
+        "adjust_xbar's rule asks for (above +250 MHz +20 mV, above +300 +50 mV; more where a step still hits the cliff), the " +
+        "XBAR/core clock ratio (its 0.9 x core floor), MSVDD's REL (up to +20 mV; its reliability limit is XBAR's ceiling), in " +
+        "rounds: an axis runs again when another has moved the best since. An axis stops at a " +
         "failure (recorded as its trial's crash) or two candidates in a row that are not faster. The daily profile goes back " +
         "on at the end; nothing is kept: lab_status names the best setting to try. Needs an open session (begin_session) with " +
-        "no trial in force, and the GPU to itself. On the reference card XBAR +300 with +20 mV made Blender 6-7 % faster; " +
-        "this tuner's own gains are not measured yet. Tell the person first: it raises voltages and clocks past their daily ones.")]
+        "no trial in force, and the GPU to itself. On the reference card XBAR +300 with +20 mV made Blender 6-7 % faster; a " +
+        "short check of this tuner found +2.8 % L2 at MSVDD REL +10 mV, ratio 0.925, XBAR +300 / +20 mV (manual xbar-msvdd); " +
+        "games not measured. Tell the person first: it raises voltages and clocks past their daily ones.")]
     public string TuneUncore(
         [Description("The highest XBAR offset to try, MHz (default 500; the driver allows 1000; past +400 is unmeasured).")] int xbarMaxMhz = 500,
         [Description("Seconds the lab measures each run, 15..60 (default 20; a comparison is four runs).")] int seconds = 20) => Guard(() =>

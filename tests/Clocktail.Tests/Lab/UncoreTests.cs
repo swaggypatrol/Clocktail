@@ -35,6 +35,12 @@ public class UncoreTests
         Assert.Contains("the cliff", cliff.Why);
         var dram = UncoreSearch.Judge(R(4780), R(4900, dram: 1540), R(4900, dram: 1545), R(4780));
         Assert.Contains("DRAM bandwidth fell", dram.Why);
+        // Ratio 0.925 with XBAR held under MSVDD's limit, as measured: the core 1.9 % down is no cliff, and still not better.
+        var core = UncoreSearch.Judge(R(4780), R(4900, core: 2915), R(4900, core: 2912), R(4780));
+        Assert.Equal(Comparison.NotBetter, core.Outcome);
+        Assert.Contains("XBAR could not follow the ratio", core.Why);
+        // One V/F bin (15 MHz, 0.5 %) is not a loss.
+        Assert.Equal(Comparison.Better, UncoreSearch.Judge(R(4780), R(4830, core: 2955), R(4825, core: 2955), R(4782)).Outcome);
     }
 
     [Fact]
@@ -78,6 +84,19 @@ public class UncoreTests
         Assert.DoesNotContain(tried, s => s.XbarMhz > 300 && s.DemandMv < 50);
         Assert.Contains(tried, s => s.MsvddRelMv == 10);
         Assert.True(tried.Count < 20, $"{tried.Count} comparisons");
+    }
+
+    /// <summary>The reference card at its daily +250 MHz: XBAR sits under the clock MSVDD's reliability limit allows, so its
+    /// offset buys nothing until MSVDD's REL is raised; then the next round climbs XBAR again.</summary>
+    [Fact]
+    public void An_axis_runs_again_when_another_one_moved_the_best()
+    {
+        double Speed(UncoreSetting s) => 4780 * (s.MsvddRelMv >= 10 ? 1.01 * (1 + 0.01 * Math.Min(s.XbarMhz - 250, 100) / 50.0) : 1);
+        var (search, tried) = Run(Speed);
+        Assert.Equal(new UncoreSetting(350, 50, 58976, 10), search.Best);
+        Assert.Equal([300, 350], tried.Where(s => s.MsvddRelMv == 0 && s.RatioRaw == 58976 && s.XbarMhz > 250).Select(s => s.XbarMhz));
+        Assert.Contains(tried, s => s.MsvddRelMv == 10 && s.XbarMhz == 350);
+        Assert.True(tried.Count < 16, $"{tried.Count} comparisons");
     }
 
     [Fact]
