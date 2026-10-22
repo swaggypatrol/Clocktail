@@ -88,7 +88,47 @@ public sealed class BrokerDispatcher
     /// <summary>Why a GPU looks hung right now (the broker's flight recorder; <see cref="FlightRecorder.HungNow"/>), or null.</summary>
     public Func<string, string?> HungReason { get; set; } = _ => null;
 
+    /// <summary>
+    /// One whole operation at a time: a profile op or a trial reads the profile and the experiment, writes the card and
+    /// saves them, and the write window alone covers only the write in the middle (two "wall"s could leave the card at one
+    /// and the profile at the other, both answering success). Reentrant, so an operation's own writes, which come back
+    /// through <see cref="Dispatch"/> on the same thread, go straight through; taken before the write window, never inside it.
+    /// </summary>
+    private readonly object _operation = new();
+
+    /// <summary>The measurement lease of the request in flight (<see cref="BrokerRequest.Lease"/>), for the judge: the
+    /// holder's own writes, nested ones too, pass the lock it holds.</summary>
+    public static readonly AsyncLocal<string?> CurrentLease = new();
+
     public BrokerResponse Dispatch(BrokerRequest req)
+    {
+        string? prior = CurrentLease.Value;
+        if (req.Lease != null) CurrentLease.Value = req.Lease;
+        bool entered = false;
+        try
+        {
+            if (Changes(req))
+            {
+                if (!Monitor.TryEnter(_operation, WindowWait))
+                    return Fail($"another operation has held the card for over {WindowWait.TotalSeconds:0} s; nothing was done, try again", BrokerCode.WindowBusy);
+                entered = true;
+            }
+            return DispatchOne(req);
+        }
+        finally
+        {
+            if (entered) Monitor.Exit(_operation);
+            CurrentLease.Value = prior;
+        }
+    }
+
+    /// <summary>Whether the request can change the card, the profile or the experiment: everything but the reads.</summary>
+    private static bool Changes(BrokerRequest req) =>
+        req.IsWrite
+        || req.Op == BrokerRequest.OpProfile && req.Kind is not ("show" or "preview" or "saved")
+        || req.Op == BrokerRequest.OpExperiment && req.Kind is not ("show" or "alive");
+
+    private BrokerResponse DispatchOne(BrokerRequest req)
     {
         try
         {
@@ -270,8 +310,15 @@ public sealed class BrokerDispatcher
                         : trialWall ? "A trial's power limit, current limits, fixed fan duties, the F8 request, clock floors, point locks and Boost Lock are not kept" : "Current limits, fixed fan duties, the F8 request, clock floors, point locks and Boost Lock are not kept",
                     .. kept.Writes.Select(w => $"New: {w.Kind}/{w.Key} = {w.Value}"),
                     .. (profile?.Writes ?? []).Select(w => $"Old: {w.Kind}/{w.Key} = {w.Value}"),
-                    .. wall != null ? ["Daily power limit put back:", .. Writes(wall)] : Array.Empty<string>()]);
-                return Ok(new { success = true, path, profile = kept });
+                    .. wall != null ? ["Daily power limit put back:", .. Writes(wall)] : Array.Empty<string>(),
+                    wall is { Ok: false } ? $"The card did not finish switching to it: {wall.Error}" : null]);
+                // Saved is not switched: a trial's wall, limits or fans that did not go back are still on the card, and the
+                // answer says so instead of success.
+                if (wall is { Ok: false })
+                    return new BrokerResponse(false,
+                        $"the daily profile is saved, but the card did not finish switching to it: {wall.Error}; back_to_daily (or load_daily) tries again",
+                        Element(new { success = false, saved = true, switched = false, path, profile = kept, pending = wall.Result }), wall.Code ?? BrokerCode.Failed);
+                return Ok(new { success = true, saved = true, switched = true, path, profile = kept });
             }
             case "off":
                 CloseTrial(target, Experiment.Survived, "the card went back to stock");

@@ -268,4 +268,39 @@ public class LabTests
         Assert.Contains("over the lowest step's 498", MemorySweep.Signal(steps));
         Assert.Equal(50, MemorySweep.Best(steps));
     }
+
+    private sealed class TempSampler(Func<uint?> temp) : ISampler
+    {
+        public LabSample Read(double t, int phase) => new(t, phase, 400, temp(), 2800, 13801, 99, 0);
+        public void Dispose() { }
+    }
+
+    /// <summary>The run's own guard, whoever started it (a job's measurement as much as lab_test): at the temperature limit
+    /// it stops, and the verdict is inconclusive, neither a pass nor the setting's failure.</summary>
+    [Fact]
+    public void A_run_that_gets_too_hot_stops_itself_and_is_neither_a_pass_nor_a_failure()
+    {
+        var e = new FakeEngine();
+        var (clock, sleep) = FakeTime(e);
+        // The fake clock runs the load in microseconds; the sampler loops freely so its two readings come first.
+        var runner = new LabRunner(new LabConfig(LabConfig.Parse("burn", 60_000), SampleMs: 100), e, new TempSampler(() => 95), clock, sleep, sampleWait: _ => Thread.Yield());
+        var phases = runner.Run(CancellationToken.None);
+        var (verdict, reasons) = LabRunner.Judge(phases, 1, runner.Interrupted);
+        Assert.Equal(LabResult.Inconclusive, verdict);
+        Assert.Contains("95 °C, the 85 °C limit", Assert.Single(reasons));
+        Assert.Equal(LabResult.ByTemperature, runner.InterruptedBy);
+        Assert.True(phases.Sum(p => p.Seconds) < 60_000);
+    }
+
+    [Fact]
+    public void A_run_nobody_can_watch_stops_itself()
+    {
+        var e = new FakeEngine();
+        var (clock, sleep) = FakeTime(e);
+        var runner = new LabRunner(new LabConfig(LabConfig.Parse("burn", 60_000), SampleMs: 100), e, new TempSampler(() => null), clock, sleep, sampleWait: _ => Thread.Yield());
+        var phases = runner.Run(CancellationToken.None);
+        Assert.Equal(LabResult.ByTelemetry, runner.InterruptedBy);
+        Assert.Equal(LabResult.Inconclusive, LabRunner.Judge(phases, 1, runner.Interrupted).Verdict);
+        Assert.True(phases.Sum(p => p.Seconds) < 60_000);
+    }
 }

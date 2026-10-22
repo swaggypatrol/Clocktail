@@ -11,8 +11,12 @@ namespace Clocktail.Lab;
 /// </summary>
 public enum LabPhase { Burn, Light, Pulse, Memory, Latency, L2 }
 
+/// <summary>What a run does. MaxTempC: the run stops when the GPU reaches it (two readings in a row), as stress_test does;
+/// TelemetryLostSeconds: it stops when NVML gives no temperature for that long, since a card nobody can watch is not
+/// loaded. Either stop leaves the run inconclusive, not a pass and not a crash, with the reason in
+/// <see cref="LabRunner.Interrupted"/>; every entry point (lab_test, the jobs' measurements) runs through it.</summary>
 public sealed record LabConfig(IReadOnlyList<(LabPhase Kind, double Seconds)> Phases, double TargetW = 0, int LightDiv = 64,
-    uint Seed = 0x5EED, int SampleMs = 100, int ChunkMs = 150, double PulseDuty = 0.6)
+    uint Seed = 0x5EED, int SampleMs = 100, int ChunkMs = 150, double PulseDuty = 0.6, double MaxTempC = 85, double TelemetryLostSeconds = 10)
 {
     public static IReadOnlyList<(LabPhase, double)> Parse(string list, double seconds)
     {
@@ -58,8 +62,13 @@ public sealed class PhaseResult
 
 public sealed record LabResult(string Device, string Pci, ulong BufferMib, int SmCount, DateTime StartedUtc, DateTime FinishedUtc,
     IReadOnlyList<PhaseResult> Phases, string Verdict, IReadOnlyList<string> Reasons, double? BusyBeforePct = null, ulong? OthersVramMib = null,
-    double? BusyAfterPct = null)
+    double? BusyAfterPct = null, string? Interrupted = null)
 {
+    /// <summary>Why the run was cut short or never ran, when it was: the temperature limit, telemetry lost, a stop asked,
+    /// the measuring process failing (no result, a hang with no driver reset). Such a run is inconclusive: it says nothing
+    /// about the setting, and is never recorded as the setting's crash.</summary>
+    public const string ByTemperature = "temperature", ByTelemetry = "telemetry", ByStop = "stopped", ByRunner = "runner";
+
     /// <summary>Other work shares the GPU, so speeds (bandwidth, latency, Gflop/s) are not the card's alone: other programs held
     /// over 4 GiB of video memory before the lab started (a local AI model, a game; the desktop holds 1-2), kept it over half
     /// busy before the load, or over <see cref="BusyAfterPct"/>'s 10 % just after it. Utilization is time, so it reads by the
@@ -87,6 +96,11 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
     private readonly List<LabSample> _samples = [];
     private readonly object _lock = new();
     private volatile int _phase = -1;
+    private volatile string? _interrupted, _interruptedBy;
+
+    /// <summary>Why the run stopped itself (the temperature limit, telemetry lost), or null; and which (<see cref="LabResult"/>'s By*).</summary>
+    public string? Interrupted => _interrupted;
+    public string? InterruptedBy => _interruptedBy;
 
     /// <summary>The least GPU time each pattern gets per round of the memory phase.</summary>
     public const double RoundMs = 150;
@@ -103,22 +117,44 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
     {
         var phases = new List<PhaseResult>();
         using var stop = new CancellationTokenSource();
+        using var halt = CancellationTokenSource.CreateLinkedTokenSource(ct);
         double t0 = _now();
         var thread = new Thread(() =>
         {
+            int hot = 0;
+            double lastTemp = _now();
             while (!stop.IsCancellationRequested)
             {
                 var s = sampler.Read(_now() - t0, _phase);
                 lock (_lock) _samples.Add(s);
+                // The run's own guard, whoever started it: hot twice in a row, or no temperature for too long, ends it.
+                if (s.TempC is { } c)
+                {
+                    lastTemp = _now();
+                    hot = c >= cfg.MaxTempC ? hot + 1 : 0;
+                    if (hot >= 2) Halt(LabResult.ByTemperature, Inv($"the GPU reached {c} °C, the {cfg.MaxTempC:0} °C limit: stopped, not a pass or a crash"));
+                }
+                else if (_now() - lastTemp > cfg.TelemetryLostSeconds)
+                    Halt(LabResult.ByTelemetry, Inv($"NVML gave no temperature for {cfg.TelemetryLostSeconds:0} s: stopped, the card could not be watched"));
                 _sampleWait(cfg.SampleMs);
             }
         }) { IsBackground = true, Name = "nvml" };
+
+        void Halt(string by, string why)
+        {
+            if (_interrupted != null) return;
+            _interruptedBy = by;
+            _interrupted = why;
+            log?.Invoke(why);
+            try { halt.Cancel(); } catch (ObjectDisposedException) { }
+        }
+
         thread.Start();
         try
         {
-            for (int i = 0; i < cfg.Phases.Count && !ct.IsCancellationRequested; i++)
+            for (int i = 0; i < cfg.Phases.Count && !halt.IsCancellationRequested; i++)
             {
-                var pr = RunPhase(i, cfg.Phases[i].Kind, cfg.Phases[i].Seconds, ct);
+                var pr = RunPhase(i, cfg.Phases[i].Kind, cfg.Phases[i].Seconds, halt.Token);
                 phases.Add(pr);
                 if (pr.Error != null) { log?.Invoke($"{pr.Kind} stopped: {pr.Error}"); break; }
             }
@@ -268,6 +304,8 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         return pr;
     }
 
+    private static string Inv(FormattableString s) => s.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
     public static double? P50(IEnumerable<double?> xs)
     {
         var v = xs.Where(x => x != null).Select(x => x!.Value).Order().ToList();
@@ -282,9 +320,10 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         return mean <= 0 ? 0 : Math.Sqrt(xs.Sum(x => (x - mean) * (x - mean)) / (xs.Count - 1)) / mean * 100;
     }
 
-    /// <summary>The verdict on a run: any bad bit, wrong chain end or dead context fails it; one that never loaded the card for
-    /// 10 s, or stopped early with nothing wrong, is inconclusive.</summary>
-    public static (string Verdict, List<string> Reasons) Judge(IReadOnlyList<PhaseResult> phases, int planned)
+    /// <summary>The verdict on a run: any bad bit, wrong chain end or dead context fails it; one that stopped itself
+    /// (<paramref name="interrupted"/>: the temperature limit, telemetry lost), never loaded the card for 10 s, or stopped
+    /// early with nothing wrong, is inconclusive.</summary>
+    public static (string Verdict, List<string> Reasons) Judge(IReadOnlyList<PhaseResult> phases, int planned, string? interrupted = null)
     {
         var reasons = new List<string>();
         foreach (var p in phases)
@@ -295,6 +334,7 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
             if (p.Error != null) reasons.Add($"{p.Kind}: {p.Error} (GPU fault)");
         }
         if (reasons.Count > 0) return (LabResult.Fail, reasons);
+        if (interrupted != null) return (LabResult.Inconclusive, [interrupted]);
         if (phases.Count < planned || phases.Any(p => !p.Completed)) return (LabResult.Inconclusive, ["the run stopped before every phase finished"]);
         if (phases.Sum(p => p.Seconds) < 10) return (LabResult.Inconclusive, ["under 10 s of load"]);
         return (LabResult.Pass, []);

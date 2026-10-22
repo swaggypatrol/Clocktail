@@ -98,4 +98,23 @@ public class JudgeLockTests : IDisposable
         }
         finally { try { Directory.Delete(local, true); } catch (IOException) { } }
     }
+
+    /// <summary>The measurement lease: one holder at a time, its holder may take it again, only its holder gives it back, and
+    /// a lock whose process is gone is taken over.</summary>
+    [Fact]
+    public void The_lease_is_held_once_given_back_by_its_holder_only_and_a_dead_ones_is_taken_over()
+    {
+        string local = Path.Combine(Path.GetTempPath(), "clocktail-tests", "no-local");
+        Assert.True(JudgeLock.TryAcquire(_path, new JudgeLock.Info(100, "run-1", "clocktail-lab run-1"), _host, local, out _));
+        Assert.False(JudgeLock.TryAcquire(_path, new JudgeLock.Info(100, "run-2", "lab_test"), _host, local, out var by));
+        Assert.Contains("clocktail-lab run-1", by);
+        Assert.True(JudgeLock.TryAcquire(_path, new JudgeLock.Info(100, "run-1", "clocktail-lab run-1"), _host, local, out _));
+        JudgeLock.Release(_path, "run-2");
+        Assert.True(File.Exists(_path));
+        JudgeLock.Release(_path, "run-1");
+        Assert.False(File.Exists(_path));
+        File.WriteAllText(_path, """{"Pid":999,"RunId":"old"}""");   // its process is gone
+        Assert.True(JudgeLock.TryAcquire(_path, new JudgeLock.Info(100, "run-3"), _host, local, out _));
+        Assert.Equal("run-3", JudgeLock.Live(_path, _host, out _)!.RunId);
+    }
 }

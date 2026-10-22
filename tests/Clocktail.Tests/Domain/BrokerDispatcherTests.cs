@@ -1426,4 +1426,77 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("a trial is in force", trial.Result!.Value.GetProperty("skipped").GetString());
         Assert.Equal(575_000u, _requests[0xfe]);   // nothing written under the trial
     }
+
+    /// <summary>One whole operation at a time: a profile change that needs no write ("off") waits while a "wall" is in its
+    /// write, instead of saving the profile under it and having the wall's save, made from the profile it read before,
+    /// undo it. Before, the suspension was lost and both answered success.</summary>
+    [Fact]
+    public void A_profile_change_waits_for_a_wall_in_its_write_instead_of_being_overwritten()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "590000")).Ok);
+        using var inWrite = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var inner = FakeDriver.RequestApplier!;
+        int calls = 0;
+        FakeDriver.RequestApplier = (state, req) =>
+        {
+            var s = inner(state, req);
+            if (Interlocked.Increment(ref calls) == 1) { inWrite.Set(); release.Wait(5000); }
+            return s;
+        };
+        BrokerResponse? wall = null, off = null;
+        var a = new Thread(() => wall = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "600000")));
+        a.Start();
+        Assert.True(inWrite.Wait(5000));
+        var b = new Thread(() => off = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "off")));
+        b.Start();
+        Assert.False(b.Join(300));          // "off" waits for the wall's whole operation, not only its write
+        release.Set();
+        Assert.True(a.Join(10_000) && b.Join(10_000));
+        Assert.True(wall!.Ok, wall.Error);
+        Assert.True(off!.Ok, off.Error);
+        var kept = DailyProfile.Load(DailyProfile.PathBeside(_journal.Path))!;
+        Assert.True(kept.Suspended);        // "off" came last and stuck
+        Assert.Equal("600000", Assert.Single(kept.Writes, w => w.Kind == PowerCap.Kind).Value);
+    }
+
+    /// <summary>A measurement holds judge.lock: every other write waits, and the holder's own (its lease on the request,
+    /// the nested write of a profile op too) goes through.</summary>
+    [Fact]
+    public void A_measurement_lease_lets_only_its_holders_writes_through()
+    {
+        var d = Power(judge: () => BrokerDispatcher.CurrentLease.Value == "run-1" ? null : "pid 4321 'clocktail-lab'");
+        static BrokerRequest Wall(uint mw, string? lease = null) =>
+            new(BrokerRequest.OpProfile, Kind: "wall", Value: mw.ToString(System.Globalization.CultureInfo.InvariantCulture), Lease: lease);
+        var other = d.Dispatch(Wall(590_000));
+        Assert.False(other.Ok);
+        Assert.Equal(BrokerCode.JudgeBusy, other.Code);
+        Assert.Equal(575_000u, _requests[0xfe]);
+        var own = d.Dispatch(Wall(590_000, "run-1"));
+        Assert.True(own.Ok, own.Error);
+        Assert.Equal(590_000u, _requests[0xfe]);
+        Assert.Null(BrokerDispatcher.CurrentLease.Value);   // given back with the request
+        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(Wall(600_000, "run-2")).Code);
+    }
+
+    /// <summary>Saved is not switched: when the trial's wall does not come off, keep answers that, with the profile saved,
+    /// instead of success.</summary>
+    [Fact]
+    public void Keep_says_when_the_card_did_not_finish_switching_to_the_profile()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "600000")).Ok);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"Cyberpunk"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "wall 600 → 450 W", power_mw = 450_000u, keep_curve = true }))).Ok);
+        Assert.Equal(450_000u, _requests[0xfe]);
+        FakeDriver.RequestApplier = (state, _) => state;   // the board stops taking the wall
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep"));
+        Assert.False(r.Ok);
+        Assert.Contains("saved, but the card did not finish switching", r.Error);
+        Assert.True(r.Result!.Value.GetProperty("saved").GetBoolean());
+        Assert.False(r.Result!.Value.GetProperty("switched").GetBoolean());
+        Assert.NotNull(DailyProfile.Load(DailyProfile.PathBeside(_journal.Path)));
+        Assert.Equal(450_000u, _requests[0xfe]);           // still the trial's: what the answer says is pending
+    }
 }

@@ -105,9 +105,11 @@ static int Run()
     var judgePath = BrokerPaths.JudgeLockPath();
     Func<string?> judge = () =>
     {
-        var busy = JudgeLock.BusyReason(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out var trace);
-        Console.WriteLine($"{DateTimeOffset.Now:u} judge: {trace} -> {(busy == null ? "free" : "busy")}");   // one line per write op
-        return busy;
+        var live = JudgeLock.Live(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out var trace);
+        // The holder's own writes carry its RunId as their lease: the lab writes its next candidate while it holds the card.
+        bool own = live?.RunId is { } run && run == BrokerDispatcher.CurrentLease.Value;
+        Console.WriteLine($"{DateTimeOffset.Now:u} judge: {trace} -> {(live == null ? "free" : own ? "held by this request's own lease" : "busy")}");   // one line per write op
+        return live == null || own ? null : JudgeLock.Reason(live);
     };
     var targets = new WindowsGpuTargets(mgr, host, judge);  // each sentinel asks the judge again once it is on disk
     var dispatcher = new BrokerDispatcher(hw, targets, host, canWrite: true, judge, new FrameCapture());

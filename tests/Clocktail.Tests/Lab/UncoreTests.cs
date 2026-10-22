@@ -202,4 +202,15 @@ public class UncoreTests
         Assert.Equal("stopped (lab_stop)", search.Ended);
         Assert.Equal(2, tried.Count);
     }
+
+    /// <summary>A candidate's run that could not be made (too hot, the runner) says nothing about the candidate: unjudged,
+    /// never its failure, so no crash is recorded against the setting.</summary>
+    [Fact]
+    public void A_candidate_run_that_could_not_be_made_is_unjudged_not_failed()
+    {
+        var j = UncoreSearch.Judge(R(4780), R(4900, verdict: LabResult.Inconclusive), R(4900), R(4780));
+        Assert.Equal(Comparison.Unjudged, j.Outcome);
+        Assert.Contains("could not be judged", j.Why);
+        Assert.Equal(Comparison.Failed, UncoreSearch.Judge(R(4780), R(4900), R(4900, verdict: LabResult.Fail), R(4780)).Outcome);
+    }
 }

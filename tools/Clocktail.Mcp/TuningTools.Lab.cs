@@ -5,6 +5,8 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Clocktail.Domain.Broker;
 using Clocktail.Domain.Clocks;
+using Clocktail.Domain.Ownership;
+using Clocktail.Domain.Platform;
 using Clocktail.Domain.Vf;
 using ModelContextProtocol.Server;
 
@@ -67,6 +69,13 @@ public sealed partial class TuningTools
                                   "--gpu-pci", card.PciBusId, "--light-div", lightDiv.ToString(CultureInfo.InvariantCulture) })
             psi.ArgumentList.Add(a);
         if (targetW is { } w) { psi.ArgumentList.Add("--target-w"); psi.ArgumentList.Add(w.ToString(CultureInfo.InvariantCulture)); }
+        psi.ArgumentList.Add("--max-temp-c"); psi.ArgumentList.Add(maxC.ToString(CultureInfo.InvariantCulture));   // the lab's own guard, besides this one
+
+        // The measurement holds the card: while it runs no write lands under it (another agent's, the service's own).
+        string runId = $"lab-test-{Guid.NewGuid():n}", lockPath = JudgeLock.DefaultPath();
+        if (!JudgeLock.TryAcquire(lockPath, new JudgeLock.Info(Environment.ProcessId, runId, "lab_test", DateTimeOffset.UtcNow), new SystemHost(),
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), out var heldBy))
+            throw new InvalidOperationException($"another run holds the card ({heldBy}): wait for it to finish (lab_status), or lab_stop");
 
         var samples = new List<Card.Sample>();
         int hotRun = 0;
@@ -76,9 +85,12 @@ public sealed partial class TuningTools
         int? code = null;
         bool hot = false, hung = false;
         residency.StressUntil(DateTimeOffset.Now.AddSeconds(seconds + 60));
+        using var children = OperatingSystem.IsWindows() ? new KillOnCloseJob() : null;
+        Process? p = null;
         try
         {
-            using var p = Process.Start(psi) ?? throw new InvalidOperationException("the lab did not start");
+            p = Process.Start(psi) ?? throw new InvalidOperationException("the lab did not start");
+            if (OperatingSystem.IsWindows()) children?.Add(p);   // it never outlives this server
             var stderr = p.StandardError.ReadToEndAsync();
             var deadline = started.AddSeconds(seconds + grace + 30);
             while (!p.WaitForExit(500))
@@ -92,11 +104,18 @@ public sealed partial class TuningTools
                 catch (DriverBusyException) { }
                 if (hotRun >= 2) { hot = true; stopC = samples[^1].Telemetry?.TemperatureC; }
                 if (DateTime.UtcNow > deadline) hung = true;
-                if (hot || hung) { try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { } break; }
+                if (hot || hung) break;
             }
             if (!hot && !hung) code = p.ExitCode;
         }
-        finally { residency.StressUntil(DateTimeOffset.MinValue); }
+        finally
+        {
+            // Stopped and waited for on every way out (a sampling error too): nothing after this, a crash record or the daily
+            // profile going back, runs under its load.
+            if (p != null) { ChildProcess.Stop(p); p.Dispose(); }
+            JudgeLock.Release(lockPath, runId);
+            residency.StressUntil(DateTimeOffset.MinValue);
+        }
 
         int? resets = Nvgwls.DriverResets(started, code is 0 or 4 or 5 ? 0 : 2);
         JsonElement? lab = null;
@@ -110,9 +129,12 @@ public sealed partial class TuningTools
         double? busyAfter = lab is { } l7 && l7.TryGetProperty("busy_after_pct", out var ba) && ba.ValueKind == JsonValueKind.Number ? ba.GetDouble() : null;
         bool shared = lab is { } l8 && l8.TryGetProperty("shared", out var sh) && sh.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? sh.GetBoolean() : others > 4096 || busy > 50 || busyAfter > 10;
-        bool failed = resets > 0 || hung || labVerdict == "fail" || !hot && code is not (0 or 4 or 5);
+        // The card's failure is a bad bit, a dead context or a driver reset; a lab that hung with no reset (a GPU hang brings
+        // one within the TDR delay), crashed or wrote nothing is the runner's, and says nothing about the setting.
+        bool failed = resets > 0 || labVerdict == "fail";
+        bool runner = !failed && !hot && (hung || code is not (0 or 4 or 5) || labVerdict == "none");
         string verdict = resets > 0 ? $"driver reset ({resets}) during the run"
-            : hung ? $"the lab did not finish within {seconds + grace + 30} s: a hang"
+            : hung ? $"the lab did not finish within {seconds + grace + 30} s and no driver reset followed: the run's fault, not the card's"
             : hot ? string.Create(CultureInfo.InvariantCulture, $"thermal stop at {stopC:0} °C (maxTempC {maxC}): stopped by lab_test, not a pass or a crash")
             : labVerdict == "none" ? $"the lab ended without a result (exit code {code})"
             : labVerdict;
@@ -168,7 +190,8 @@ public sealed partial class TuningTools
             trial_in_force = trial,
             crash_recorded = crashRecorded,
             next = failed ? "the card failed: read data_points / read_log before the next step"
-                : hot ? "too hot to test this way: a steeper fan curve, fans back to auto, or a lower wall, then run again" : null,
+                : hot ? "too hot to test this way: a steeper fan curve, fans back to auto, or a lower wall, then run again"
+                : runner ? "the run itself failed, not the card: nothing was recorded against the setting; run it again" : null,
         });
     });
 
@@ -240,6 +263,7 @@ public sealed partial class TuningTools
     {
         if (stepMhz is < 25 or > 100) throw new ArgumentException("stepMhz is 25..100");
         if (seconds is < 30 or > 300) throw new ArgumentException("seconds is 30..300");
+        using var starting = StartLock();   // the check and the start as one: no second job slips in between
         var (exe, look) = JobPreflight();
         var p0 = card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Memory) ?? throw new InvalidOperationException("the memory offset is unreadable");
         int daily = p0.DeltaKhz / 1000, from = fromMhz ?? daily;
@@ -266,6 +290,36 @@ public sealed partial class TuningTools
 
     /// <summary>What a background lab job needs before it starts: the lab, an open session with no trial in force, no other
     /// job running, and the GPU to itself (it measures speed). The lab and the card as read now.</summary>
+    /// <summary>Held around a job's preflight and start, so two agents that both found the card free cannot both start one.</summary>
+    private IDisposable StartLock()
+    {
+        var m = new Mutex(false, LabCard.StartMutex(card.StableId));
+        try
+        {
+            if (!m.WaitOne(TimeSpan.FromSeconds(30))) { m.Dispose(); throw new InvalidOperationException("another agent is starting a lab job on this card: lab_status in a moment"); }
+        }
+        catch (AbandonedMutexException) { }
+        return new MutexHeld(m);
+    }
+
+    private sealed class MutexHeld(Mutex m) : IDisposable
+    {
+        public void Dispose() { try { m.ReleaseMutex(); } catch (ApplicationException) { } m.Dispose(); }
+    }
+
+    /// <summary>Whether a lab job holds the card (the mutex it holds for its life).</summary>
+    private bool CardTaken()
+    {
+        using var m = new Mutex(false, LabCard.JobMutex(card.StableId));
+        try
+        {
+            if (!m.WaitOne(0)) return true;
+        }
+        catch (AbandonedMutexException) { }
+        m.ReleaseMutex();
+        return false;
+    }
+
     private (string Exe, Card.Look Look) JobPreflight()
     {
         string exe = LabExe() ?? throw new InvalidOperationException("clocktail-lab.exe is not beside this server: run npx -y clocktail@latest setup");
@@ -274,6 +328,7 @@ public sealed partial class TuningTools
             throw new InvalidOperationException("no session is open: begin_session first");
         if (TrialInForce(show) == true) throw new InvalidOperationException("a trial is in force: back_to_daily (or keep_as_daily) first, so the job starts from the daily profile");
         if (Running() is { } running) throw new InvalidOperationException($"a lab job is running already ({Path.GetFileName(running)}): lab_status, or lab_stop");
+        if (CardTaken()) throw new InvalidOperationException("a lab job is running already on this card: lab_status, or lab_stop");
         var look = card.Read();
         if (look.Telemetry?.VramUsedBytes is > 4UL << 30 and var used)
             throw new InvalidOperationException($"other programs hold {used >> 20} MiB of video memory (a local AI model, a game): the job measures speed and needs the card to itself, so close them first");
@@ -286,7 +341,7 @@ public sealed partial class TuningTools
     /// job, where the host allows that). The job's name, folder, and whether it left the job.</summary>
     private (string Job, string Dir, bool Detached) StartJob(string exe, string prefix, string command, object spec)
     {
-        string job = $"{prefix}-{DateTime.Now:yyyyMMdd-HHmmss}";
+        string job = $"{prefix}-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("n")[..6]}";   // unique even for two in one second
         string dir = Path.Combine(LabDir(), job);
         Directory.CreateDirectory(dir);
         File.WriteAllText(Path.Combine(dir, "spec.json"), JsonSerializer.Serialize(spec, SnakeJson));
@@ -296,6 +351,8 @@ public sealed partial class TuningTools
         string answer = p.StandardOutput.ReadToEnd();
         p.WaitForExit(10_000);
         if (p.ExitCode != 0) throw new InvalidOperationException($"the lab did not start the job (exit code {p.ExitCode})");
+        // Not started until it holds the card: then the start lock can go, and a second start sees it.
+        for (var until = DateTime.UtcNow.AddSeconds(15); DateTime.UtcNow < until && !CardTaken() && Status(dir) is not { } _;) Thread.Sleep(200);
         return (job, dir, answer.Contains("detached", StringComparison.Ordinal));
     }
 
@@ -345,6 +402,7 @@ public sealed partial class TuningTools
     {
         if (seconds is < 15 or > 60) throw new ArgumentException("seconds is 15..60");
         var list = Candidates(candidates);
+        using var starting = StartLock();   // the check and the start as one: no second job slips in between
         var (exe, look) = JobPreflight();
         var (xbarKhz, demandUv) = SettingsTools.Domain(card, ClockDomainId.Xbar);
         var (_, xbarTop) = OffsetRange(ClockDomainId.Xbar);
@@ -376,10 +434,25 @@ public sealed partial class TuningTools
         });
     });
 
-    /// <summary>The job folder of a sweep still running (status.json says so and was written within the last 10 minutes).</summary>
-    private string? Running() => Jobs().FirstOrDefault(d => Status(d) is { } s && (string?)s["state"] == "running"
-        && DateTime.TryParse((string?)s["updated_utc"], CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out var at)
-        && DateTime.UtcNow - at < TimeSpan.FromMinutes(10));
+    /// <summary>The job folder of a job whose process still runs.</summary>
+    private string? Running() => Jobs().FirstOrDefault(Alive);
+
+    /// <summary>Whether the job's process still runs: the pid and start time in its alive.json (written every minute, apart
+    /// from its progress: a measurement may wait 10 minutes for a screen saver), checked against a reused pid. A job from
+    /// before alive.json counts while its status says running and was written within 10 minutes.</summary>
+    private static bool Alive(string dir)
+    {
+        try
+        {
+            if (JsonNode.Parse(File.ReadAllText(Path.Combine(dir, "alive.json"))) is JsonObject a
+                && a["pid"]?.GetValue<int>() is int pid && a["started_utc"]?.GetValue<DateTime>() is DateTime started)
+                return new SystemHost().IsProcessAlive(pid, new DateTimeOffset(DateTime.SpecifyKind(started, DateTimeKind.Utc)));
+        }
+        catch (Exception e) when (e is IOException or JsonException or InvalidOperationException or FormatException) { }
+        return Status(dir) is { } s && (string?)s["state"] == "running"
+            && DateTime.TryParse((string?)s["updated_utc"], CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out var at)
+            && DateTime.UtcNow - at < TimeSpan.FromMinutes(10);
+    }
 
     private IEnumerable<string> Jobs() => Directory.Exists(LabDir())
         ? Directory.GetDirectories(LabDir()).Where(d => Path.GetFileName(d) is var n && (n.StartsWith("sweep-", StringComparison.Ordinal) || n.StartsWith("uncore-", StringComparison.Ordinal)))
@@ -398,19 +471,20 @@ public sealed partial class TuningTools
     {
         string dir = job != null ? Path.Combine(LabDir(), Path.GetFileName(job)) : Jobs().FirstOrDefault() ?? throw new InvalidOperationException("no sweep has run on this card");
         var s = Status(dir) ?? throw new InvalidOperationException($"{Path.GetFileName(dir)} has no status yet: it is starting, or its process ended before it wrote one");
-        if ((string?)s["state"] == "running" && Running() != dir)
-            s["warning"] = "no update for over 10 minutes: the sweep's process may have ended (a reboot); read its sweep.log";
+        if ((string?)s["state"] == "running" && !Alive(dir))
+            s["warning"] = "its process is not running (a reboot, or it was ended): the status stops where it got to; read its sweep.log";
         s["log"] = File.Exists(Path.Combine(dir, "sweep.log")) ? Path.Combine(dir, "sweep.log") : null;
         return s.ToJsonString(SnakeJson);
     });
 
     [McpServerTool(Name = "lab_stop", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
-        "End the running tune_memory sweep: its measurement stops within a second, the daily profile goes back on, and the " +
-        "steps so far stay in lab_status.")]
-    public string LabStop() => Guard(() =>
+        "End a lab job (tune_memory, tune_uncore): its measurement stops within a second and its process is waited for, the " +
+        "daily profile goes back on, and the steps so far stay in lab_status. With no job, the one running.")]
+    public string LabStop([Description("The job (sweep-… or uncore-…) to end; omit for the one running.")] string? job = null) => Guard(() =>
     {
-        string dir = Running() ?? throw new InvalidOperationException("no sweep is running");
+        string dir = job != null ? Path.Combine(LabDir(), Path.GetFileName(job)) : Running() ?? throw new InvalidOperationException("no lab job is running");
+        if (!Directory.Exists(dir)) throw new InvalidOperationException($"no job {Path.GetFileName(dir)} on this card");
         File.WriteAllText(Path.Combine(dir, "stop"), DateTimeOffset.Now.ToString("O", CultureInfo.InvariantCulture));
-        return Out(new { stopping = Path.GetFileName(dir), next = "lab_status in a few seconds shows it stopped" });
+        return Out(new { stopping = Path.GetFileName(dir), running = Alive(dir), next = "lab_status in a few seconds shows it stopped" });
     });
 }

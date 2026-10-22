@@ -9,7 +9,7 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
 {
     Console.WriteLine("""
         clocktail-lab run --phases burn,light,pulse,memory,latency,l2 --seconds N [--json FILE] [--gpu-pci ID] [--target-w W]
-                          [--light-div N] [--mem-fraction F] [--mem-cap-mib M] [--inject-at N]
+                          [--light-div N] [--mem-fraction F] [--mem-cap-mib M] [--inject-at N] [--max-temp-c C]
         clocktail-lab sweep-memory --job DIR      (the job's spec.json; detaches itself; status in DIR\status.json)
         clocktail-lab tune-uncore --job DIR       (the same, for the uncore tuner)
         clocktail-lab probe [--gpu-pci ID]
@@ -31,7 +31,7 @@ try
         case "run":
         {
             var phases = LabConfig.Parse(O("phases") ?? "burn", D("seconds", 60));
-            var cfg = new LabConfig(phases, TargetW: D("target-w", 0), LightDiv: (int)D("light-div", 64));
+            var cfg = new LabConfig(phases, TargetW: D("target-w", 0), LightDiv: (int)D("light-div", 64), MaxTempC: D("max-temp-c", 85));
             using var cu = CudaApi.Load();
             int ordinal = Ordinal(cu, O("gpu-pci"));
             using var sampler = new NvmlSampler(cu.DevicePciBusId(cu.Device(ordinal)));
@@ -60,11 +60,11 @@ try
             Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
             var runner = new LabRunner(cfg, engine, sampler, log: Console.Error.WriteLine);
             var results = runner.Run(cts.Token);
-            var (verdict, reasons) = LabRunner.Judge(results, phases.Count);
+            var (verdict, reasons) = LabRunner.Judge(results, phases.Count, runner.Interrupted);
             var finished = DateTime.UtcNow;
             Thread.Sleep(1000);   // the utilization window past the lab's own last launch
             var r = new LabResult(engine.Name, engine.PciBusId, engine.MemoryBufferBytes >> 20, engine.SmCount, started, finished, results, verdict, reasons, busy,
-                vramTotal > 0 ? vramUsed >> 20 : null, Busy());
+                vramTotal > 0 ? vramUsed >> 20 : null, Busy(), verdict == LabResult.Inconclusive ? runner.InterruptedBy : null);
             string json = JsonSerializer.Serialize(r, LabJson.Options);
             if (O("json") is { } path) File.WriteAllText(path, json); else Console.WriteLine(json);
             return r.ExitCode;

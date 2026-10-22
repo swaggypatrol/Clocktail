@@ -140,6 +140,8 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     public int Run()
     {
         using var heartbeat = Heartbeat();
+        using var card = ClaimCard();
+        if (card == null) return Finish(SweepStatus.Failed, "another lab job is running on this card: lab_status, or lab_stop", null);
         try
         {
             var show = Broker("show");
@@ -161,18 +163,33 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
             foreach (int offset in offsets)
             {
                 if (StopAsked) return Finish(SweepStatus.Stopped, "stopped (lab_stop)", null);
-                bool trial = offset != spec.DailyMhz;
-                if (trial)
+                // Only the first step can lean on the daily offset being on the card: a sweep that starts under it reaches it
+                // with the step before's trial still in force, so from then on every step is written, the daily value too.
+                bool trial = offset != spec.DailyMhz || _steps.Count > 0;
+                LabResult r;
+                DateTime started;
+                // The step's write and its measurement under this job's measurement lease: no other write lands between
+                // them, and the trial on the card must still be the one written when the run ends.
+                using (var lease = Hold(log))
                 {
-                    var w = Try(offset);
-                    if (w is not { Ok: true }) return Finish(SweepStatus.Failed, $"the service did not write {offset:+0;-0;0} MHz: {w?.Error ?? "no answer"}", offset);
-                    Thread.Sleep(3000);
+                    if (lease == null)
+                        return StopAsked ? Finish(SweepStatus.Stopped, "stopped (lab_stop)", offset)
+                            : Finish(SweepStatus.Failed, $"another run held the card for {LeaseWaitMinutes} minutes", offset);
+                    if (trial)
+                    {
+                        var w = Try(offset);
+                        if (w is not { Ok: true }) return Finish(SweepStatus.Failed, $"the service did not write {offset:+0;-0;0} MHz: {w?.Error ?? "no answer"}", offset);
+                        Thread.Sleep(3000);
+                    }
+                    string? stamp = TrialAt();
+                    Save(SweepStatus.Running, offset, null, $"measuring {offset:+0;-0;0} MHz for {spec.Seconds} s");
+                    started = DateTime.UtcNow;
+                    r = MeasureAlone(spec.Seconds, "memory,latency", _bufferMib, log);
+                    // lab_stop kills the measuring child: its run is inconclusive, and that is not the memory's failure.
+                    if (StopAsked) return Finish(SweepStatus.Stopped, "stopped (lab_stop)", offset);
+                    if (r.Verdict != LabResult.Fail && TrialAt() != stamp)
+                        return Finish(SweepStatus.Failed, $"{offset:+0;-0;0} MHz: the trial on the card changed during the measurement: the step is not this offset's", offset);
                 }
-                Save(SweepStatus.Running, offset, null, $"measuring {offset:+0;-0;0} MHz for {spec.Seconds} s");
-                var started = DateTime.UtcNow;
-                var r = MeasureAlone(spec.Seconds, "memory,latency", _bufferMib, log);
-                // lab_stop kills the measuring child: its run reads as failed, and that is not the memory's failure.
-                if (StopAsked) return Finish(SweepStatus.Stopped, "stopped (lab_stop)", offset);
                 int? resets = OperatingSystem.IsWindows() ? TryCount(started) : null;
                 var step = Step(offset, r, resets);
                 _steps.Add(step);
@@ -188,6 +205,9 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                     if (trial && step.DriverResets is not > 0) Broker("crash", $"tune_memory {offset:+0;-0;0} MHz: {step.Detail}");
                     return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz failed: {step.Detail}", offset);
                 }
+                // Too hot, telemetry lost, the runner failing: nothing was measured, and nothing is blamed on the memory.
+                if (step.Verdict != LabResult.Pass)
+                    return Finish(SweepStatus.Failed, $"{offset:+0;-0;0} MHz could not be judged ({step.Detail}): nothing said about the memory", offset);
                 if (trial) Broker("stable", $"tune_memory: {line}");
                 // Shared GPU or an offset not in force: the step says nothing about the memory, so there is no result.
                 bool unjudged = step.Shared || signal?.Contains("not in force", StringComparison.Ordinal) == true;
@@ -221,11 +241,12 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
 
     private int Finish(string state, string why, int? at)
     {
-        // The daily offset goes back on whatever happened (after a driver reset the service has done it already).
-        if (_steps.Any(s => s.OffsetMhz != spec.DailyMhz)) Broker("apply", "tune_memory finished", BrokerRequest.OpProfile);
+        // The daily offset goes back on whatever happened (after a driver reset the service has done it already), and the
+        // status says so when it did not.
+        if (_steps.Any(s => s.OffsetMhz != spec.DailyMhz) && DailyBack("tune_memory finished") is { } notBack) why += "; " + notBack;
         int? best = Best(_steps);
         string? next = state == SweepStatus.Done && best is { } b
-            ? Inv($"best {b:+0;-0;0} MHz: tell the person, then set_memory_offset to it in steps of at most 250 MHz, play their games, and keep_as_daily (ask); if a game fails, one step lower")
+            ? Inv($"the edge's side is {b:+0;-0;0} MHz (the step before any slowdown that lasted). Read the steps for where bandwidth stops rising: past that an offset buys latency only, which frames did not feel on the reference card (3DMark Speedway and Steel Nomad at +2900 were no better than at +1758). Tell the person; set_memory_offset there in steps of at most 250 MHz, judge it against the daily offset with a memory-sensitive benchmark A B B A (a ray-traced one, as Speedway), their games have the last word, keep_as_daily (ask); if a game fails, step down")
             : null;
         Save(state, at, why, next, best);
         log?.Invoke($"{state}: {why}");

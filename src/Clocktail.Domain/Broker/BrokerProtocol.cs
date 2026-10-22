@@ -37,7 +37,11 @@ public sealed record BrokerRequest(
     string[]? EnableSlots = null,
     /// <summary>For <see cref="OpProfile"/> "crashed": the core voltage the GPU ran at when it hung, µV (the flight
     /// recorder's crash point), for the record; 0 when it is not known.</summary>
-    uint Uv = 0)
+    uint Uv = 0,
+    /// <summary>The measurement lease this request holds: the RunId of the judge.lock its own process wrote. While a
+    /// measurement holds the lock every other write waits; the holder's own writes (the lab's next candidate) carry the
+    /// lease and go through, the nested writes of a trial too.</summary>
+    string? Lease = null)
 {
     public const string OpPing = "ping";
     public const string OpOwnership = "ownership";

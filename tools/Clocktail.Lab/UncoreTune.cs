@@ -206,8 +206,11 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
     /// </summary>
     public static (string Outcome, string Why, double? L2, double? Dram, double? Core) Judge(UncoreRun a1, UncoreRun b1, UncoreRun b2, UncoreRun a2)
     {
+        // A bad bit or a driver reset fails the candidate; a run that could not be made (too hot, the runner) says nothing.
         foreach (var b in new[] { b1, b2 })
-            if (b.Verdict != LabResult.Pass) return (Comparison.Failed, b.Detail ?? $"the candidate's run {b.Verdict}", null, null, null);
+            if (b.Verdict == LabResult.Fail) return (Comparison.Failed, b.Detail ?? "the candidate's run failed", null, null, null);
+        foreach (var b in new[] { b1, b2 })
+            if (b.Verdict != LabResult.Pass) return (Comparison.Unjudged, "the candidate's run could not be judged: " + (b.Detail ?? b.Verdict), null, null, null);
         foreach (var a in new[] { a1, a2 })
             if (a.Verdict != LabResult.Pass) return (Comparison.Unjudged, "the incumbent's own run did not pass: " + (a.Detail ?? a.Verdict), null, null, null);
         if (new[] { a1, b1, b2, a2 }.Any(r => r.Shared)) return (Comparison.Unjudged, $"other work kept sharing the GPU for {LabJob.SharedWaitMinutes} minutes: speeds are not the card's alone; close it (a screen saver too) and run again", null, null, null);
@@ -260,6 +263,8 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
     public int Run()
     {
         using var heartbeat = Heartbeat();
+        using var card = ClaimCard();
+        if (card == null) return Finish(SweepStatus.Failed, "another lab job is running on this card: lab_status, or lab_stop");
         try
         {
             var show = Broker("show");
@@ -286,12 +291,16 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         }
     }
 
-    /// <summary>A B B A on the card. A candidate whose run failed is its trial's crash (after a driver reset, the service's).</summary>
+    /// <summary>A B B A on the card, the whole comparison under this job's measurement lease, so no other write lands
+    /// between a setting and its runs. A candidate whose run failed (a bad bit, a driver reset) is its trial's crash (after a
+    /// reset, the service's); one whose run could not be made (too hot, the runner), or whose trial changed under it, is
+    /// unjudged and blamed on nothing.</summary>
     private Comparison Compare(string stage, UncoreSetting a, UncoreSetting b)
     {
         _stage = stage;
         Save(SweepStatus.Running, null, $"{stage}: {b} against {a}");
         var runs = new List<UncoreRun>();
+        string? stamp = null;
         UncoreRun Run(UncoreSetting s)
         {
             var started = DateTime.UtcNow;
@@ -312,23 +321,39 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
             return c;
         }
 
+        using var lease = Hold(log);
+        if (lease == null) return Done(Comparison.Unjudged, StopAsked ? "stopped (lab_stop)" : $"another run held the card for {LeaseWaitMinutes} minutes");
+
         if (Write(a) is { } wa) return Done(Comparison.Unjudged, $"the service did not write the incumbent: {wa}");
+        stamp = TrialAt();
         var a1 = Run(a);
-        // lab_stop kills the measuring child: its run reads as failed, and that is not the candidate's failure.
+        // lab_stop kills the measuring child: its run is inconclusive, and that is not the candidate's failure.
         if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
+        if (Moved() is { } m1) return m1;
         if (a1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the incumbent's own run did not pass: " + (a1.Detail ?? a1.Verdict));
         if (Write(b) is { } wb) return Done(Comparison.Failed, $"the service refused the candidate: {wb}");
+        stamp = TrialAt();
         var b1 = Run(b);
         if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
-        if (b1.Verdict != LabResult.Pass) return Crash(b1);
+        if (b1.Verdict == LabResult.Fail) return Crash(b1);
+        if (Moved() is { } m2) return m2;
+        if (b1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the candidate's run could not be judged: " + (b1.Detail ?? b1.Verdict));
         var b2 = Run(b);
         if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
-        if (b2.Verdict != LabResult.Pass) return Crash(b2);
+        if (b2.Verdict == LabResult.Fail) return Crash(b2);
+        if (Moved() is { } m3) return m3;
+        if (b2.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the candidate's run could not be judged: " + (b2.Detail ?? b2.Verdict));
         if (Write(a) is { } wa2) return Done(Comparison.Unjudged, $"the service did not write the incumbent back: {wa2}");
+        stamp = TrialAt();
         var a2 = Run(a);
         if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
+        if (Moved() is { } m4) return m4;
         var (outcome, why, l2, dram, core) = UncoreSearch.Judge(a1, b1, b2, a2);
         return Done(outcome, why, l2, dram, core);
+
+        // The trial on the card must still be the one written before the run: a write that got past the lease (or a reset
+        // that put the daily profile back) means the run measured something else.
+        Comparison? Moved() => TrialAt() == stamp ? null : Done(Comparison.Unjudged, "the trial on the card changed during the measurement: the run is not the setting's");
 
         Comparison Crash(UncoreRun r)
         {
@@ -368,8 +393,9 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
 
     private int Finish(string state, string why)
     {
-        // The daily profile goes back on whatever happened (after a driver reset the service has done it already).
-        if (_log.Count > 0) Broker("apply", "tune_uncore finished", BrokerRequest.OpProfile);
+        // The daily profile goes back on whatever happened (after a driver reset the service has done it already), and the
+        // status says so when it did not.
+        if (_log.Count > 0 && DailyBack("tune_uncore finished") is { } notBack) why += "; " + notBack;
         string? next = state == SweepStatus.Done && _best != spec.Start
             ? Inv($"best {_best}: tell the person; to try it, adjust_xbar to {_best.XbarMhz:+0;-0;0} MHz and {_best.DemandMv:+0;-0;0} mV, set_clock_ratio {_best.Ratio:0.000}, adjust_msvdd to REL {_best.MsvddRelMv:+0;-0;0} mV{(spec.AltMv(_best) is > 0 and var alt ? Inv($" and ALT {alt:+0} mV") : "")} (each in its own steps), then lab_test, stress_test and their games; keep_as_daily (ask)")
             : null;

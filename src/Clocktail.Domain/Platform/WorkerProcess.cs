@@ -15,7 +15,7 @@ namespace Clocktail.Domain.Platform;
 public sealed class WorkerProcess(string exe)
 {
     private static readonly System.Text.UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false);
-    private nint _job;
+    private readonly KillOnCloseJob _job = new();   // held until this process ends: its closing is what kills the worker
 
     /// <summary>How long <see cref="Run"/> waits, once the worker has exited, for the last of its output.</summary>
     public static readonly TimeSpan DrainFor = TimeSpan.FromSeconds(2);
@@ -84,20 +84,8 @@ public sealed class WorkerProcess(string exe)
     /// <summary>Ties a process this one started some other way to the same job: it ends when this process does.</summary>
     public bool Adopt(Process p) => Contain(p);
 
-    private bool Contain(Process p)
-    {
-        if (_job == 0)
-        {
-            var job = CreateJobObjectW(0, null);
-            if (job == 0) return false;
-            var limits = new ExtendedLimits { Basic = new BasicLimits { LimitFlags = KillOnJobClose } };
-            if (!SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf<ExtendedLimits>())) { CloseHandle(job); return false; }
-            _job = job;   // held until this process ends: its closing is what kills the worker
-        }
-        return AssignProcessToJobObject(_job, p.Handle);
-    }
+    private bool Contain(Process p) => _job.Add(p);
 
-    private const int ExtendedLimitInformation = 9;
     private const int StdOutput = -11, StdError = -12;
     private const uint HandleFlagInherit = 1;
 
@@ -106,36 +94,4 @@ public sealed class WorkerProcess(string exe)
 
     [DllImport("kernel32", SetLastError = true)]
     private static extern bool SetHandleInformation(nint handle, uint mask, uint flags);
-    private const uint KillOnJobClose = 0x2000;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BasicLimits
-    {
-        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
-        public uint LimitFlags;
-        public nuint MinimumWorkingSetSize, MaximumWorkingSetSize;
-        public uint ActiveProcessLimit;
-        public nuint Affinity;
-        public uint PriorityClass, SchedulingClass;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ExtendedLimits
-    {
-        public BasicLimits Basic;
-        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount, ReadTransferCount, WriteTransferCount, OtherTransferCount;
-        public nuint ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
-    }
-
-    [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern nint CreateJobObjectW(nint attributes, string? name);
-
-    [DllImport("kernel32", SetLastError = true)]
-    private static extern bool SetInformationJobObject(nint job, int infoClass, ref ExtendedLimits info, int size);
-
-    [DllImport("kernel32", SetLastError = true)]
-    private static extern bool AssignProcessToJobObject(nint job, nint process);
-
-    [DllImport("kernel32", SetLastError = true)]
-    private static extern bool CloseHandle(nint handle);
 }
