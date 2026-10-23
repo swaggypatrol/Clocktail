@@ -154,6 +154,7 @@ public sealed class BrokerDispatcher
                 };
 
             // A write: one window at a time, and never while a stability run is measuring.
+            if (Volatile.Read(ref _closed)) return Fail(ClosedError, BrokerCode.WindowBusy);
             if (!_writeWindow.Wait(WindowWait))
                 return Fail($"another write has held the window for over {WindowWait.TotalSeconds:0} s; nothing was written, try again", BrokerCode.WindowBusy);
             try
@@ -192,7 +193,16 @@ public sealed class BrokerDispatcher
     /// waits up to <paramref name="wait"/> for a write in flight to finish, then keeps the window, so no new write starts
     /// (each answers <see cref="BrokerCode.WindowBusy"/>). True when no write was in flight by then.
     /// </summary>
-    public bool Close(TimeSpan wait) => _writeWindow.Wait(wait);
+    public bool Close(TimeSpan wait)
+    {
+        Volatile.Write(ref _closed, true);
+        return _writeWindow.Wait(wait);
+    }
+
+    /// <summary>Set by <see cref="Close"/>: a write after it answers at once instead of waiting out <see cref="WindowWait"/>.</summary>
+    private bool _closed;
+
+    private const string ClosedError = "the service is handing over to a fresh process after a driver reset; nothing was written, try again in a few seconds";
 
     /// <summary>At start, before any client asks: every GPU's marks from before this boot go through
     /// <see cref="CrashLog.SettleReboot"/>, so a window that was open when the machine went down is on record
@@ -876,8 +886,14 @@ public sealed class BrokerDispatcher
         return new BrokerResponse(false, error, Element(new { success = false, path, profile, applied = (JsonElement[])[.. AppliedOf(failed), .. AppliedOf(back)] }), failed.Code);
     }
 
-    /// <summary>When an agent's MCP server last said it was there ("alive"); the broker's start until one does.</summary>
-    public DateTimeOffset LastAlive { get; private set; } = DateTimeOffset.Now;
+    /// <summary>When an agent's MCP server last said it was there ("alive"); the broker's start until one does. "alive" takes
+    /// no lock and the lease reads it from its own thread, so it is kept as UTC ticks, read and written whole.</summary>
+    public DateTimeOffset LastAlive
+    {
+        get => new(Interlocked.Read(ref _lastAliveTicks), TimeSpan.Zero);
+        private set => Interlocked.Exchange(ref _lastAliveTicks, value.UtcTicks);
+    }
+    private long _lastAliveTicks = DateTimeOffset.UtcNow.UtcTicks;
 
     /// <summary>The GPUs whose last hand-back put nothing back: the tuning log has the first refusal of a run of them, not
     /// every ask after it (the trial lease asks for minutes, the fan guard every 30 s). Asked under the operation lock.</summary>
@@ -1126,11 +1142,11 @@ public sealed class BrokerDispatcher
         {
             if (held.Kind == ClockOffsets.Kind && CurveAside(target, held.Key, held.Original) is { } aside)
             {
-                if (aside.Result is { } ar && ar.TryGetProperty("applied", out var aa)) applied.Add(aa[0]);
+                applied.AddRange(AppliedOf(aside));
                 if (!aside.Ok) return (new BrokerResponse(false, aside.Error ?? "the curve could not be set aside for a P0 write", Element(new { success = false, path, profile, applied }), aside.Code), null);
             }
             var r = Dispatch(PutBack(target, held));
-            if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
+            applied.AddRange(AppliedOf(r));
             if (!r.Ok) return (new BrokerResponse(false, $"{held.Id} did not go back" + (WhyNot(r) is { } why ? $": {why}" : ""), Element(new { success = false, path, profile, applied }), r.Code), null);
         }
         bool curveFollows = writing is { Suspended: false } && writing.Writes.Where(only ?? (_ => true)).Any(w => w.Kind == VfWrites.Kind);
@@ -1140,11 +1156,11 @@ public sealed class BrokerDispatcher
             {
                 if (w.Kind == ClockOffsets.Kind && CurveAside(target, w.Key, w.Value, curveFollows) is { } aside)
                 {
-                    if (aside.Result is { } ar && ar.TryGetProperty("applied", out var aa)) applied.Add(aa[0]);
+                    applied.AddRange(AppliedOf(aside));
                     if (!aside.Ok) return (new BrokerResponse(false, $"{w.Kind}/{w.Key} did not apply: the curve could not be set aside for it" + (WhyNot(aside) is { } why ? $" ({why})" : ""), Element(new { success = false, path, profile, applied }), aside.Code), w);
                 }
                 var r = Dispatch(WriteOf(target, w.Kind, w.Key, w.Value));
-                if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
+                applied.AddRange(AppliedOf(r));
                 if (!r.Ok) return (new BrokerResponse(false, $"{w.Kind}/{w.Key} did not apply" + (WhyNot(r) is { } why ? $": {why}" : ""), Element(new { success = false, path, profile, applied }), r.Code), w);
             }
         // The firmware's board limit must follow the request (BoardWall): a request that reads as the daily wall while the
@@ -1164,7 +1180,7 @@ public sealed class BrokerDispatcher
                 foreach (var v in new[] { away, wallMw })
                 {
                     var r = Dispatch(WriteOf(target, PowerCap.Kind, wall.Key, v.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-                    if (r.Result is { } res && res.TryGetProperty("applied", out var a)) applied.Add(a[0]);
+                    applied.AddRange(AppliedOf(r));
                     if (!r.Ok) return (new BrokerResponse(false, "the daily wall could not be written again" + (WhyNot(r) is { } why ? $": {why}" : ""), Element(new { success = false, path, profile, applied, wall = wallNote }), r.Code), wall);
                 }
             }

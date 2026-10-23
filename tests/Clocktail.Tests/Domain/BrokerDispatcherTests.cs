@@ -910,6 +910,31 @@ public class BrokerDispatcherTests : IDisposable
         Assert.False(File.Exists(Experiment.PathBeside(_journal.Path)));
     }
 
+    /// <summary>LastAlive keeps the instant whatever offset the clock reports it in (it is stored as UTC ticks).</summary>
+    [Fact]
+    public void Alive_keeps_the_instant_across_offsets()
+    {
+        var d = Power();
+        _host.Now = new DateTimeOffset(2026, 10, 23, 21, 30, 15, TimeSpan.FromHours(8)).AddTicks(1234);
+        Assert.True(d.Dispatch(Exp("alive")).Ok);
+        Assert.Equal(_host.Now.UtcTicks, d.LastAlive.UtcTicks);
+    }
+
+    /// <summary>After Close a write answers WindowBusy at once, not after WindowWait, and touches nothing; reads still answer.</summary>
+    [Fact]
+    public void A_write_after_close_is_refused_at_once()
+    {
+        var d = Power();
+        Assert.True(d.Close(TimeSpan.Zero));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 560_000));
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5));
+        Assert.False(r.Ok);
+        Assert.Equal(BrokerCode.WindowBusy, r.Code);
+        Assert.Equal(0, FakeDriver.Sets);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpPing)).Ok);
+    }
+
     /// <summary>An unattended session stops writing trials once it has spent its crash budget; a session the person is at
     /// has none, and a new session starts a new budget.</summary>
     [Fact]

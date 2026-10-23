@@ -8,7 +8,7 @@ internal sealed class FakeHost : IHost
     public int Pid { get; set; } = 100;
     public string BootId { get; set; } = "boot-A";
     public HashSet<int> Alive { get; } = [100];
-    public DateTimeOffset Now => new(2026, 10, 17, 0, 0, 0, TimeSpan.Zero);
+    public DateTimeOffset Now { get; set; } = new(2026, 10, 17, 0, 0, 0, TimeSpan.Zero);
     public Dictionary<int, DateTimeOffset> StartedAt { get; } = [];
     public bool IsProcessAlive(int pid, DateTimeOffset? startedBy = null) =>
         Alive.Contains(pid) && !(startedBy is { } by && StartedAt.TryGetValue(pid, out var at) && at > by);
