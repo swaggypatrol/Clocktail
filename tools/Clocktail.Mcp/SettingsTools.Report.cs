@@ -25,8 +25,9 @@ public sealed partial class SettingsTools
     /// <summary>Hotter than this is worth a look (the stock fan curve holds 83 °C); this hot, act.</summary>
     public const double WarmC = 85, HotC = 90;
     /// <summary>What was measured on the reference card: memory +358 MHz, MSVDD REL up to +20 mV, VMIN +50 mV, XBAR up
-    /// to +400 MHz (above +250 only with +20 mV of voltage demand).</summary>
-    public const double MeasuredMemoryMhz = 358, MeasuredMsvddRelMv = 20, MeasuredVminAboveMv = 50, MeasuredXbarMhz = 400, XbarCliffMhz = 250, XbarCliffDemandMv = 20;
+    /// to +560 MHz (above +250 only with voltage demand; +500 and +560 with +50 mV at ratio 0.95 and boost 100 % on driver
+    /// 621.01 passed lab_test and stress_test, and +560 is its daily).</summary>
+    public const double MeasuredMemoryMhz = 358, MeasuredMsvddRelMv = 20, MeasuredVminAboveMv = 50, MeasuredXbarMhz = 560, XbarCliffMhz = 250, XbarCliffDemandMv = 20;
     /// <summary>The ceiling no rail's MAX may pass.</summary>
     public const double CeilingMv = 1150;
 
@@ -56,13 +57,7 @@ public sealed partial class SettingsTools
         var l = limiterDoc.RootElement;
         var rows = SettingRows(s);
         var live = LiveRows(s, l);
-        // The driver's own word that it is holding the card down: shown only when it says something.
-        var why = Arr(s, "perf_decrease", "reasons").Select(x => x.GetString()).ToList();
-        if (why.Count > 0)
-            live.Add(new("🔌", "Driver holding it down", "", string.Join(", ", why), "", why.Contains("insufficient_power") || why.Contains("thermal_protection") ? Act : Look,
-                why.Contains("insufficient_power") ? "the driver says the card is not getting enough power: check the 16-pin cable is fully seated and the PSU, now"
-                : why.Contains("thermal_protection") ? "the driver is protecting the GPU from heat: check the fans and the case airflow now"
-                : "the driver reports it is reducing performance"));
+        if (DecreaseRow(s, l) is { } decrease) live.Add(decrease);
         var others = Arr(s, "other_gpus").Select(g => g.GetString()).ToList();
         if (others.Count > 0)
             live.Add(new("🖥️", "Other GPUs", "", string.Join(", ", others), "", Look,
@@ -97,9 +92,33 @@ public sealed partial class SettingsTools
     public static string TemperatureMark(double tempC, double? marginC) =>
         tempC >= HotC || marginC <= 0 ? Act : tempC >= WarmC || marginC <= 5 ? Look : Safe;
 
-    /// <summary>card_report's rows (settings, then live) as name, mark and note, from card_settings and limiter answers.</summary>
+    /// <summary>card_report's rows (settings, then live, then the driver's own word) as name, mark and note, from
+    /// card_settings and limiter answers.</summary>
     public static IReadOnlyList<(string Name, string Mark, string Note)> ReportRows(JsonElement settings, JsonElement limiter) =>
-        [.. SettingRows(settings).Concat(LiveRows(settings, limiter)).Select(r => (r.Name, r.Mark, r.Note))];
+        [.. SettingRows(settings).Concat(LiveRows(settings, limiter)).Append(DecreaseRow(settings, limiter)).OfType<ReportRow>().Select(r => (r.Name, r.Mark, r.Note))];
+
+    /// <summary>
+    /// The driver's own word that it is holding the card down (GetPerfDecreaseInfo), shown only when it says something:
+    /// ⛔ for power and heat. api_triggered alone is routine: the reference card sets it whenever a CUDA program has the GPU
+    /// (the lab, a local AI model), at idle too, the memory's ceiling then CUDA_MAX in perf_limits; so it is ℹ️ while
+    /// nothing holds the clock (the limiter finds the card idle or under no limit, and no clock lock is set), ⚠️ else.
+    /// </summary>
+    private static ReportRow? DecreaseRow(JsonElement s, JsonElement l)
+    {
+        var why = Arr(s, "perf_decrease", "reasons").Select(x => x.GetString()).ToList();
+        if (why.Count == 0) return null;
+        bool power = why.Contains("insufficient_power"), heat = why.Contains("thermal_protection");
+        var cap = Arr(s, "perf_limits").FirstOrDefault(d => Str(d, "domain") == "memory" && Str(d, "ceiling_by")?.StartsWith("CUDA_", StringComparison.Ordinal) == true);
+        string? cuda = why.Contains("api_triggered") && cap.ValueKind == JsonValueKind.Object
+            ? $"a CUDA program has the GPU (the lab, a local AI model): the driver caps the memory at {F(Num(cap, "ceiling_mhz"))} MHz for it ({Str(cap, "ceiling_by")}), 200 MHz under its own on the reference card"
+            : null;
+        bool routine = why is ["api_triggered"] && Str(l, "limiter") is "idle" or "no_limit"
+                       && s.TryGetProperty("clock_locks", out var locks) && locks.ValueKind == JsonValueKind.Array && locks.GetArrayLength() == 0;
+        return new("🔌", "Driver holding it down", "", string.Join(", ", why), "", power || heat ? Act : routine ? Info : Look,
+            power ? "the driver says the card is not getting enough power: check the 16-pin cable is fully seated and the PSU, now"
+            : heat ? "the driver is protecting the GPU from heat: check the fans and the case airflow now"
+            : Join(cuda == null || why.Count > 1 ? "the driver reports it is reducing performance" : null, cuda, routine ? "nothing holds the clock now" : null));
+    }
 
     private static object Plain(ReportRow r) => new { setting = r.Name, original = r.Original, now = r.Now, change = r.Change, safe = r.Mark, note = r.Note };
 
@@ -182,7 +201,7 @@ public sealed partial class SettingsTools
             rows.Add(new(icon, name, stockKnown ? $"REL {Sg(relS)}, VMIN {Sg(vminS)} mV" : "?", $"REL {Sg(rel)}, VMIN {Sg(vmin)} mV", change, mark, Join([.. notes])));
         }
 
-        // XBAR/SYS/Video: XBAR measured to +400, above +250 only with +20 mV of demand (the cliff); SYS and Video unmeasured.
+        // XBAR/SYS/Video: XBAR measured to +560, above +250 only with voltage demand (the cliff); SYS and Video unmeasured.
         foreach (var (key, name) in new[] { ("xbar", "XBAR (crossbar)"), ("sys", "SYS clock"), ("video", "Video clock") })
         {
             var d = Obj(s, "clock_domains", key);
@@ -194,9 +213,14 @@ public sealed partial class SettingsTools
             }
             if (key != "xbar" && off == offS && dem == demS) continue;
             string mark = Safe, note;
+            string? cliff = key == "xbar" && off is { } o && TuningTools.XbarDemandNeededMv(o) is { } need && dem < need
+                ? $"the cliff: at {Sg(o)} MHz it needs +{need} mV of voltage demand (+{TuningTools.XbarCliffDemandMv} above +{TuningTools.XbarCliffMhz}, +{TuningTools.XbarHighDemandMv} above +{TuningTools.XbarHighMhz})" : null;
             if (key != "xbar") { mark = Look; note = "not measured on the reference card"; }
-            else if (off > MeasuredXbarMhz) { mark = Look; note = $"past the +{F(MeasuredXbarMhz)} MHz measured; +450 without voltage gave a grey screen elsewhere"; }
-            else if (off is { } o && TuningTools.XbarDemandNeededMv(o) is { } need && dem < need) { mark = Look; note = $"the cliff: at {Sg(o)} MHz it needs +{need} mV of voltage demand (+{TuningTools.XbarCliffDemandMv} above +{TuningTools.XbarCliffMhz}, +{TuningTools.XbarHighDemandMv} above +{TuningTools.XbarHighMhz})"; }
+            else if (off > MeasuredXbarMhz || cliff != null)
+            {
+                mark = Look;
+                note = Join(off > MeasuredXbarMhz ? $"past the +{F(MeasuredXbarMhz)} MHz measured on the reference card (+50 mV, ratio 0.95, boost 100 %): this card's own tests decide" : null, cliff);
+            }
             else note = off > XbarCliffMhz ? $"+{F(dem)} mV keeps MSVDD off its floor" : off > 0 ? "within the measured range" : "stock";
             string change = Join(off != offS ? $"{Arrow(off - offS)} {Sg(off - offS)} MHz" : null, dem != demS ? $"{Arrow(dem - demS)} {Sg(dem - demS)} mV" : null) is { Length: > 0 } c ? c : "—";
             rows.Add(new("🔀", name, $"{Sg(offS)} MHz, {Sg(demS)} mV", $"{Sg(off)} MHz, {Sg(dem)} mV", change, mark,

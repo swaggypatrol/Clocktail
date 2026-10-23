@@ -22,6 +22,7 @@ Everything Clocktail can write, as it is on the card now, next to stock and the 
 - `current_limits.policies`: the driver's whole power-policy table, each record's limit and reading now; one near 100 % under load can hold the clock.
 - `clock_locks`: locks in the driver's clock-limit record (`set_clock_lock`, `nvidia-smi -lgc`, Boost Lock), whoever set them.
 - `perf_limits`: the driver's ceiling and floor per clock domain and the limit that set each (`manual blackwell`).
+- `perf_decrease`: the driver's own reasons for holding performance down (NVAPI's GetPerfDecreaseInfo). `api_triggered` alone is routine: the reference card sets it whenever a CUDA program has the GPU (the lab, a local AI model), at idle too, and only then, with the memory's ceiling `CUDA_MAX` in `perf_limits`, 200 MHz under its own (14159 against 14359 MHz at +358; 617.42 and 621.01). `card_report` marks it ℹ️ while nothing holds the clock.
 - `controls`: the capability map: each control, the tool that sets it, whether it can be set on this card and driver, and why not.
 - `pcie`: the PCIe link, as in `gpu_status`.
 - `tdr`: Windows' driver timeout (`manual stability`); `vbios` and `driver`, which the daily profile is bound to (`manual blackwell`).

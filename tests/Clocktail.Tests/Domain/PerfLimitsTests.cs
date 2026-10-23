@@ -46,6 +46,7 @@ public class PerfLimitsTests
         Assert.Equal(1792.0, d[1].Ceiling!.Mhz);
         Assert.Contains("clock lock", PerfLimits.Means(d[0].Ceiling!.By));
         Assert.Contains("the curve's top", PerfLimits.Means("RELIABILITY_ALT_NVVDD_0"));
+        Assert.Contains("a CUDA program has the GPU", PerfLimits.Means("CUDA_MAX"));   // the memory's ceiling beside api_triggered
         string json = JsonSerializer.Serialize(SettingsTools.PerfLimitsView(d));
         Assert.Contains("\"domain\":\"gpc\",\"ceiling_mhz\":1995,\"ceiling_by\":\"CLIENT_LOW_STRICT_GPC_MAX\"", json);
     }
