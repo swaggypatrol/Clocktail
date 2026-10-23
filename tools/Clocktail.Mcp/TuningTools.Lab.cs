@@ -398,8 +398,9 @@ public sealed partial class TuningTools
         "on at the end; nothing is kept: lab_status names the best setting to try. Needs an open session (begin_session) with " +
         "no trial in force, and the GPU to itself (a run another program shared, a screen saver drawing too, is measured again " +
         "every 30 s for up to 10 minutes). On the reference card on driver 621.01 (MSVDD at stock) XBAR +400 / +50 mV at ratio " +
-        "0.9 made the L2 test about 10 % faster than stock, and boost 100 % 1.0-1.3 % more (manual xbar-msvdd); games not " +
-        "measured. Tell the person first: it raises voltages and clocks past their daily ones.")]
+        "0.9 made the L2 test about 10 % faster than stock, and this search found XBAR +500 / +50 mV, ratio 0.95, boost 100 % " +
+        "7.1 % faster again, DRAM 4.5 % (manual xbar-msvdd); games not measured. Tell the person first: it raises voltages and " +
+        "clocks past their daily ones.")]
     public string TuneUncore(
         [Description("The highest XBAR offset to try, MHz (default 500; the driver allows 1000; past +400 is unmeasured).")] int xbarMaxMhz = 500,
         [Description("Seconds the lab measures each run, 15..60 (default 20; a comparison is four runs).")] int seconds = 20,
