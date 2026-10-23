@@ -50,5 +50,7 @@ public class ManualFactsTests
     [InlineData("xbar-msvdd", "Runs of one setting more than 2 % apart were disturbed")]           // UncoreSearch.Disturbed (0.3.4)
     [InlineData("xbar-msvdd", "A search that ends early (lab_stop, disturbed twice) names nothing")]
     [InlineData("memory", "marks nothing stable")]                                                 // MemorySweep.End (0.3.4)
+    [InlineData("xbar-msvdd", "L2 peaked at **+560**")]                                            // SettingsTools.MeasuredXbarMhz
+    [InlineData("status", "`api_triggered` alone is routine")]                                     // card_report's driver row
     public void The_manual_carries_it(string topic, string fact) => Assert.Contains(fact, ManualTools.Manual(topic));
 }

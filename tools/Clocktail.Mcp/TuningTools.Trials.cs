@@ -24,7 +24,8 @@ public sealed partial class TuningTools
     public static readonly int MemoryStepMhz = Env("CLOCKTAIL_MCP_MEMORY_STEP_MHZ", 250);
     /// <summary>adjust_xbar / adjust_clock_domain: the largest offset change per call (CLOCKTAIL_MCP_XBAR_STEP_MHZ). The
     /// offset's range is the driver's (±1000 MHz on a 5090), unless CLOCKTAIL_MCP_MAX_XBAR_MHZ caps XBAR lower. Measured
-    /// 0..+400 on the 5090; an overclocker's +450 without more voltage gave a grey screen.</summary>
+    /// 0..+560 on the 5090 (+560 with +50 mV, ratio 0.95, boost 100 % on driver 621.01); an overclocker's +450 without more
+    /// voltage gave a grey screen.</summary>
     public static readonly int XbarStepMhz = Env("CLOCKTAIL_MCP_XBAR_STEP_MHZ", 50);
     public static readonly int MaxXbarMhz = Env("CLOCKTAIL_MCP_MAX_XBAR_MHZ", int.MaxValue);
     /// <summary>adjust_xbar: the largest voltage demand change per call; the demand's own range is -25..+50 mV.</summary>
@@ -187,7 +188,8 @@ public sealed partial class TuningTools
         "MSVDD fall to its 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand keeps " +
         "it off up to +300, so above +250 the demand must be +20 mV or more, and above +300 +50 mV (at +400 the memory phase " +
         "still dropped to ~1830-1940 MHz with +20/+30 mV; raise the demand first). At most 50 MHz and 10 mV per call; " +
-        "offset within the driver's range (±1000 MHz on a 5090), demand -25..+50 mV. Past +400 is unmeasured: an overclocker " +
+        "offset within the driver's range (±1000 MHz on a 5090), demand -25..+50 mV. Past +560 is unmeasured (+560 / +50 mV " +
+        "at ratio 0.95, boost 100 % is the reference card's daily on 621.01); an overclocker " +
         "saw grey-screen artefacts at +450 with no voltage added. If anything is unstable with XBAR raised, step it down 50 " +
         "MHz before touching the curve. keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
     public string AdjustXbar(

@@ -11,8 +11,8 @@ public static class VerifiedOn
 {
     public const string Gpu = "NVIDIA GeForce RTX 5090";
     public const string Vbios = "98.02.2E.00.03";
-    /// <summary>NVAPI's driver version (61742 = 617.42).</summary>
-    public static readonly uint[] Drivers = [61742];
+    /// <summary>NVAPI's driver version (61742 = 617.42): 617.42, then 621.01 (Clocktail 0.3.3 to 0.3.5 were measured on it).</summary>
+    public static readonly uint[] Drivers = [61742, 62101];
 
     public static string Driver(uint version) => $"{version / 100}.{version % 100:00}";
 

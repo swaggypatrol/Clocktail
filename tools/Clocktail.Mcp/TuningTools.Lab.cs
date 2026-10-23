@@ -402,7 +402,7 @@ public sealed partial class TuningTools
         "7.1 % faster again, DRAM 4.5 % (manual xbar-msvdd); games not measured. Tell the person first: it raises voltages and " +
         "clocks past their daily ones.")]
     public string TuneUncore(
-        [Description("The highest XBAR offset to try, MHz (default 500; the driver allows 1000; past +400 is unmeasured).")] int xbarMaxMhz = 500,
+        [Description("The highest XBAR offset to try, MHz (default 500; the driver allows 1000; past +560 is unmeasured).")] int xbarMaxMhz = 500,
         [Description("Seconds the lab measures each run, 15..60 (default 20; a comparison is four runs).")] int seconds = 20,
         [Description("Settings to compare instead of the search, each A B B A against the settings on the card: " +
             "'XBAR MHz/demand mV/ratio/boost %' separated by ';', e.g. '400/50/0.9/100;400/50/0.925/100'. One outside the " +

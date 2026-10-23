@@ -73,7 +73,9 @@ public sealed class Card : IDisposable
     }
 
     /// <summary>NVAPI's GetPerfDecreaseInfo (public nvapi.h): the reasons the driver is holding performance down, as bits;
-    /// null where it does not answer. 0 at idle and at the 600 W wall on the reference card.</summary>
+    /// null where it does not answer. On the reference card (617.42 and 621.01, 2026-10-20..23): 0x8 (api_triggered) while a
+    /// CUDA program had the GPU (the lab, a local llama-server), at idle too, and then only, the memory's ceiling CUDA_MAX
+    /// beside it every time (perf_limits, 200 MHz under its own); 0 otherwise, at idle and at the 600 W wall.</summary>
     public uint? PerfDecrease()
     {
         using (_lane.Enter("the performance-decrease reasons"))

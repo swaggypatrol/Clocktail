@@ -92,6 +92,7 @@ public static class PerfLimits
         _ when by.StartsWith("PERF_CF_CONTROLLER", StringComparison.Ordinal) => "the driver's performance controller (it asks for the most the curve gives)",
         _ when by.StartsWith("ISMODEPOSSIBLE", StringComparison.Ordinal) => "what the display needs",
         _ when by.StartsWith("VMIN_", StringComparison.Ordinal) => "the rail's minimum voltage",
+        _ when by.StartsWith("CUDA_", StringComparison.Ordinal) => "the driver's cap while a CUDA program has the GPU (the lab, a local AI model)",
         _ => "a driver limit",
     };
 }
