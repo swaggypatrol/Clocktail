@@ -1510,6 +1510,8 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal("uncore", DailyProfile.Group(ClockDomainOffsets.Kind, ClockDomainOffsets.Key(ClockDomainId.Xbar)));
         Assert.Equal("uncore", DailyProfile.Group(ClockRatio.Kind, ClockRatio.Key));
         Assert.Equal("power", DailyProfile.Group(PowerCap.Kind, PowerCap.Key(PowerRequestKind.Ordinary)));
+        // The boost on its own: a driver that will not take it leaves the curve and the uncore on.
+        Assert.Equal("boost", DailyProfile.Group(Clocktail.Domain.Boost.VoltBoost.Kind, "legacy"));
     }
 
     /// <summary>

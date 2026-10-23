@@ -178,9 +178,11 @@ public sealed partial class TuningTools
     [McpServerTool(Name = "adjust_xbar", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Move XBAR's clock offset and/or its voltage demand (on MSVDD) as a new trial. XBAR is the crossbar between the GPCs, " +
         "L2 and memory; under load it runs between about 0.9 x the core clock (set_clock_ratio moves that ratio) and the clock " +
-        "MSVDD's reliability limit allows (adjust_msvdd's REL, ALT following past +20). At ratio 0.9 and REL 0 about +250 MHz " +
-        "reaches that window and more offset only lowers the MSVDD voltage it needs; with the ratio and REL raised the offset " +
-        "pays further (the reference card: +400 / +50 mV at ratio 0.95, REL +50 made the lab's crossbar test 5.6 % faster than +250 there). On the reference card (MSVDD REL 0): +250 made Blender 6.3 % " +
+        "MSVDD's reliability limit allows (MSVDD's REL, which only set_voltage_boost raises since driver 621.01: +5 mV per 25 %). " +
+        "At ratio 0.9 and REL 0 about +250 MHz reaches that window and more offset only lowers the MSVDD voltage it needs; with the " +
+        "ratio and REL raised the offset pays further (the reference card on 617.42: +400 / +50 mV at ratio 0.95, REL +50 made the " +
+        "lab's crossbar test 5.6 % faster than +250 there; on 621.01 with MSVDD at stock, +400 / +50 mV at ratio 0.9 was about 10 % " +
+        "over stock). On the reference card (MSVDD REL 0): +250 made Blender 6.3 % " +
         "faster than stock, +300 with +20 mV of demand 6-7 %. The cliff: above +250 with no demand, memory-bound work lets " +
         "MSVDD fall to its 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand keeps " +
         "it off up to +300, so above +250 the demand must be +20 mV or more, and above +300 +50 mV (at +400 the memory phase " +
@@ -278,9 +280,12 @@ public sealed partial class TuningTools
 
     [McpServerTool(Name = "set_voltage_boost", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set the voltage boost percentage (0..100) as a new trial, on the path the card takes (legacy on a 5090, whose NVVDD " +
-        "is kind 3). The legacy byte and the independent interface are one driver variable. On the reference card 1 % and " +
-        "10 % changed nothing that could be seen: not a rail's MAX, the V/F table or where the card ran; 100 % was never " +
-        "tried. Every rail's MAX must stay within the 1.15 V standard ceiling after the write, or it is put back. At most " +
+        "is kind 3). The legacy byte and the independent interface are one driver variable. It raises every rail's REL limit " +
+        "5 mV per 25 %: 100 % adds the 20 mV between REL and ALT/OP (the reference card on driver 621.01: NVVDD 1095 → 1115, " +
+        "MSVDD 1045 → 1065 mV; 1 % and 10 % are under the first step and moved nothing). It still writes on 621.01, which drops " +
+        "the rails' own offsets, so it is the one way to raise MSVDD's ceiling, XBAR's: at XBAR +400 / +50 mV, 100 % made the " +
+        "lab's L2 test 1.0-1.3 % faster with the core unchanged. A curve cut flat under NVVDD's limit never reaches the higher " +
+        "one. Every rail's MAX must stay within the 1.15 V standard ceiling after the write, or it is put back. At most " +
         "25 % from where it is per call. keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily " +
         "profile's back.")]
     public string SetVoltageBoost(
@@ -356,12 +361,13 @@ public sealed partial class TuningTools
     [McpServerTool(Name = "set_clock_ratio", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set XBAR's clock ratio to the core (the driver's NVVDD/MSVDD clock propagation ratio, the original's --xbar-ratio) " +
         "as a new trial. 0.8999 on a 5090 (58976/65536): under load XBAR is held to about 0.9 x the core clock, which is " +
-        "why adjust_xbar stops paying past +250 MHz unless the ratio and MSVDD go up with it. A higher ratio lets XBAR follow the core closer (about +29 MHz of XBAR " +
+        "why adjust_xbar stops paying past +250 MHz unless the ratio and MSVDD's limit (set_voltage_boost) go up with it. A higher ratio lets XBAR follow the core closer (about +29 MHz of XBAR " +
         "per +0.01 at a 2900 MHz core) and asks MSVDD for the voltage that clock needs, so adjust_xbar's demand rules apply " +
         "to the clock it reaches. On the reference card 0.92 ran XBAR 2595 MHz against a 2850 MHz core at the 600 W wall " +
         "(2535 / 2865 at stock), MSVDD 980 → 1005 mV. Alone it can pull the core down where MSVDD holds XBAR (0.95 at REL 0: " +
-        "the core -3.5 %); with MSVDD REL +50 and XBAR +400 / +50 mV, 0.95 made the lab's crossbar test 5-6 % faster and the " +
-        "memory's bandwidth 7.8 % higher (tune_uncore finds the mix). Its gain in frames is unmeasured: judge by a benchmark that uses " +
+        "the core -3.5 %; on 621.01 with MSVDD at stock, 0.925 and 0.95 cost it 2.0 and 2.4 %); with MSVDD REL +50 and XBAR " +
+        "+400 / +50 mV (617.42), 0.95 made the lab's crossbar test 5-6 % faster and the memory's bandwidth 7.8 % higher " +
+        "(tune_uncore finds the mix). Its gain in frames is unmeasured: judge by a benchmark that uses " +
         "memory. 0.5..1.0, at most 0.025 per call. keep_as_daily keeps it; back_to_daily, " +
         "end_session and a crash put the daily profile's back.")]
     public string SetClockRatio(

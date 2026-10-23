@@ -114,9 +114,9 @@ public class UncoreTests
     }
 
     [Fact]
-    public void Xbar_climbs_the_demand_ladder_then_the_ratio_then_xbar_again_then_msvdd()
+    public void Xbar_climbs_the_demand_ladder_then_the_ratio_then_xbar_again_then_the_boost()
     {
-        // XBAR pays to +400, then flat; the ratio pays up to 0.95 and lets XBAR pay to +450; MSVDD REL buys nothing.
+        // XBAR pays to +400, then flat; the ratio pays up to 0.95 and lets XBAR pay to +450; the boost buys nothing.
         double Speed(UncoreSetting s) => 4780 * (1 + 0.01 * Math.Min(s.XbarMhz, s.Ratio > 0.92 ? 450 : 400) / 50.0) * (1 + 0.5 * (s.Ratio - 0.8999));
         var (search, tried) = Run(Speed);
         Assert.Null(search.Ended);
@@ -125,34 +125,34 @@ public class UncoreTests
         Assert.Equal(new UncoreSetting(300, 20, 58976, 0), tried[0]);
         Assert.Equal(new UncoreSetting(350, 50, 58976, 0), tried[1]);
         Assert.DoesNotContain(tried, s => s.XbarMhz > 300 && s.DemandMv < 50);
-        Assert.Contains(tried, s => s.MsvddRelMv == 10);
+        Assert.Contains(tried, s => s.BoostPct == 25);
         Assert.True(tried.Count < 20, $"{tried.Count} comparisons");
     }
 
     /// <summary>The reference card at its daily +250 MHz: XBAR sits under the clock MSVDD's reliability limit allows, so its
-    /// offset buys nothing until MSVDD's REL is raised; then the next round climbs XBAR again.</summary>
+    /// offset buys nothing until the boost raises that limit; then the next round climbs XBAR again.</summary>
     [Fact]
     public void An_axis_runs_again_when_another_one_moved_the_best()
     {
-        double Speed(UncoreSetting s) => 4780 * (s.MsvddRelMv >= 10 ? 1.01 * (1 + 0.01 * Math.Min(s.XbarMhz - 250, 100) / 50.0) : 1);
+        double Speed(UncoreSetting s) => 4780 * (s.BoostPct >= 25 ? 1.01 * (1 + 0.01 * Math.Min(s.XbarMhz - 250, 100) / 50.0) : 1);
         var (search, tried) = Run(Speed);
-        Assert.Equal(new UncoreSetting(350, 50, 58976, 10), search.Best);
-        Assert.Equal([300, 350], tried.Where(s => s.MsvddRelMv == 0 && s.RatioRaw == 58976 && s.XbarMhz > 250).Select(s => s.XbarMhz));
-        Assert.Contains(tried, s => s.MsvddRelMv == 10 && s.XbarMhz == 350);
-        Assert.True(tried.Count < 16, $"{tried.Count} comparisons");
+        Assert.Equal(new UncoreSetting(350, 50, 58976, 25), search.Best);
+        Assert.Equal([300, 350], tried.Where(s => s.BoostPct == 0 && s.RatioRaw == 58976 && s.XbarMhz > 250).Select(s => s.XbarMhz));
+        Assert.Contains(tried, s => s.BoostPct == 25 && s.XbarMhz == 350);
+        Assert.True(tried.Count < 22, $"{tried.Count} comparisons");   // the boost axis takes four 25 % steps where MSVDD took two
     }
 
     /// <summary>XBAR's clock as the card set it: the lower of its floor (the ratio x a 3050 MHz core) and its ceiling (the
-    /// clock MSVDD's reliability limit allows, 2750 MHz + 3 MHz per mV of REL). Neither the ratio nor MSVDD alone moves it
-    /// by the 0.5 % kept; the two together do.</summary>
+    /// clock MSVDD's reliability limit allows, 2750 MHz + 3 MHz per mV, the boost +5 mV per 25 %). Neither the ratio nor the
+    /// boost alone moves it by the 0.5 % kept; the two together do (the boost capped at 50 % here, so it ends there).</summary>
     [Fact]
-    public void The_ratio_and_msvdd_go_up_together_when_neither_pays_alone()
+    public void The_ratio_and_the_boost_go_up_together_when_neither_pays_alone()
     {
-        double Speed(UncoreSetting s) => Math.Min(s.Ratio * 3050, 2750 + 3 * s.MsvddRelMv);
-        var (search, tried) = Run(Speed);
-        Assert.Equal(new UncoreSetting(250, 0, 58976 + 2 * 1638, 20), search.Best);
+        double Speed(UncoreSetting s) => Math.Min(s.Ratio * 3050, 2750 + 0.6 * s.BoostPct);
+        var (search, tried) = Run(Speed, spec: Spec with { BoostMaxPct = 50 });
+        Assert.Equal(new UncoreSetting(250, 0, 58976 + 2 * 1638, 50), search.Best);
         Assert.Contains(search.Log, c => c.Stage == "window" && c.Outcome == Comparison.Better);
-        Assert.DoesNotContain(search.Log, c => c.Stage is "ratio" or "msvdd" && c.Outcome == Comparison.Better);
+        Assert.DoesNotContain(search.Log, c => c.Stage is "ratio" or "boost" && c.Outcome == Comparison.Better);
     }
 
     [Theory]
@@ -177,7 +177,7 @@ public class UncoreTests
         // +300 is no faster than +250, but +350 is: a single miss is stepped past.
         var (search, _) = Run(s => s.XbarMhz switch { 300 => 4780, >= 350 => 4900, _ => 4780 });
         Assert.Equal(350, search.Best.XbarMhz);
-        // Nothing pays at all: XBAR, the ratio and MSVDD each stop after two misses.
+        // Nothing pays at all: XBAR, the ratio and the boost each stop after two misses.
         var (flat, tried) = Run(_ => 4780);
         Assert.Equal(Spec.Start, flat.Best);
         Assert.True(tried.Count <= 8, $"{tried.Count} comparisons");
@@ -206,38 +206,52 @@ public class UncoreTests
     [Fact]
     public void A_list_compares_each_candidate_with_the_start_and_keeps_the_fastest_better_one()
     {
-        var start = new UncoreSetting(250, 0, 62252, 20);
-        var spec = Spec with { Start = start, MsvddRelMaxMv = 50, MsvddAltGapMv = 20 };
+        var start = new UncoreSetting(250, 0, 62252, 0);
+        var spec = Spec with { Start = start };
         var against = new List<UncoreSetting>();
-        var gains = new Dictionary<int, double> { [30] = 0.8, [40] = 1.6, [50] = 1.1 };
+        var gains = new Dictionary<int, double> { [25] = 0.8, [50] = 1.6, [75] = 1.1 };
         var search = new UncoreSearch(spec, (stage, a, b) =>
         {
             against.Add(a);
-            double g = gains.GetValueOrDefault(b.MsvddRelMv);
+            double g = gains.GetValueOrDefault(b.BoostPct);
             return new(stage, a, b, g >= 0.5 ? Comparison.Better : Comparison.NotBetter, "", g, 0, 0, []);
         }, () => false);
-        search.RunList([start with { MsvddRelMv = 30 }, start with { MsvddRelMv = 40 }, start with { XbarMhz = 400, DemandMv = 20 },
-            start with { MsvddRelMv = 50 }, start with { MsvddRelMv = 60 }]);
-        Assert.Equal(start with { MsvddRelMv = 40 }, search.Best);
+        search.RunList([start with { BoostPct = 25 }, start with { BoostPct = 50 }, start with { XbarMhz = 400, DemandMv = 20 },
+            start with { BoostPct = 75 }, start with { BoostPct = 125 }]);
+        Assert.Equal(start with { BoostPct = 50 }, search.Best);
         Assert.All(against, a => Assert.Equal(start, a));
         Assert.Equal(3, against.Count);
-        // +400 MHz with +20 mV is the cliff, REL +60 past the limit: logged, not run.
+        // +400 MHz with +20 mV is the cliff, a boost of 125 % past the driver's 100: logged, not run.
         Assert.Contains(search.Log, c => c.B.XbarMhz == 400 && c.Why.Contains("needs +50 mV", StringComparison.Ordinal));
-        Assert.Contains(search.Log, c => c.B.MsvddRelMv == 60 && c.Why.Contains("MSVDD REL past +50", StringComparison.Ordinal));
+        Assert.Contains(search.Log, c => c.B.BoostPct == 125 && c.Why.Contains("the boost outside 0..100 %", StringComparison.Ordinal));
     }
 
-    /// <summary>MSVDD's top is the lowest of REL and ALT; on the reference card ALT sits 20 mV above REL, so REL past +20 takes
-    /// ALT with it, and a setting under the gap puts ALT back to 0.</summary>
-    [Theory]
-    [InlineData(0, 0)]
-    [InlineData(20, 0)]
-    [InlineData(30, 10)]
-    [InlineData(50, 30)]
-    public void Alt_follows_rel_past_the_gap(int relMv, int altMv)
+    /// <summary>Runs of one setting that disagree were disturbed; when only the candidate's did, its incumbent's agreeing, the
+    /// job counts a second time as the candidate's miss rather than the end of the search (the review of 0.3.4: a setting
+    /// erratic in itself, or heating the card, ended hours of search with nothing named).</summary>
+    [Fact]
+    public void Runs_that_disagree_are_disturbed_and_say_whether_only_the_candidates_did()
     {
-        Assert.Equal(altMv, (Spec with { MsvddAltGapMv = 20 }).AltMv(Spec.Start with { MsvddRelMv = relMv }));
-        Assert.Null(Spec.AltMv(Spec.Start with { MsvddRelMv = relMv }));
+        var erratic = UncoreSearch.Judge(R(4780), R(4950), R(4826), R(4782));
+        Assert.Equal(Comparison.Unjudged, erratic.Outcome);
+        Assert.True(erratic.Disturbed);
+        Assert.True(erratic.Erratic);
+        Assert.False(erratic.Gain);
+        var outside = UncoreSearch.Judge(R(4780), R(4900), R(4902), R(4600));
+        Assert.True(outside.Disturbed);
+        Assert.False(outside.Erratic);
     }
+
+    /// <summary>The confirmation names a best whose DRAM cost stays within <see cref="UncoreSearch.DramCap"/>; past it, nothing
+    /// (the review of 0.3.4: a DRAM fall of 8 % still named the best).</summary>
+    [Theory]
+    [InlineData(-0.8, true)]
+    [InlineData(-1.9, true)]
+    [InlineData(-2.1, false)]
+    [InlineData(-8.0, false)]
+    public void A_confirmation_that_costs_dram_past_the_cap_names_nothing(double dramPct, bool holds) =>
+        Assert.Equal(holds, UncoreSearch.Holds(new Comparison("confirm", Spec.Start, Spec.Start with { XbarMhz = 300 }, Comparison.NotBetter,
+            "DRAM bandwidth fell", 2.5, dramPct, 0, [], Gain: true, Veto: Comparison.DramCost)));
 
     [Fact]
     public void Lab_stop_ends_the_search()

@@ -68,17 +68,11 @@ public class CapabilitiesTests
         Assert.True(curve.Can, curve.Why);
         Assert.Equal("adjust_curve, flatten_curve, set_curve, shift_curve", curve.Tool);
         Assert.Contains("for each write the tool makes", curve.Why);
-        Assert.True(Assert.Single(map, c => c.Name == "MSVDD voltage").Can);
-
-        // Driver 621.01 takes rail writes and changes nothing: both rail controls say so, the rest stand.
-        var on621 = Controls.Map(Capabilities.Probe(new NvClient(api), new GpuSession(1, "fake")), WritePolicySet.Default, 62101);
-        foreach (var rail in new[] { "MSVDD voltage", "NVVDD offsets" })
-        {
-            var c = Assert.Single(on621, x => x.Name == rail);
-            Assert.False(c.Can);
-            Assert.StartsWith("driver 621.01 takes NVVDD's and MSVDD's offsets and changes nothing", c.Why);
-        }
-        Assert.True(Assert.Single(on621, c => c.Name == "V/F curve").Can);
+        // The rails' offsets are not offered since 0.3.5 (driver 621.01 drops them): the map says why and what does instead.
+        var rails = Assert.Single(map, c => c.Name.StartsWith("NVVDD and MSVDD offsets", StringComparison.Ordinal));
+        Assert.False(rails.Can);
+        Assert.Null(rails.Tool);
+        Assert.Contains("set_voltage_boost", rails.Why);
 
         var fans = Assert.Single(map, c => c.Name == "fixed fan speed");
         Assert.False(fans.Can);
@@ -93,7 +87,6 @@ public class CapabilitiesTests
         // adjust_xbar moves XBAR only: SYS and Video, NVVDD and F8 are the CLI's.
         Assert.Equal("adjust_xbar", Assert.Single(map, c => c.Name == "XBAR offset and voltage demand").Tool);
         Assert.Equal("set_core_offset", Assert.Single(map, c => c.Name == "core P0 offset").Tool);
-        Assert.True(Assert.Single(map, c => c.Name == "NVVDD offsets") is { Tool: "adjust_nvvdd", Can: true });
         Assert.Equal("adjust_clock_domain", Assert.Single(map, c => c.Name == "SYS and Video offsets and voltage demands").Tool);
         Assert.Equal("set_power_cap", Assert.Single(map, c => c.Name == "additional power request (F8)").Tool);
     }

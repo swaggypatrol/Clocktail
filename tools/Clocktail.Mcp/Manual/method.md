@@ -73,16 +73,17 @@ Do: 2-4 of their most demanding games, the heaviest scenes, 5-10 minutes each. B
 - All hold: `keep_as_daily` (ask).
 Why: a stress pass is necessary, not sufficient. Their own games are the final judge.
 
-## Phase 6: the uncore (MSVDD, XBAR, the ratio)
+## Phase 6: the uncore (the boost, XBAR, the ratio)
 Why before the memory: the crossbar XBAR clocks carries every byte between the GPCs, the L2 and the memory, and it can hold the memory's bandwidth. On the reference card at XBAR +250 / MSVDD REL 0 the memory's bandwidth stayed flat from +0 to +358 (1437-1440 GB/s) and +358 to +858 gave only 2.9 %; after the uncore below, the same +358 read 7.8 % more (1571 → 1693 GB/s) and the memory kept climbing to about +1758. A memory sweep before the uncore measures the crossbar.
-How XBAR is held: under load it runs in a window about 30 MHz wide, its floor the ratio x the core (0.9 stock) and its ceiling the clock MSVDD's reliability limit allows (`card_settings` perf_limits, `RELIABILITY_MSVDD_0`). Raise one alone and little moves; the ratio alone can even pull the core down (0.95 at REL 0: -3.5 %). They go up together, and then XBAR's offset pays.
+How XBAR is held: under load it runs in a window about 30 MHz wide, its floor the ratio x the core (0.9 stock) and its ceiling the clock MSVDD's reliability limit allows (`card_settings` perf_limits, `RELIABILITY_MSVDD_0`). Raise one alone and little moves; the ratio alone can even pull the core down (0.95 at REL 0: -3.5 %). They go up together, and then XBAR's offset pays. Since driver 621.01 MSVDD's limit moves only with the voltage boost, +5 mV per 25 % (+20 at 100 %).
 Do:
 1. Close other GPU work, screen saver to none, `begin_session` (`unattended=true` if they will be away).
-2. `tune_uncore` (20-40 minutes; it keeps nothing): XBAR with its voltage demand, the ratio, MSVDD REL up to +50 mV (ALT goes up with it past +20), and the ratio and MSVDD together, each candidate A B B A against the best so far on the lab's crossbar (L2) test. `lab_status` names the best. To check particular settings, `tune_uncore candidates=...` compares each A B B A against the settings on the card.
-3. Put the best on in the tools' steps: `adjust_msvdd` REL +25 per call, `set_clock_ratio` 0.025 per call, `adjust_xbar` demand +10 per call first, then the offset +50 per call.
+2. `tune_uncore` (20-40 minutes; it keeps nothing): XBAR with its voltage demand, the ratio, the voltage boost up to 100 % (25 % a step), and the ratio and the boost together, each candidate A B B A against the best so far on the lab's crossbar (L2) test. `lab_status` names the best. To check particular settings, `tune_uncore candidates=...` compares each A B B A against the settings on the card.
+3. Put the best on in the tools' steps: `set_voltage_boost` +25 % per call, `set_clock_ratio` 0.025 per call, `adjust_xbar` demand +10 per call first, then the offset +50 per call.
 4. `stress_test` at load 100 and 50, `lab_test phases=l2,memory,latency`, then `keep_as_daily` (ask). Their games confirm it, judged on frames.
-By hand instead: `adjust_msvdd` REL to 0 (NVIDIA's own limit), `adjust_xbar` +20 mV and +250..+300, each judged by a benchmark A B B A (Blender: REL 0 ~2 % faster, XBAR +300 / +20 mV 6-7 %).
-Reference result: XBAR +400 / +50 mV, ratio 0.95, MSVDD REL +50 / ALT +30 (1145 mV): the crossbar test 5-6 % faster than XBAR +250 / REL 0 / ratio 0.9, the memory's bandwidth 7.8 % higher at the same offset. +500 was 0.2 % more; +400 was kept for margin. It passed `stress_test` at 100 and 50; games not measured yet.
+By hand instead: `set_voltage_boost` 100 %, `adjust_xbar` +20 mV and +250..+300, then +400 / +50 mV, each judged by a benchmark A B B A (on 617.42, Blender: MSVDD REL 0 ~2 % faster, XBAR +300 / +20 mV 6-7 %).
+Reference result on driver 621.01 (MSVDD's offsets cannot be set): XBAR +400 / +50 mV at ratio 0.9, about 10 % on the crossbar test over stock; the ratio no longer paid (0.925 and 0.95 slowed the core 2.0 and 2.4 %), and boost 100 % added 1.0-1.3 % (`manual xbar-msvdd`).
+Reference result on driver 617.42: XBAR +400 / +50 mV, ratio 0.95, MSVDD REL +50 / ALT +30 (1145 mV): the crossbar test 5-6 % faster than XBAR +250 / REL 0 / ratio 0.9, the memory's bandwidth 7.8 % higher at the same offset. +500 was 0.2 % more; +400 was kept for margin. It passed `stress_test` at 100 and 50; games not measured yet.
 The trap: above +250 with no voltage demand, memory-bound work drops MSVDD to its floor and pins the core near 1610 MHz. The tools refuse it. If something is unstable here, step XBAR down 50 MHz before touching the curve.
 
 ## Phase 7: memory

@@ -17,8 +17,8 @@ Every number in this manual was measured on one reference card: RTX 5090 Founder
 | History: every trial and crash | `data_points`, `read_log` |
 | Start/stop an experiment | `begin_session` (`unattended` for a run nobody watches), `end_session` |
 | The curve, as a trial | `adjust_curve` (a band), `flatten_curve` (a flat top), `set_curve` (the whole curve), `shift_curve` (left by N mV), `set_core_offset` (every point) |
-| The core rail and clock, as a trial | `adjust_nvvdd`, `set_clock_lock`, `set_voltage_boost`, `adjust_clock_domain core` (its voltage demand) |
-| The uncore and memory, as a trial | `adjust_msvdd`, `adjust_xbar`, `set_clock_ratio`, `adjust_clock_domain` (SYS, Video), `set_memory_offset` |
+| The core clock and the rails' limits, as a trial | `set_clock_lock`, `set_voltage_boost` (every rail's REL limit), `adjust_clock_domain core` (its voltage demand) |
+| The uncore and memory, as a trial | `adjust_xbar`, `set_clock_ratio`, `adjust_clock_domain` (SYS, Video), `set_memory_offset` |
 | Power, as a trial | `set_power_limit`, `set_current_limit`, `set_power_cap` (ask first) |
 | Fans, as a trial | `set_fan_curve`, `set_fan_start`, `set_fan_speed` |
 | The daily wall | `set_daily_power_limit` |

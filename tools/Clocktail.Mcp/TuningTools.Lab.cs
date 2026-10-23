@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Clocktail.Domain.Boost;
 using Clocktail.Domain.Broker;
 using Clocktail.Domain.Clocks;
 using Clocktail.Domain.Ownership;
@@ -356,7 +357,7 @@ public sealed partial class TuningTools
         return (job, dir, answer.Contains("detached", StringComparison.Ordinal));
     }
 
-    /// <summary>tune_uncore's candidates, "XBAR MHz/demand mV/ratio/MSVDD REL mV;..." as the lab's settings (the ratio raw,
+    /// <summary>tune_uncore's candidates, "XBAR MHz/demand mV/ratio/boost %;..." as the lab's settings (the ratio raw,
     /// U16.16); null when none are given.</summary>
     public static List<object>? Candidates(string? text)
     {
@@ -367,10 +368,11 @@ public sealed partial class TuningTools
             var p = c.Split('/', StringSplitOptions.TrimEntries);
             var inv = CultureInfo.InvariantCulture;
             if (p.Length != 4 || !int.TryParse(p[0], NumberStyles.Integer, inv, out var x) || !int.TryParse(p[1], NumberStyles.Integer, inv, out var d)
-                || !double.TryParse(p[2], NumberStyles.Float, inv, out var r) || !int.TryParse(p[3], NumberStyles.Integer, inv, out var m))
-                throw new ArgumentException($"'{c}' is not XBAR MHz/demand mV/ratio/MSVDD REL mV");
+                || !double.TryParse(p[2], NumberStyles.Float, inv, out var r) || !int.TryParse(p[3], NumberStyles.Integer, inv, out var b))
+                throw new ArgumentException($"'{c}' is not XBAR MHz/demand mV/ratio/boost %");
             if (r is < 0.5 or > 1.0) throw new ArgumentException($"'{c}': the ratio is 0.5..1.0");
-            list.Add(new { xbar_mhz = x, demand_mv = d, ratio_raw = (uint)Math.Round(r * 65536), msvdd_rel_mv = m });
+            if (b is < 0 or > (int)VoltBoost.MaxPercent) throw new ArgumentException($"'{c}': the boost is 0..{VoltBoost.MaxPercent} %");
+            list.Add(new { xbar_mhz = x, demand_mv = d, ratio_raw = (uint)Math.Round(r * 65536), boost_pct = b });
         }
         if (list.Count is 0 or > 30) throw new ArgumentException("candidates: 1 to 30 settings");
         return list;
@@ -386,25 +388,24 @@ public sealed partial class TuningTools
         "(other work, or the card still settling), so that comparison is measured again, and twice ends the search. Axes in " +
         "order: XBAR's offset, each step with the demand " +
         "adjust_xbar's rule asks for (above +250 MHz +20 mV, above +300 +50 mV; more where a step still hits the cliff), the " +
-        "XBAR/core clock ratio (its 0.9 x core floor), MSVDD's REL (up to +20 mV; its reliability limit is XBAR's ceiling), then " +
-        "the ratio and MSVDD a step each together (XBAR's window up as a whole: on the reference card neither alone moved it), " +
+        "XBAR/core clock ratio (its 0.9 x core floor), the voltage boost in 25 % steps (every rail's REL limit +5 mV a step, so " +
+        "MSVDD's reliability limit, XBAR's ceiling: MSVDD's own offsets cannot be set since driver 621.01), then the ratio and the " +
+        "boost a step each together (XBAR's window up as a whole: on the reference card neither alone moved it), " +
         "in rounds: an axis runs again when another has moved the best since. An axis stops at a " +
         "failure (recorded as its trial's crash) or two candidates in a row that are not faster. The best is measured once more " +
         "against the daily settings at the end (stage confirm) and named only if its L2 gain holds there (a core or DRAM cost " +
         "the steps add up to is told with it); a search that ends early names nothing. The daily profile goes back " +
         "on at the end; nothing is kept: lab_status names the best setting to try. Needs an open session (begin_session) with " +
         "no trial in force, and the GPU to itself (a run another program shared, a screen saver drawing too, is measured again " +
-        "every 30 s for up to 10 minutes). On the reference card XBAR +300 with +20 mV made Blender 6-7 % faster; a " +
-        "short check of this tuner found +2.8 % L2 at MSVDD REL +10 mV, ratio 0.925, XBAR +300 / +20 mV (manual xbar-msvdd); " +
-        "games not measured. Tell the person first: it raises voltages and clocks past their daily ones.")]
+        "every 30 s for up to 10 minutes). On the reference card on driver 621.01 (MSVDD at stock) XBAR +400 / +50 mV at ratio " +
+        "0.9 made the L2 test about 10 % faster than stock, and boost 100 % 1.0-1.3 % more (manual xbar-msvdd); games not " +
+        "measured. Tell the person first: it raises voltages and clocks past their daily ones.")]
     public string TuneUncore(
         [Description("The highest XBAR offset to try, MHz (default 500; the driver allows 1000; past +400 is unmeasured).")] int xbarMaxMhz = 500,
         [Description("Seconds the lab measures each run, 15..60 (default 20; a comparison is four runs).")] int seconds = 20,
         [Description("Settings to compare instead of the search, each A B B A against the settings on the card: " +
-            "'XBAR MHz/demand mV/ratio/MSVDD REL mV' separated by ';', e.g. '400/50/0.95/50;500/50/0.95/50'. One outside the " +
-            "limits or the cliff rule is skipped; at most 30.")] string? candidates = null,
-        [Description("The highest MSVDD REL offset to try, mV (default the service's limit, +50; on a driver that drops rail " +
-            "writes, 621.01, the offset on the card). The offset on the card holds MSVDD where it is and tunes XBAR and the ratio alone.")] int? msvddRelMaxMv = null) => Guard(() =>
+            "'XBAR MHz/demand mV/ratio/boost %' separated by ';', e.g. '400/50/0.9/100;400/50/0.925/100'. One outside the " +
+            "limits or the cliff rule is skipped; at most 30.")] string? candidates = null) => Guard(() =>
     {
         if (seconds is < 15 or > 60) throw new ArgumentException("seconds is 15..60");
         var list = Candidates(candidates);
@@ -415,26 +416,21 @@ public sealed partial class TuningTools
         int xbarMax = Math.Min(xbarMaxMhz, Math.Min(xbarTop, MaxXbarMhz));
         if (list == null && xbarMax <= xbarKhz / 1000) throw new ArgumentException($"xbarMaxMhz must be above the XBAR offset on the card ({xbarKhz / 1000} MHz)");
         uint ratioRaw = card.WithDriver(ClockRatio.Read).Raw;
-        var msvdd = look.Msvdd ?? throw new InvalidOperationException("the MSVDD rail is unreadable");
-        int relMv = msvdd.Offsets.RelUv / 1000;
-        // A driver that drops rail writes (621.01) would refuse every MSVDD candidate: MSVDD stays where it is.
-        int relMax = Math.Min(msvddRelMaxMv ?? (Clocktail.Domain.VerifiedOn.RailWritesDroppedBy(card.DriverVersion) != null ? relMv : MsvddRelMaxMv), MsvddRelMaxMv);
-        if (relMax < relMv) throw new ArgumentException($"msvddRelMaxMv is below MSVDD's REL offset on the card ({relMv:+0;-0;0} mV)");
-        // ALT's limit above REL's with no offsets: a REL offset past it goes on with ALT raised by the rest (the rail's top is
-        // the lowest of the two). Only while ALT holds no offset of its own.
-        int? altGapMv = msvdd.Limits.AltOpUv != 0 && msvdd.Offsets.AltUv == 0
-            ? (int)(((long)msvdd.Limits.AltOpUv - msvdd.Offsets.AltUv - ((long)msvdd.Limits.RelUv - msvdd.Offsets.RelUv)) / 1000) : null;
-        var start = new { xbar_mhz = xbarKhz / 1000, demand_mv = demandUv / 1000, ratio_raw = ratioRaw, msvdd_rel_mv = relMv };
+        // The boost on the path the card takes (set_voltage_boost's): the legacy byte on a 5090, whose NVVDD is kind 3.
+        var boost = card.WithDriver((hw, s) => BoostReader.Observe(hw, s));
+        var path = boost.DefaultRule(railsWritable: true) ?? throw new InvalidOperationException("this card has no boost path");
+        int boostPct = (int)(path == BoostPath.Independent ? boost.IndependentPercent ?? 0 : boost.LegacyPercent);
+        var start = new { xbar_mhz = xbarKhz / 1000, demand_mv = demandUv / 1000, ratio_raw = ratioRaw, boost_pct = boostPct };
         var (job, dir, detached) = StartJob(exe, "uncore", "tune-uncore", new
         {
             stable_id = card.StableId, pci = card.PciBusId, curve = VfOffsets.Encode(look.Curve.Offsets()), start,
             xbar_max_mhz = xbarMax, xbar_step_mhz = 50, demand_max_mv = MaxVdemandMv, demand_step_mv = 10,
             cliff_mhz = XbarCliffMhz, cliff_demand_mv = XbarCliffDemandMv, high_mhz = XbarHighMhz, high_demand_mv = XbarHighDemandMv,
-            ratio_max = 0.95, ratio_step = 0.025, msvdd_rel_max_mv = relMax, msvdd_rel_step_mv = 10,
-            seconds, warmup_seconds = 60, grace_seconds = 45, msvdd_alt_gap_mv = altGapMv, candidates = list,
+            ratio_max = 0.95, ratio_step = 0.025, boost_max_pct = (int)VoltBoost.MaxPercent, boost_step_pct = BoostStepPct,
+            seconds, warmup_seconds = 60, grace_seconds = 45, boost_key = path == BoostPath.Independent ? "independent" : "legacy", candidates = list,
         });
         card.Broker(BrokerRequest.OpExperiment, "note", string.Create(CultureInfo.InvariantCulture,
-            $"tune_uncore started from XBAR {xbarKhz / 1000:+0;-0;0} MHz / {demandUv / 1000:+0;-0;0} mV, ratio {ratioRaw / 65536.0:0.0000}, MSVDD REL {relMv:+0;-0;0} mV; XBAR up to {xbarMax:+0} MHz ({job})"));
+            $"tune_uncore started from XBAR {xbarKhz / 1000:+0;-0;0} MHz / {demandUv / 1000:+0;-0;0} mV, ratio {ratioRaw / 65536.0:0.0000}, boost {boostPct} %; XBAR up to {xbarMax:+0} MHz ({job})"));
         return Out(new
         {
             started = true, job, dir, start, xbar_max_mhz = xbarMax,

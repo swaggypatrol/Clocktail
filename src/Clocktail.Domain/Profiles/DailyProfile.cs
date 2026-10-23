@@ -65,11 +65,13 @@ public sealed record DailyProfile(
     };
 
     /// <summary>The cells of a profile that were tuned together (the method's steps): the wall; the fans; the core (its curve,
-    /// NVVDD's offsets, the P0 core offset, the voltage boost, the core's voltage demand and clock offset, a clock cap); the
-    /// uncore (MSVDD's offsets, the XBAR/core ratio, the XBAR, SYS and Video offsets and voltage demands); the memory offset.
-    /// A cell that does not go on takes the rest of its group with it, the other groups go on: XBAR +400 / +50 mV and the
-    /// ratio 0.95 were found with MSVDD REL +50, and without it the ratio slows the core (driver 621.01 drops every rail
-    /// write). A kind this does not name is a group of its own.</summary>
+    /// NVVDD's offsets, the P0 core offset, the core's voltage demand and clock offset, a clock cap); the uncore (MSVDD's
+    /// offsets, the XBAR/core ratio, the XBAR, SYS and Video offsets and voltage demands); the memory offset; the voltage
+    /// boost. A cell that does not go on takes the rest of its group with it, the other groups go on: XBAR +400 / +50 mV and
+    /// the ratio 0.95 were found with MSVDD REL +50, and without it the ratio slows the core (driver 621.01 drops every rail
+    /// write). The boost is a group of its own: it raises every rail's REL limit, and what runs under it runs safely without
+    /// it (a lower ceiling holds XBAR lower, and a curve cut flat under NVVDD's limit never reaches it), so a driver that will
+    /// not take it leaves the curve and the uncore on. A kind this does not name is a group of its own.</summary>
     public static string Group(string kind, string key) => kind switch
     {
         PowerCap.Kind => "power",
@@ -79,7 +81,8 @@ public sealed record DailyProfile(
         ClockVdemand.Kind => key == ClockVdemand.Key(ClockDomainId.Graphics) ? "core" : "uncore",
         ClockDomainOffsets.Kind => key == ClockDomainOffsets.Key(ClockDomainId.Graphics) ? "core" : "uncore",
         ClockRatio.Kind => "uncore",
-        VfWrites.Kind or VoltBoost.Kind or ClockLimitWrites.Kind => "core",
+        VfWrites.Kind or ClockLimitWrites.Kind => "core",
+        VoltBoost.Kind => "boost",
         _ => $"{kind}/{key}",
     };
 

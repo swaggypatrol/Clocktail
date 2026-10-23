@@ -199,6 +199,19 @@ public class LabTests
         Assert.Equal(end, MemorySweep.End(steps[^1], MemorySweep.Edge(steps), trend: true));   // the trend goes on past a slowdown, never past these
     }
 
+    /// <summary>A fine sweep starts away from the daily offset: its first step's memory clock must follow the offset from the
+    /// warm-up's, as each later step's follows the one before. Before 0.3.5 the first step had nothing to be checked against
+    /// and was marked stable even with the offset not in force (CUDA work in P1).</summary>
+    [Theory]
+    [InlineData(13801, MemorySweep.StepEnd.Unjudged)]   // the clock stayed where the warm-up's was: not in force
+    [InlineData(15469, MemorySweep.StepEnd.Stable)]     // +1668 MHz followed 1:1
+    public void The_first_step_is_checked_against_the_warm_up(double mem, MemorySweep.StepEnd end)
+    {
+        var steps = new List<SweepStep> { S(1668, 1790, 470, mem) };
+        Assert.Equal(end, MemorySweep.End(steps[^1], MemorySweep.Edge(steps, (0, 13801)), trend: false));
+        Assert.Null(MemorySweep.Edge(steps));   // with no warm-up reading there is nothing to check it against
+    }
+
     /// <summary>A slowdown that lasts is a judged step: stable (it passed), and the end of the sweep unless it runs for the trend.</summary>
     [Fact]
     public void A_lasting_slowdown_is_marked_stable_and_ends_the_sweep_unless_it_runs_for_the_trend()

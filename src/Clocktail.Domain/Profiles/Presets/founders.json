@@ -2,7 +2,7 @@
   "Name": "founders",
   "Title": "Clocktail Founders Profile",
   "Gpu": "RTX 5090",
-  "Note": "The daily profile Clocktail was built on: one RTX 5090 Founders Edition, driver 617.42. 600 W, memory +358 MHz, a tuned V/F curve, MSVDD REL 0, XBAR +300 MHz with +20 mV and a custom fan curve. Your silicon is not this silicon: treat it as a starting point and let the stress test have the last word.",
+  "Note": "The daily profile Clocktail was built on: one RTX 5090 Founders Edition, driver 617.42. 600 W, memory +358 MHz, a tuned V/F curve, XBAR +300 MHz with +20 mV and a custom fan curve (it had MSVDD REL 0 too, which driver 621.01 no longer takes). Your silicon is not this silicon: treat it as a starting point and let the stress test have the last word.",
   "Writes": [
     {
       "Kind": "power",
@@ -23,11 +23,6 @@
       "Kind": "pstates20",
       "Key": "memory",
       "Value": "358000"
-    },
-    {
-      "Kind": "rails",
-      "Key": "msvdd",
-      "Value": "rel=0,alt=0,ov=0,vmin=0"
     },
     {
       "Kind": "vdemand",

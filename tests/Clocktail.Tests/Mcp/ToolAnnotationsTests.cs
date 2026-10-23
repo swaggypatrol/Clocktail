@@ -25,7 +25,7 @@ public class ToolAnnotationsTests
     [Fact]
     public void Reading_tools_are_read_only_and_only_card_report_reaches_the_internet()
     {
-        Assert.Equal(54, Tools.Count);
+        Assert.Equal(52, Tools.Count);   // 0.3.5 took adjust_msvdd and adjust_nvvdd out (driver 621.01 drops what they set)
         var read = Tools.Where(t => t.ReadOnly).Select(t => t.Name!).ToHashSet();
         Assert.Subset(read, new HashSet<string> { "card_report", "card_settings", "gpu_status", "limiter", "manual", "read_log", "data_points", "preview_daily", "diagnostic_report", "lab_status" });
         Assert.DoesNotContain("adjust_curve", read);

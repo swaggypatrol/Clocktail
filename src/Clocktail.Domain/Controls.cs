@@ -27,8 +27,8 @@ public static class Controls
         new("XBAR offset and voltage demand", "adjust_xbar", c => c.ClockDomains, Slot.ClockClkDomainsSetControl),
         new("SYS and Video offsets and voltage demands", "adjust_clock_domain", c => c.ClockDomains, Slot.ClockClkDomainsSetControl),
         new("core voltage demand", "adjust_clock_domain (core)", c => c.ClockDomains, Slot.ClockClkDomainsSetControl),
-        new("MSVDD voltage", "adjust_msvdd", c => c.VoltWrite, Slot.VoltVoltRailsSetControl),
-        new("NVVDD offsets", "adjust_nvvdd", c => c.VoltWrite, Slot.VoltVoltRailsSetControl),
+        new("NVVDD and MSVDD offsets (REL, ALT, OV, VMIN)", null, c => c.VoltWrite, Slot.VoltVoltRailsSetControl,
+            NotOffered: "driver 621.01 takes them and changes nothing (the call answers OK, the readback is the same), so no tool sets them since 0.3.5; set_voltage_boost raises every rail's REL limit instead, +5 mV per 25 %"),
         new("fan curve", "set_fan_curve", c => Present(c, "fan policy", Slot.FanPolicyGetInfo, Slot.FanPolicyGetControl, Slot.FanPolicySetControl), Slot.FanPolicySetControl),
         new("fixed fan speed", "set_fan_speed", c => c.FanCoolers, Slot.ClientFanCoolersSetControl),
         new("fan start temperature (zero-RPM band)", "set_fan_start", c => Present(c, "fan policy", Slot.FanPolicyGetInfo, Slot.FanPolicyGetControl, Slot.FanPolicySetControl), Slot.FanPolicySetControl),
@@ -39,11 +39,8 @@ public static class Controls
         new("domain V/F points", null, c => c.DomainVf, Slot.ClockClkVfPointsSetControl, NotOffered: "its rule is unknown"),
     ];
 
-    /// <param name="driver">NVAPI's driver version, for what a driver is known to drop (<see cref="VerifiedOn.RailWritesDropped"/>); 0 when unknown.</param>
-    public static IReadOnlyList<Control> Map(Capabilities caps, WritePolicySet policy, uint driver = 0) =>
-        Table.Select(e => e.Setter == Slot.VoltVoltRailsSetControl && VerifiedOn.RailWritesDroppedBy(driver) is { } dropped
-            ? new Control(e.Name, e.Tool, false, dropped)
-            : Describe(e, e.Has(caps), e.Setter is { } s ? policy.Get(s) : null)).ToList();
+    public static IReadOnlyList<Control> Map(Capabilities caps, WritePolicySet policy) =>
+        Table.Select(e => Describe(e, e.Has(caps), e.Setter is { } s ? policy.Get(s) : null)).ToList();
 
     private static Control Describe(Entry e, Capability has, WritePolicy? setter)
     {

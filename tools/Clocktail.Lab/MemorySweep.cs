@@ -53,6 +53,8 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     public const double LatencyNoise = 0.002;
 
     private readonly List<SweepStep> _steps = [];
+    /// <summary>The warm-up at the daily offset: the memory clock the first step is checked against.</summary>
+    private (int OffsetMhz, double MemMhz)? _warm;
     private bool _wrote;
     private readonly DateTime _started = DateTime.UtcNow;
     private ulong? _bufferMib;
@@ -60,19 +62,20 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     /// <summary>Why the last step stops the sweep, and whether the slowdown began at the step before it; null to go on. It stops
     /// when the step failed (a bad bit, a wrong chain, a crash), could not be judged (a shared GPU, an offset not in force),
     /// or is slower the way the step before already was: bandwidth under the best step before it twice in a row, or latency
-    /// over the lowest and rising again after a step that rose too. One slower step alone is <see cref="Watch"/>ed.</summary>
-    public static Stop? Edge(IReadOnlyList<SweepStep> steps)
+    /// over the lowest and rising again after a step that rose too. One slower step alone is <see cref="Watch"/>ed.
+    /// <paramref name="warm"/>: the warm-up's offset and memory clock, which the first step's clock must follow as each
+    /// later step's follows the one before (a fine sweep starts away from the daily offset, and its first step was marked
+    /// stable with nothing to check it against).</summary>
+    public static Stop? Edge(IReadOnlyList<SweepStep> steps, (int OffsetMhz, double MemMhz)? warm = null)
     {
         var last = steps[^1];
         if (last.Verdict != LabResult.Pass) return new(last.Detail ?? $"the step {last.Verdict}", false, Unjudged: last.Verdict != LabResult.Fail);
         if (last.Shared)
             return new(Inv($"other work kept sharing the GPU at this step for {SharedWaitMinutes} minutes ({last.OthersVramMib} MiB of video memory, {last.BusyBeforePct:0} % busy): its speed is not the memory's alone; close it (a screen saver too) and run again"), false, Unjudged: true);
-        if (steps.Count < 2) return null;
+        if (steps.Count < 2)
+            return warm is { } w && NotInForce(w.OffsetMhz, w.MemMhz, last) is { } first ? new(first, false, Unjudged: true) : null;
         var prev = steps[^2];
-        // NVML's memory clock follows the offset 1:1 (13801 → 14159 MHz at +358 on the reference card). One that did not move
-        // means the offset is not in force while the lab runs (a P-state without it): nothing after can be judged.
-        if (last.OffsetMhz > prev.OffsetMhz && last.MemMhz is { } mm && prev.MemMhz is { } pm && mm - pm < (last.OffsetMhz - prev.OffsetMhz) / 2.0)
-            return new(Inv($"the memory clock did not follow the offset ({pm:0} → {mm:0} MHz for {last.OffsetMhz - prev.OffsetMhz:+0} MHz, {last.PState ?? "P?"}): the offset is not in force while the lab runs"), false, Unjudged: true);
+        if (NotInForce(prev.OffsetMhz, prev.MemMhz, last) is { } why) return new(why, false, Unjudged: true);
         int n = steps.Count - 1;
         if (Under(steps, n) is { } u && Under(steps, n - 1) is { } u0)
             return new(Inv($"bandwidth stayed under the best step's: {u0.Gbps:0.#} then {u.Gbps:0.#} GB/s ({u0.Pct:+0.0;-0.0} %, {u.Pct:+0.0;-0.0} %): the memory is retrying"), true);
@@ -80,6 +83,14 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
             return new(Inv($"latency rose again to {o.Ns:0.#} ns, {o.Pct:+0.0} % over the lowest step's {o.Lowest:0.#}, after rising at {prev.OffsetMhz:+0;-0;0} MHz too: a timing change rises once and then falls with the clock; this kept rising, the memory is retrying"), true);
         return null;
     }
+
+    /// <summary>Why a step's offset was not in force: NVML's memory clock follows the offset 1:1 (13801 → 14159 MHz at +358 on
+    /// the reference card), so a clock that rose less than half the step from where it was means the offset is not in force
+    /// while the lab runs (a P-state without it), and nothing after can be judged. Null when it followed or a clock is missing.</summary>
+    private static string? NotInForce(int fromMhz, double? fromClock, SweepStep last) =>
+        last.OffsetMhz > fromMhz && last.MemMhz is { } mm && fromClock is { } pm && mm - pm < (last.OffsetMhz - fromMhz) / 2.0
+            ? Inv($"the memory clock did not follow the offset ({pm:0} → {mm:0} MHz for {last.OffsetMhz - fromMhz:+0} MHz, {last.PState ?? "P?"}): the offset is not in force while the lab runs")
+            : null;
 
     /// <summary>Why the sweep stops at a step; <paramref name="Unjudged"/>: the step says nothing about the memory (it could
     /// not be measured, other work shared the GPU, the offset was not in force), as a value the sweep acts on, not words.</summary>
@@ -171,6 +182,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
             if (warm.Verdict != LabResult.Pass)
                 return Finish(SweepStatus.Failed, $"the warm-up at the daily offset ({spec.DailyMhz:+0;-0;0} MHz) did not pass: {string.Join("; ", warm.Reasons)}", null);
             _bufferMib = warm.BufferMib;
+            if (warm.Phases.FirstOrDefault(p => p.Kind == LabPhase.Memory)?.MemMhzP50 is { } warmMhz) _warm = (spec.DailyMhz, warmMhz);
 
             // The steps from FromMhz by StepMhz, and ToMhz itself when the steps do not land on it (+358 by 100 to +3000: +2958, +3000).
             var offsets = new List<int>();
@@ -213,7 +225,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 int? resets = OperatingSystem.IsWindows() ? TryCount(started) : null;
                 var step = Step(offset, r, resets);
                 _steps.Add(step);
-                var edge = Edge(_steps);
+                var edge = Edge(_steps, _warm);
                 string? signal = edge?.Why;
                 _steps[^1] = step with { Signal = signal, Watch = signal == null ? Watch(_steps) : null };
                 File.AppendAllText(Path.Combine(JobDir, "steps.jsonl"), JsonSerializer.Serialize(_steps[^1], JsonLine) + "\n");

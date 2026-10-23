@@ -30,9 +30,9 @@ Stock on the reference card: **MSVDD REL is -50 mV** (not 0), so MSVDD MAX is 10
 
 Ceilings Clocktail holds and you must respect:
 - No raise may push a rail's MAX above min(the domain's own max, **1150 mV**). Hardware already above it (stock NVVDD OV is 1200 mV) may stay or go down.
-- REL above 0 is past NVIDIA's own reliability limit. REL +20 on MSVDD tops out at 1115 mV unless ALT/OP is raised too: `adjust_msvdd` raises ALT with REL past that (and lowers it again with REL), up to REL +50 / ALT +30 = 1145 mV, under the rail's 1150 mV ceiling the service enforces.
-- "Voltage boost" percentages (`set_voltage_boost`) had no measurable effect on this card at 1 % and 10 %. Do not sell them as a feature.
-- `adjust_nvvdd` and `adjust_msvdd` move these offsets; `card_settings` shows each slot and the MAX it gives.
+- REL above 0 is past NVIDIA's own reliability limit. On driver 617.42, MSVDD went to REL +50 / ALT +30 = 1145 mV, under the rail's 1150 mV ceiling the service enforces.
+- **Driver 621.01 takes the rails' offsets and changes nothing** (the call answers OK, the readback is the same), so since 0.3.5 no tool sets them. `card_settings` still shows each slot and the MAX it gives.
+- **The voltage boost (`set_voltage_boost`) still writes, and raises every rail's REL limit +5 mV per 25 % (100 % adds the 20 mV between REL and ALT/OP: NVVDD 1095 → 1115, MSVDD 1045 → 1065 mV on the reference card, driver 621.01, 2026-10-23).** It moves in 5 mV steps, which is why 1 % and 10 % moved nothing in the first tests. It is the one way left to raise MSVDD's ceiling.
 
 ## Clock domains
 - **GPC / graphics (core)**: follows the V/F curve on NVVDD.

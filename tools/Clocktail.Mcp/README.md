@@ -30,13 +30,11 @@ What the agent starts is a relay that loads no driver library and runs the same 
 | `set_curve` | The whole V/F curve at once, every point's offset (one trial). |
 | `shift_curve` | The curve on the card moved left by N mV: the same clocks at less voltage (one trial). |
 | `set_core_offset` | The core P0 offset, every point at once; the curve is written back right after (one trial). |
-| `adjust_nvvdd` | NVVDD's REL, ALT, OV and VMIN offsets, within the 1.15 V ceiling (one trial). |
 | `set_clock_lock` | A core clock cap, floor, V/F point lock or Boost Lock (the record `nvidia-smi -lgc` sets; one trial). |
-| `set_voltage_boost` | The voltage boost percentage (one trial). |
+| `set_voltage_boost` | The voltage boost: every rail's REL limit, +5 mV per 25 % (one trial). |
 | `set_fan_curve` | The firmware fan curve (one trial). |
 | `set_fan_start` | The temperature the stopped fans start at; only earlier (one trial). |
 | `set_memory_offset` | The memory offset; the curve is written back right after (one trial). |
-| `adjust_msvdd` | Raise or lower MSVDD's REL and VMIN offsets (one trial). |
 | `adjust_xbar` | XBAR's clock offset and voltage demand (one trial). |
 | `set_clock_ratio` | XBAR's clock ratio to the core, 0.8999 stock (one trial). |
 | `adjust_clock_domain` | SYS's or Video's clock offset and voltage demand, or the core's voltage demand (one trial). |

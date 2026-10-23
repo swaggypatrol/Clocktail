@@ -29,7 +29,7 @@ Stock up to 800 mV; +30 MHz per point to +210 by ~840 mV; +405 to +510 through 8
 ## Goals other than maximum clock
 - **Undervolt / same clock for less power**: lower the curve's top half (`adjust_curve` down, `flatten_curve`) or shift it left (`shift_curve`, 25 mV per call); at the same wall the saved power turns into clock. Shifting the curve left 25/50/75 mV from the knee gave +30/+60/+97 MHz under a 575 W wall. Do not shift the whole curve left by 250 mV: that once crashed the whole system (bug check 0x133).
 - **Efficiency**: board MHz/W peaks at 250-300 W (6.05 MHz/W) and is 4.74 at 600 W. Cutting the wall 600 -> 500 W cost GTA V only 9 % frames (86 -> 78 fps) for 17 % less power. Offer this when they care about heat or noise.
-- **MSVDD undervolt** (`adjust_msvdd`): saves a few watts the wall gives back to the core, but slows XBAR; see `manual xbar-msvdd`.
+- **MSVDD undervolt**: not offered since 0.3.5 (driver 621.01 drops the rails' offsets); on 617.42 it saved a few watts the wall gave back to the core, but slowed XBAR; see `manual xbar-msvdd`.
 
 ## What each tool changes, and what is kept
 Every write tool, what it writes, how far one call goes, whether `keep_as_daily` keeps it, how they combine, and what the newer controls did on the reference card: `manual controls`. `keep_as_daily` keeps everything a trial set, not just the last change (a clock cap too, never a floor, point lock or Boost Lock): `preview_daily` shows it, and `back_to_daily` first if only some of it should stay.

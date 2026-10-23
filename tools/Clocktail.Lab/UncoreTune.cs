@@ -5,35 +5,31 @@ using Clocktail.Domain.Platform;
 namespace Clocktail.Lab;
 
 /// <summary>The settings the uncore tuner moves, all absolute: XBAR's clock offset and its voltage demand on MSVDD, the
-/// XBAR/core clock ratio (raw U16.16; 0.8999 = 58976 stock), MSVDD's REL offset.</summary>
-public sealed record UncoreSetting(int XbarMhz, int DemandMv, uint RatioRaw, int MsvddRelMv)
+/// XBAR/core clock ratio (raw U16.16; 0.8999 = 58976 stock), the voltage boost (percent: every rail's REL limit +5 mV per
+/// 25 %, +20 at 100 % on a 5090, so MSVDD's ceiling and XBAR's with it).</summary>
+public sealed record UncoreSetting(int XbarMhz, int DemandMv, uint RatioRaw, int BoostPct)
 {
     public double Ratio => RatioRaw / 65536.0;
     public override string ToString() => FormattableString.Invariant(
-        $"XBAR {XbarMhz:+0;-0;0} MHz / {DemandMv:+0;-0;0} mV, ratio {Ratio:0.0000}, MSVDD REL {MsvddRelMv:+0;-0;0} mV");
+        $"XBAR {XbarMhz:+0;-0;0} MHz / {DemandMv:+0;-0;0} mV, ratio {Ratio:0.0000}, boost {BoostPct} %");
 }
 
 /// <summary>
 /// What tune_uncore asks for: the card, its curve, where the settings are now, and the limits. The demand rule is
 /// adjust_xbar's (measured on the reference card): above CliffMhz of XBAR offset the demand must be CliffDemandMv or more,
 /// above HighMhz HighDemandMv, or memory-bound work drops MSVDD to its floor and pins the core near 1610 MHz.
-/// MsvddAltGapMv: how far MSVDD's ALT limit sits above its REL limit with no offsets (20 mV on the reference card: 1115
-/// against 1095). The rail's top is the lowest of REL, ALT and OV, so a REL offset past the gap goes on with ALT raised by
-/// the rest, or it would change nothing; null leaves ALT alone. Candidates: a list to compare, each against Start, instead
-/// of the search.
+/// BoostKey: the boost path the card takes ("legacy" on a 5090, whose NVVDD is kind 3, or "independent"). Candidates: a
+/// list to compare, each against Start, instead of the search.
 /// </summary>
 public sealed record UncoreSpec(string StableId, string Pci, string Curve, UncoreSetting Start,
     int XbarMaxMhz = 500, int XbarStepMhz = 50, int DemandMaxMv = 50, int DemandStepMv = 10,
     int CliffMhz = 250, int CliffDemandMv = 20, int HighMhz = 300, int HighDemandMv = 50,
-    double RatioMax = 0.95, double RatioStep = 0.025, int MsvddRelMaxMv = 20, int MsvddRelStepMv = 10,
-    int Seconds = 20, int WarmupSeconds = 60, int GraceSeconds = 45, int? MsvddAltGapMv = null,
+    double RatioMax = 0.95, double RatioStep = 0.025, int BoostMaxPct = 100, int BoostStepPct = 25,
+    int Seconds = 20, int WarmupSeconds = 60, int GraceSeconds = 45, string BoostKey = "legacy",
     IReadOnlyList<UncoreSetting>? Candidates = null)
 {
     /// <summary>The least voltage demand an XBAR offset needs.</summary>
     public int Needed(int xbarMhz) => xbarMhz > HighMhz ? HighDemandMv : xbarMhz > CliffMhz ? CliffDemandMv : 0;
-
-    /// <summary>MSVDD's ALT offset a setting goes on with (null: ALT is left alone).</summary>
-    public int? AltMv(UncoreSetting s) => MsvddAltGapMv is { } gap ? Math.Max(0, s.MsvddRelMv - gap) : null;
 
     /// <summary>Why a setting is outside the limits or the demand rule; null when it may be tried.</summary>
     public string? Outside(UncoreSetting s) =>
@@ -41,7 +37,7 @@ public sealed record UncoreSpec(string StableId, string Pci, string Curve, Uncor
         : s.DemandMv > DemandMaxMv ? $"demand past +{DemandMaxMv} mV"
         : s.DemandMv < Needed(s.XbarMhz) ? $"XBAR +{s.XbarMhz} MHz needs +{Needed(s.XbarMhz)} mV of demand (the cliff)"
         : s.RatioRaw > (uint)Math.Round(RatioMax * 65536) ? FormattableString.Invariant($"the ratio past {RatioMax:0.000}")
-        : s.MsvddRelMv > MsvddRelMaxMv ? $"MSVDD REL past +{MsvddRelMaxMv} mV"
+        : s.BoostPct < 0 || s.BoostPct > BoostMaxPct ? $"the boost outside 0..{BoostMaxPct} %"
         : null;
 }
 
@@ -74,18 +70,19 @@ public sealed record Comparison(string Stage, UncoreSetting A, UncoreSetting B, 
 }
 
 /// <summary>What <see cref="UncoreSearch.Judge"/> makes of four runs: the outcome and why, the changes (%), and what the
-/// search and the job act on as values, never as words: whether the gain held, the rule that turned it down, and runs
-/// disturbed during the comparison (measured again).</summary>
+/// search and the job act on as values, never as words: whether the gain held, the rule that turned it down, runs disturbed
+/// during the comparison (measured again), and whether only the candidate's runs disagreed (Erratic: the incumbent's agreed).</summary>
 public sealed record Judgement(string Outcome, string Why, double? L2 = null, double? Dram = null, double? Core = null,
-    bool Gain = false, string? Veto = null, bool Disturbed = false);
+    bool Gain = false, string? Veto = null, bool Disturbed = false, bool Erratic = false);
 
 /// <summary>
 /// The uncore search, without the card: safe-ratchet coordinate ascent from the settings on the card, one axis at a time,
 /// one step at a time, a candidate kept only when the A B B A comparison says it is faster. XBAR first, each step with the
-/// voltage demand the rule asks for it and more where it hits the cliff, then the clock ratio, then MSVDD's REL, then the
-/// two together, in rounds: the axes hold each other (XBAR runs between the ratio's floor, 0.9 x the core, and the clock
-/// MSVDD's reliability limit allows, ~30 MHz apart on the reference card at the daily +250 MHz, so neither alone moves it
-/// much), and an axis runs again when another one has moved the best since it last ran. An axis stops at a failure or at two candidates in a row that are not faster; an
+/// voltage demand the rule asks for it and more where it hits the cliff, then the clock ratio, then the voltage boost (MSVDD's
+/// REL limit, +5 mV per 25 %: MSVDD's own offsets cannot be set since driver 621.01), then the ratio and the boost together, in
+/// rounds: the axes hold each other (XBAR runs between the ratio's floor, 0.9 x the core, and the clock MSVDD's reliability
+/// limit allows, ~30 MHz apart on the reference card at the daily +250 MHz, so neither alone moves it much), and an axis runs
+/// again when another one has moved the best since it last ran. An axis stops at a failure or at two candidates in a row that are not faster; an
 /// unjudged comparison (a shared GPU, the incumbent itself failing) or lab_stop ends the search.
 /// </summary>
 public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, UncoreSetting, Comparison> compare, Func<bool> stopAsked)
@@ -104,7 +101,7 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
         for (int round = 0; round < Rounds && Ended == null; round++)
         {
             bool ran = false;
-            foreach (var (axis, climb) in new (string, Action)[] { ("xbar", Xbar), ("ratio", Ratio), ("msvdd", Msvdd), ("window", Window) })
+            foreach (var (axis, climb) in new (string, Action)[] { ("xbar", Xbar), ("ratio", Ratio), ("boost", Boost), ("window", Window) })
             {
                 if (Ended != null) break;
                 if (after.TryGetValue(axis, out var last) && last == Best) continue;
@@ -148,9 +145,11 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
     /// <summary>Whether a confirmation keeps the best: better, or a gain that held and only costs the core or DRAM more than
     /// one step may. Each step stayed within that budget; what they add up to is told and left to a game or benchmark
     /// A B B A (the reference card's 617.42 run kept steps at -0.9 and -0.5 % core, inside the core's spread there). A sum
-    /// past <see cref="CoreFall"/> reads as the cliff and names nothing: five steps or more near the budget, the safe side.</summary>
+    /// past <see cref="CoreFall"/> reads as the cliff and names nothing: five steps or more near the budget, the safe side. A
+    /// DRAM fall past <see cref="DramCap"/> names nothing either.</summary>
     public static bool Holds(Comparison c) => c.Outcome == Comparison.Better
-        || c.Outcome == Comparison.NotBetter && c.Gain && c.Veto is Comparison.CoreCost or Comparison.DramCost;
+        || c.Outcome == Comparison.NotBetter && c.Gain && c.Veto is Comparison.CoreCost or Comparison.DramCost
+            && c.DramChangePct is not < -DramCap * 100;
 
     /// <summary>Climbs one axis from the best so far: each next candidate from <paramref name="next"/>, until it gives none, a
     /// candidate fails, or two in a row are not faster. A miss is stepped past (the next candidate one step beyond it), still
@@ -222,19 +221,21 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
         }
     }
 
-    private void Msvdd()
+    /// <summary>The voltage boost a step at a time: MSVDD's ceiling, and XBAR's with it (NVVDD's too, which a curve cut flat
+    /// under it never reaches).</summary>
+    private void Boost()
     {
-        Stage = "msvdd";
-        Climb(s => s.MsvddRelMv + spec.MsvddRelStepMv <= spec.MsvddRelMaxMv ? s with { MsvddRelMv = s.MsvddRelMv + spec.MsvddRelStepMv } : null);
+        Stage = "boost";
+        Climb(s => s.BoostPct + spec.BoostStepPct <= spec.BoostMaxPct ? s with { BoostPct = s.BoostPct + spec.BoostStepPct } : null);
     }
 
-    /// <summary>XBAR's window up as a whole: the ratio (its floor) and MSVDD's REL (its ceiling) a step each, together.</summary>
+    /// <summary>XBAR's window up as a whole: the ratio (its floor) and the boost (MSVDD's ceiling) a step each, together.</summary>
     private void Window()
     {
         Stage = "window";
         uint step = (uint)Math.Round(spec.RatioStep * 65536), top = (uint)Math.Round(spec.RatioMax * 65536);
-        Climb(s => s.RatioRaw + step <= top && s.MsvddRelMv + spec.MsvddRelStepMv <= spec.MsvddRelMaxMv
-            ? s with { RatioRaw = s.RatioRaw + step, MsvddRelMv = s.MsvddRelMv + spec.MsvddRelStepMv } : null);
+        Climb(s => s.RatioRaw + step <= top && s.BoostPct + spec.BoostStepPct <= spec.BoostMaxPct
+            ? s with { RatioRaw = s.RatioRaw + step, BoostPct = s.BoostPct + spec.BoostStepPct } : null);
     }
 
     /// <summary>
@@ -282,9 +283,10 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
         // Runs of one setting this far apart were disturbed (with nothing else on the GPU they agree within 0.5 %): nothing
         // in the four runs can be judged, a loss no more than a gain. A's two runs are three runs apart, so a card still
         // settling by 0.7 % a run reads as disturbed too, and is measured again as well.
-        if (Math.Abs(ra - 1) > Disturbed || Math.Abs(rb - 1) > Disturbed)
+        bool aOff = Math.Abs(ra - 1) > Disturbed, bOff = Math.Abs(rb - 1) > Disturbed;
+        if (aOff || bOff)
             return Is(Comparison.Unjudged, Inv($"runs of one setting read {Math.Max(Math.Abs(ra - 1), Math.Abs(rb - 1)) * 100:0.0} % apart (A {a1.L2Gbps:0} then {a2.L2Gbps:0} GB/s, B {b1.L2Gbps:0} then {b2.L2Gbps:0}): over {Disturbed * 100:0} %, something moved during the comparison (other work, or the card still settling)"),
-                disturbed: true);
+                disturbed: true) with { Erratic = bOff && !aOff };
         if (core < -CoreLoss * 100)
             return Is(Comparison.NotBetter, Inv($"the memory phase's core clock fell {core:0.00} %: a slower core costs compute-bound work more than the uncore gains"), Comparison.CoreCost);
         if (dram < -DramFall * 100)
@@ -304,6 +306,11 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
     /// <summary>The most DRAM bandwidth may fall (0.5 %); the most the core may (1 %: one V/F bin is ~0.5 %; on the reference
     /// card ratio 0.925 with XBAR held under MSVDD's limit cost it 1.9 %); a fall past <see cref="CoreFall"/> is the cliff.</summary>
     public const double DramFall = 0.005, CoreLoss = 0.01, CoreFall = 0.05;
+
+    /// <summary>The most DRAM bandwidth the best may cost in its confirmation (2 %, four steps' worth), as the cliff caps the
+    /// core's: past it the uncore takes from the memory what games use, and a memory phase disturbed during the confirmation
+    /// reads as such a fall too. Either way nothing is named.</summary>
+    public const double DramCap = 0.02;
 
     private static string Inv(FormattableString s) => s.ToString(System.Globalization.CultureInfo.InvariantCulture);
 }
@@ -403,8 +410,11 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         if (lease == null) return Done(Comparison.Unjudged, StopAsked ? "stopped (lab_stop)" : $"another run held the card for {LeaseWaitMinutes} minutes");
 
         // Runs of one setting that disagree were disturbed by other work during a run (the lab looks for it before and just
-        // after a run, not during one): the comparison is measured once more, whole, and left unjudged if that is disturbed too.
+        // after a run, not during one): the comparison is measured once more, whole, and left unjudged if that is disturbed too,
+        // which ends the search. Unless only the candidate's runs disagreed both times, the incumbent's agreeing: then the
+        // setting itself is erratic (or heats the card as it runs), a miss for it and not the end of hours of search.
         string? disturbed = null;
+        bool firstErratic = false;
         while (true)
         {
             runs.Clear();
@@ -436,11 +446,14 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
             if (j.Disturbed && disturbed == null)
             {
                 disturbed = j.Why;
+                firstErratic = j.Erratic;
                 string again = Inv($"{stage}: {b} vs {a}: {j.Why}: measuring the comparison again");
                 log?.Invoke(again);
                 Broker("note", $"tune_uncore: {again}");
                 continue;
             }
+            if (j.Disturbed && j.Erratic && firstErratic)
+                return Done(Comparison.NotBetter, $"the candidate's own runs read apart twice while the incumbent's agreed (the first time {disturbed}; then {j.Why}): an erratic setting is not kept");
             string why = disturbed == null ? j.Why
                 : j.Disturbed ? $"{j.Why}, measured twice (the first time {disturbed}): leave the machine alone while the tuner runs"
                 : $"{j.Why}, measured twice (the first time {disturbed})";
@@ -463,15 +476,16 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
     /// <summary>The setting on the card as a trial (all four cells, absolute); the service's refusal, or null when it landed.</summary>
     private string? Write(UncoreSetting s)
     {
-        // ALT goes on with every setting when the spec moves it (back to 0 under the gap), so a setting never inherits the
-        // last trial's.
-        var writes = new List<object> { new { kind = "clockratio", key = "msvdd", value = s.RatioRaw.ToString(System.Globalization.CultureInfo.InvariantCulture) } };
-        int? alt = spec.AltMv(s);
-        if (alt is { } a) writes.Add(new { kind = "rails", key = "msvdd", value = Inv($"alt={a * 1000}") });
+        // The boost goes on with every setting (back to the start's under it), so a setting never inherits the last trial's.
+        var writes = new List<object>
+        {
+            new { kind = "clockratio", key = "msvdd", value = s.RatioRaw.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+            new { kind = "boost", key = spec.BoostKey, value = s.BoostPct.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+        };
         var args = new Dictionary<string, object?>
         {
-            ["curve"] = spec.Curve, ["change"] = $"uncore: {s}{(alt > 0 ? Inv($" (ALT {alt:+0} mV)") : "")} (tune_uncore)", ["keep_curve"] = true,
-            ["xbar_khz"] = s.XbarMhz * 1000, ["xbar_vdemand_uv"] = s.DemandMv * 1000, ["msvdd_rel_uv"] = s.MsvddRelMv * 1000,
+            ["curve"] = spec.Curve, ["change"] = $"uncore: {s} (tune_uncore)", ["keep_curve"] = true,
+            ["xbar_khz"] = s.XbarMhz * 1000, ["xbar_vdemand_uv"] = s.DemandMv * 1000,
             ["writes"] = writes,
             ["context"] = new[] { "tune_uncore: the lab compares settings A B B A" },
         };
@@ -494,7 +508,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         // status says so when it did not.
         if (_wrote && DailyBack("tune_uncore finished") is { } notBack) why += "; " + notBack;
         string? next = state == SweepStatus.Done && _best != spec.Start
-            ? Inv($"best {_best}: tell the person; to try it, adjust_xbar to {_best.XbarMhz:+0;-0;0} MHz and {_best.DemandMv:+0;-0;0} mV, set_clock_ratio {_best.Ratio:0.000}, adjust_msvdd to REL {_best.MsvddRelMv:+0;-0;0} mV{(spec.AltMv(_best) is > 0 and var alt ? Inv($" and ALT {alt:+0} mV") : "")} (each in its own steps), then lab_test, stress_test and their games; keep_as_daily (ask)")
+            ? Inv($"best {_best}: tell the person; to try it, adjust_xbar to {_best.XbarMhz:+0;-0;0} MHz and {_best.DemandMv:+0;-0;0} mV, set_clock_ratio {_best.Ratio:0.000}, set_voltage_boost {_best.BoostPct} % (each in its own steps), then lab_test, stress_test and their games; keep_as_daily (ask)")
             : null;
         Save(state, why, null, next);
         log?.Invoke($"{state}: {why}");

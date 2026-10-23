@@ -33,16 +33,6 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// CLOCKTAIL_MCP_MIN_MSVDD_A); the driver's own range starts at 1 mA, so this floor is the tool's.</summary>
     public static readonly int MinNvvddA = Env("CLOCKTAIL_MCP_MIN_NVVDD_A", 100);
     public static readonly int MinMsvddA = Env("CLOCKTAIL_MCP_MIN_MSVDD_A", 90);
-    /// <summary>adjust_msvdd: the largest step per offset down (an undervolt can fail) and up, and how far below stock REL
-    /// and VMIN may go; how high REL may go (an absolute offset: 0 is NVIDIA's own reliability limit; +50 with ALT +30 is
-    /// 1145 mV, under the rail's 1150 mV ceiling the service enforces, and was measured, 2026-10-22) and how far above stock
-    /// VMIN may go (+50 was measured).</summary>
-    public static readonly int MsvddStepMv = Env("CLOCKTAIL_MCP_MSVDD_STEP_MV", 10);
-    public static readonly int MsvddRaiseStepMv = Env("CLOCKTAIL_MCP_MSVDD_RAISE_STEP_MV", 25);
-    public static readonly int MsvddRelMaxMv = Env("CLOCKTAIL_MCP_MSVDD_REL_MAX_MV", 50);
-    public static readonly int MsvddVminAboveMv = Env("CLOCKTAIL_MCP_MSVDD_VMIN_ABOVE_MV", 50);
-    public static readonly int MsvddMaxBelowMv = Env("CLOCKTAIL_MCP_MSVDD_MAX_BELOW_MV", 250);
-    public static readonly int MsvddVminBelowMv = Env("CLOCKTAIL_MCP_MSVDD_VMIN_BELOW_MV", 100);
     /// <summary>The longest stress_test run (CLOCKTAIL_MCP_MAX_STRESS_S): the call blocks for the whole run.</summary>
     public static readonly int MaxStressSeconds = Env("CLOCKTAIL_MCP_MAX_STRESS_S", 300);
     /// <summary>stress_test stops the run at this temperature by default (CLOCKTAIL_MCP_STRESS_MAX_C): the agent cannot see
@@ -466,120 +456,6 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             curve_intact = intact,
             warning = unread ?? (intact == false ? "the curve changed when the limit was written: call back_to_daily before going on" : null),
         });
-    });
-
-    [McpServerTool(Name = "adjust_msvdd", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Raise or lower the MSVDD rail (L2, crossbar, SYS and Video) through its REL and VMIN offsets, as a new trial with the " +
-        "curve left as it is. MSVDD runs at what the core's frequency asks for minus its REL offset (measured 1:1: REL -50 → " +
-        "-75 mV moved MSVDD 975 → 950 mV), down to its VMIN floor (825 mV stock). Raising REL lets XBAR run faster where MSVDD " +
-        "held it: stock REL is -50 mV on a 5090, and REL -50 → 0 (NVIDIA's own reliability limit) made XBAR ~90 MHz faster and " +
-        "Blender ~2 % faster for ~2 W, the core giving 15-23 MHz back under the wall; REL may go to +50 mV (past NVIDIA's limit). " +
-        "The rail's MAX is the lowest of REL, ALT and OV, and ALT sits 20 mV above REL with no offsets (1115 against 1095 mV on " +
-        "a 5090), so REL past that takes ALT up with it (and ALT comes back down with REL): REL +50 / ALT +30 is 1145 mV, under " +
-        "the 1150 mV ceiling the service enforces. On the reference card REL +30/+40/+50 made the lab's L2 test 3.1/3.5/3.9 % " +
-        "faster than +20 at ratio 0.95, and let XBAR's offset pay (+400 / +50 mV: 5.6 %). Lowering REL is a straight undervolt: ~10 W saved at -175 mV, which the wall gives " +
-        "to the core, but XBAR ~300 MHz slower. VMIN raises or lowers the floor (+50 mV at most above stock; raising it does not " +
-        "cure the XBAR cliff, the voltage demand does: adjust_xbar). Per call each offset moves at most 10 mV down or 25 mV up; " +
-        "REL at most 250 mV and VMIN 100 mV below stock. Too low shows as artefacts, a crash or a driver reset, under load or " +
-        "at idle (VMIN). gpu_status shows MSVDD's volts, amps and watts. back_to_daily, end_session and a crash put the daily " +
-        "profile's offsets back (stock when it keeps none); keep_as_daily keeps the offsets on the card.")]
-    public string AdjustMsvdd(
-        [Description("mV to add to MSVDD's REL offset (negative lowers MSVDD).")] double relDeltaMv,
-        [Description("mV to add to MSVDD's VMIN offset (negative lowers the floor); default 0.")] double vminDeltaMv = 0,
-        [Description("Why this step (what you saw, what you expect).")] string? reason = null) => Guard(() =>
-    {
-        if (relDeltaMv == 0 && vminDeltaMv == 0) throw new ArgumentException("both deltas are 0: nothing to try");
-        if (Clocktail.Domain.VerifiedOn.RailWritesDroppedBy(card.DriverVersion) is { } dropped) throw new InvalidOperationException(dropped);
-        if (-relDeltaMv > MsvddStepMv || -vminDeltaMv > MsvddStepMv)
-            throw new ArgumentException($"a step down is at most {MsvddStepMv} mV per offset (CLOCKTAIL_MCP_MSVDD_STEP_MV); split it into several trials");
-        if (relDeltaMv > MsvddRaiseStepMv || vminDeltaMv > MsvddRaiseStepMv)
-            throw new ArgumentException($"a step up is at most {MsvddRaiseStepMv} mV per offset (CLOCKTAIL_MCP_MSVDD_RAISE_STEP_MV); split it into several trials");
-        var look = card.Read();
-        var rail = look.Msvdd ?? throw new InvalidOperationException("the MSVDD rail is unreadable");
-        var stock = StockMsvdd(rail.Offsets);
-        var daily = DailyMsvdd();
-        int relTop = MsvddRelMaxMv * 1000, vminTop = stock.VminUv + MsvddVminAboveMv * 1000;
-        int rel = rail.Offsets.RelUv + (int)Math.Round(relDeltaMv * 1000), vmin = rail.Offsets.VminUv + (int)Math.Round(vminDeltaMv * 1000);
-        if (rel > relTop && relDeltaMv > 0) throw new ArgumentException($"MSVDD's REL offset goes to +{MsvddRelMaxMv} mV at most (CLOCKTAIL_MCP_MSVDD_REL_MAX_MV; 0 is NVIDIA's own limit)");
-        if (vmin > vminTop && vminDeltaMv > 0) throw new ArgumentException($"MSVDD's VMIN offset goes {MsvddVminAboveMv} mV above stock at most (CLOCKTAIL_MCP_MSVDD_VMIN_ABOVE_MV)");
-        if (rel < stock.RelUv - MsvddMaxBelowMv * 1000) throw new ArgumentException($"REL {rel / 1000.0} mV would be more than {MsvddMaxBelowMv} mV below stock (CLOCKTAIL_MCP_MSVDD_MAX_BELOW_MV)");
-        if (vmin < stock.VminUv - MsvddVminBelowMv * 1000) throw new ArgumentException($"VMIN {vmin / 1000.0} mV would be more than {MsvddVminBelowMv} mV below stock (CLOCKTAIL_MCP_MSVDD_VMIN_BELOW_MV)");
-        var t = look.Telemetry;
-        string change = string.Create(CultureInfo.InvariantCulture, $"MSVDD REL offset {rail.Offsets.RelUv / 1000.0} → {rel / 1000.0} mV")
-            + (vmin != rail.Offsets.VminUv ? string.Create(CultureInfo.InvariantCulture, $", VMIN offset {rail.Offsets.VminUv / 1000.0} → {vmin / 1000.0} mV") : "");
-        var context = new List<string>
-        {
-            Readings(look),
-            string.Create(CultureInfo.InvariantCulture, $"MSVDD before the write: REL {rail.Limits.RelUv / 1000.0} mV, MAX {rail.Limits.MaxUv / 1000.0} mV, VMIN {rail.Limits.VminUv / 1000.0} mV; stock offsets REL {stock.RelUv / 1000.0}, VMIN {stock.VminUv / 1000.0} mV")
-                + (daily is { } dm ? string.Create(CultureInfo.InvariantCulture, $"; daily offsets REL {dm.RelUv / 1000.0}, VMIN {dm.VminUv / 1000.0} mV") : ""),
-        };
-        if (reason != null) context.Add($"Purpose: {reason}");
-        var args = new Dictionary<string, object?>
-        {
-            ["curve"] = VfOffsets.Encode(look.Curve.Offsets()), ["change"] = change, ["at_uv"] = look.NvvddUv, ["at_mhz"] = t?.GraphicsClockMhz,
-            ["keep_curve"] = true, ["context"] = context,
-        };
-        if (rel != rail.Offsets.RelUv) args["msvdd_rel_uv"] = rel;
-        if (vmin != rail.Offsets.VminUv) args["msvdd_vmin_uv"] = vmin;
-        // MAX is the lowest of REL, ALT and OV: REL raised past ALT's limit takes ALT with it, and ALT comes back down with REL
-        // to the daily profile's (or stock) offset, never under it.
-        if (rail.Limits.AltOpUv != 0)
-        {
-            long relLimit = rail.Limits.RelUv + (long)(rel - rail.Offsets.RelUv), altBase = rail.Limits.AltOpUv - (long)rail.Offsets.AltUv;
-            int alt = (int)Math.Max((daily ?? stock).AltUv, relLimit - altBase);
-            if (alt != rail.Offsets.AltUv)
-            {
-                args["writes"] = new[] { new { kind = "rails", key = "msvdd", value = string.Create(CultureInfo.InvariantCulture, $"alt={alt}") } };
-                change += string.Create(CultureInfo.InvariantCulture, $", ALT offset {rail.Offsets.AltUv / 1000.0} → {alt / 1000.0} mV (MAX follows REL)");
-                args["change"] = change;
-            }
-        }
-        var res = card.Broker(BrokerRequest.OpExperiment, "try", JsonSerializer.Serialize(args));
-        if (!res.Ok) return Reply(res);
-        var after = ReadAfter(out var unread);
-        return Out(new { success = true, change, written = res.Written, rails = after == null ? null : Rails(after), warning = unread });
-    });
-
-    [McpServerTool(Name = "adjust_nvvdd", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Move the core rail NVVDD's offsets as a new trial, the curve left as it is: REL, ALT and OV each move a limit, and the " +
-        "rail's MAX is the lowest of the three, so the top of the V/F curve is cut where it sits above MAX; VMIN moves the " +
-        "floor. On the reference card REL ±5 mV and ALT -5 mV moved MAX 1:1 and the rails did not couple; REL -25 mV only " +
-        "clipped the top. Raising lets the curve's top points run at their own voltage, up to the rail's standard 1.15 V " +
-        "ceiling, which the write path enforces. Per call each offset moves at most 10 mV down or 25 mV up; REL/ALT/OV at most " +
-        "250 mV and VMIN 100 mV below stock, VMIN at most 50 mV above. Too low shows as a crash or a driver reset. gpu_status " +
-        "shows NVVDD's volts and MAX. back_to_daily, end_session and a crash put the daily profile's offsets back (stock when " +
-        "it keeps none); keep_as_daily keeps the offsets on the card.")]
-    public string AdjustNvvdd(
-        [Description("mV to add to NVVDD's REL offset; default 0.")] double relDeltaMv = 0,
-        [Description("mV to add to NVVDD's ALT offset; default 0.")] double altDeltaMv = 0,
-        [Description("mV to add to NVVDD's OV offset; default 0.")] double ovDeltaMv = 0,
-        [Description("mV to add to NVVDD's VMIN offset (the floor); default 0.")] double vminDeltaMv = 0,
-        [Description("Why this step (what you saw, what you expect).")] string? reason = null) => Guard(() =>
-    {
-        if (Clocktail.Domain.VerifiedOn.RailWritesDroppedBy(card.DriverVersion) is { } dropped) throw new InvalidOperationException(dropped);
-        double[] deltas = [relDeltaMv, altDeltaMv, ovDeltaMv, vminDeltaMv];
-        if (deltas.All(x => x == 0)) throw new ArgumentException("every delta is 0: nothing to try");
-        if (deltas.Any(x => -x > MsvddStepMv))
-            throw new ArgumentException($"a step down is at most {MsvddStepMv} mV per offset (CLOCKTAIL_MCP_MSVDD_STEP_MV); split it into several trials");
-        if (deltas.Any(x => x > MsvddRaiseStepMv))
-            throw new ArgumentException($"a step up is at most {MsvddRaiseStepMv} mV per offset (CLOCKTAIL_MCP_MSVDD_RAISE_STEP_MV); split it into several trials");
-        var rail = card.WithDriver(RailsReader.Read).Get(Clocktail.Domain.Rails.Rail.Nvvdd) ?? throw new InvalidOperationException("the NVVDD rail is unreadable");
-        var now = rail.Offsets;
-        var stock = StockRail(Clocktail.Domain.Rails.Rail.Nvvdd, now);
-        int Uv(double mv) => (int)Math.Round(mv * 1000);
-        var next = new RailOffsets(now.RelUv + Uv(relDeltaMv), now.AltUv + Uv(altDeltaMv), now.OvUv + Uv(ovDeltaMv), now.VminUv + Uv(vminDeltaMv));
-        foreach (var (name, offset, floor) in new[] { ("REL", next.RelUv, stock.RelUv), ("ALT", next.AltUv, stock.AltUv), ("OV", next.OvUv, stock.OvUv) })
-            if (offset < floor - MsvddMaxBelowMv * 1000)
-                throw new ArgumentException($"{name} {offset / 1000.0} mV would be more than {MsvddMaxBelowMv} mV below stock (CLOCKTAIL_MCP_MSVDD_MAX_BELOW_MV)");
-        if (next.VminUv < stock.VminUv - MsvddVminBelowMv * 1000) throw new ArgumentException($"VMIN {next.VminUv / 1000.0} mV would be more than {MsvddVminBelowMv} mV below stock (CLOCKTAIL_MCP_MSVDD_VMIN_BELOW_MV)");
-        if (next.VminUv > stock.VminUv + MsvddVminAboveMv * 1000 && vminDeltaMv > 0) throw new ArgumentException($"VMIN goes {MsvddVminAboveMv} mV above stock at most (CLOCKTAIL_MCP_MSVDD_VMIN_ABOVE_MV)");
-        var moved = new List<string>();
-        void Moved(string name, int from, int to) { if (from != to) moved.Add(string.Create(CultureInfo.InvariantCulture, $"{name} {from / 1000.0} → {to / 1000.0} mV")); }
-        Moved("REL", now.RelUv, next.RelUv); Moved("ALT", now.AltUv, next.AltUv); Moved("OV", now.OvUv, next.OvUv); Moved("VMIN", now.VminUv, next.VminUv);
-        string value = string.Create(CultureInfo.InvariantCulture, $"rel={next.RelUv},alt={next.AltUv},ov={next.OvUv},vmin={next.VminUv}");
-        string context = string.Create(CultureInfo.InvariantCulture, $"NVVDD before the write: MAX {rail.Limits.MaxUv / 1000.0} mV, VMIN {rail.Limits.VminUv / 1000.0} mV");
-        return Trial($"NVVDD offsets {string.Join(", ", moved)}", reason is null ? context : $"{reason} ({context})",
-            new() { ["writes"] = new[] { TrialWrite(RailWrites.Kind, RailWrites.Key(Clocktail.Domain.Rails.Rail.Nvvdd), value) } });
     });
 
     [McpServerTool(Name = "stress_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
@@ -1185,21 +1061,6 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return $"(not written: {e.Message})"; }
     }
 
-    /// <summary>MSVDD's stock offsets: the journal's original while the broker holds the rail (a trial, or a daily profile
-    /// that keeps offsets), else what it holds now.</summary>
-    private RailOffsets StockMsvdd(RailOffsets now) => StockRail(Clocktail.Domain.Rails.Rail.Msvdd, now);
-
-    /// <summary>A rail's stock offsets: the journal's original while the broker holds the rail, else what it holds now.</summary>
-    private RailOffsets StockRail(Clocktail.Domain.Rails.Rail rail, RailOffsets now)
-    {
-        var r = card.Broker(BrokerRequest.OpOwnership);
-        if (r.Ok && r.Result is { } res && res.TryGetProperty("items", out var items))
-            foreach (var i in items.EnumerateArray())
-                if (Str(i, "Kind") == RailWrites.Kind && Str(i, "Key") == RailWrites.Key(rail) && Str(i, "Original") is { } o)
-                    return RailWrites.Decode(o);
-        return now;
-    }
-
     /// <summary>The value the daily profile keeps for one cell; null when it keeps none, is suspended or cannot be read.</summary>
     private string? DailyWrite(string kind, string key)
     {
@@ -1208,17 +1069,6 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         foreach (var w in p.GetProperty("Writes").EnumerateArray())
             if (w.GetProperty("Kind").GetString() == kind && w.GetProperty("Key").GetString() == key)
                 return w.GetProperty("Value").GetString();
-        return null;
-    }
-
-    /// <summary>The MSVDD offsets the daily profile keeps; null when it keeps none, is suspended or cannot be read.</summary>
-    private RailOffsets? DailyMsvdd()
-    {
-        var r = card.Broker(BrokerRequest.OpProfile, "show");
-        if (!r.Ok || r.Result is not { } res || res.GetProperty("profile") is not { ValueKind: JsonValueKind.Object } p || p.GetProperty("Suspended").GetBoolean()) return null;
-        foreach (var w in p.GetProperty("Writes").EnumerateArray())
-            if (w.GetProperty("Kind").GetString() == RailWrites.Kind && w.GetProperty("Key").GetString() == RailWrites.Key(Clocktail.Domain.Rails.Rail.Msvdd))
-                return RailWrites.Decode(w.GetProperty("Value").GetString()!);
         return null;
     }
 
