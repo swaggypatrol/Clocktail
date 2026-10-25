@@ -155,15 +155,19 @@ public sealed class TuningPolicy(TuningPolicySettings settings)
             before = readScope() ?? throw new TuningPolicyException("session_required",
                 "Begin a tuning session first. Device limits need a broker supporting policy-scope; update the software if unavailable.");
             var changes = policy == "device"
-                ? "Relax default core/memory/XBAR/curve steps, daily-offset allowance, explicit curve voltage floor, XBAR demand heuristic and ordinary trial power bounds."
+                ? "Relax step limits, the allowance above daily, the curve voltage floor, the XBAR demand rule and trial power bounds."
                 : "Approve only these configured relaxations: " + string.Join(", ", Settings.Relaxations.Select(p => $"CLOCKTAIL_MCP_{p.Key}={p.Value}"));
             if (policy == "overrides" && Settings.Relaxations.Count == 0)
                 throw new ArgumentException("No configured legacy relaxations are pending");
-            prompt = $"Allow {policy} tuning on {before.Gpu}, session '{before.Game}' ({before.Session})?\n{changes}\n" +
-                $"Explicit restrictions: {string.Join(", ", Settings.Configured.Select(p => $"{p.Key}={p.Value}"))}.\n" +
-                capabilities() + "\nDevice bounds, transactions, readback verification, crash allowance and recovery remain enforced. " +
-                "Permitted settings may still be unstable. This approval changes no GPU settings and runs no workload. " +
-                "It expires on session replacement/end, crash, driver reset/recovery or worker restart.";
+            string restrictions = Settings.Configured.Count == 0 ? "none" :
+                string.Join(", ", Settings.Configured.Select(p => $"{p.Key}={p.Value}"));
+            prompt = $"Allow {(policy == "device" ? "device-limit tuning" : "configured tuning overrides")} for this session?\n\n" +
+                capabilities() + $"\nSession: {before.Game}\n\n{changes}\n" +
+                $"Explicit restrictions: {restrictions}.\n\n" +
+                "Device checks, write verification, crash allowance and recovery stay on. Permitted settings may be unstable.\n" +
+                "Approval changes no GPU settings and starts no test.\n" +
+                "Expires at session end/replacement, crash, reset/recovery or restart.\n" +
+                "Full limits and details: card_settings.";
         }
         string? refusal;
         try { refusal = await ask(prompt, ct); }

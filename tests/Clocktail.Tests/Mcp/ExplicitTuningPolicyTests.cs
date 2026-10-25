@@ -393,4 +393,28 @@ public class ExplicitTuningPolicyTests
         Assert.Empty(h.Trials);
         Assert.Equal(0, FakeDriver.Sets);
     }
+
+    [Fact]
+    public async Task Consent_prompt_summarizes_device_limits_without_dumping_the_curve_or_structures()
+    {
+        var h = new Harness();
+        string? prompt = null;
+        await h.Policy.Approve("device", () => TuningTools.ReadPolicyScope(h.Card),
+            () => TuningTools.PolicyConsentSummary(h.Card), (text, _) =>
+            { prompt = text; return Task.FromResult<string?>(null); }, default);
+        Assert.Contains("GPU: fake-5080", prompt);
+        Assert.Contains("Power limit: 250..450 W", prompt);
+        Assert.Contains("Core offset: -1000..1000 MHz", prompt);
+        Assert.Contains("Memory offset: -1000..3000 MHz", prompt);
+        Assert.Contains("XBAR offset: -1000..1000 MHz", prompt);
+        Assert.Contains("Explicit restrictions: none", prompt);
+        Assert.Contains("starts no test", prompt);
+        Assert.DoesNotContain("\"points\"", prompt);
+        Assert.DoesNotContain("\"Index\"", prompt);
+        Assert.DoesNotContain("\"Flag\"", prompt);
+        Assert.DoesNotContain("broker:driver:session:A", prompt);
+        Assert.True(prompt!.Length < 1000, prompt);
+        Assert.Empty(h.Trials);
+        Assert.Equal(0, FakeDriver.Sets);
+    }
 }

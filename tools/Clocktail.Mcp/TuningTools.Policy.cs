@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Clocktail.Domain.Broker;
@@ -98,6 +99,41 @@ public sealed partial class TuningTools
                     nvvdd_max_mv = look.NvvddMaxUv / 1000.0, shift_available = look.NvvddMaxUv is > 0 };
             }),
         };
+    }
+
+    // Consent is a decision summary, not a diagnostic dump. Keep the full structures and curve in reports.
+    internal static string PolicyConsentSummary(Card card)
+    {
+        string Read(Func<string> read)
+        {
+            try { return read(); }
+            catch (Exception e) when (e is not OutOfMemoryException and not OperationCanceledException)
+            { return "unavailable (see card_settings)"; }
+        }
+        static string Range(double min, double max, string unit) =>
+            string.Create(CultureInfo.InvariantCulture, $"{min:0.###}..{max:0.###} {unit}");
+        string Offset(ClockDomain domain) => Read(() =>
+        {
+            var p = card.WithDriver(Pstates20Reader.Read).P0(domain)
+                ?? throw new InvalidOperationException("P0 bounds unavailable");
+            TuningValues.DeviceRange(p.MinKhz, p.Editable ? p.MinKhz : null,
+                p.Editable ? p.MaxKhz : null, "P0 offset");
+            return Range(p.MinKhz / 1000.0, p.MaxKhz / 1000.0, "MHz");
+        });
+        string power = Read(() =>
+        {
+            var p = card.WithDriver(PowerRequestsReader.ReadBoard);
+            return Range(p.MinMw / 1000.0, p.MaxMw / 1000.0, "W");
+        });
+        string xbar = Read(() =>
+        {
+            var p = ClockDomainsParser.Find(card.WithDriver(ClockDomainOffsets.ReadTopology), (uint)ClockDomainId.Xbar);
+            TuningValues.DeviceRange(p.MinOffsetMhz, p.Adjustable ? p.MinOffsetMhz : null,
+                p.Adjustable ? p.MaxOffsetMhz : null, "XBAR offset");
+            return Range(p.MinOffsetMhz, p.MaxOffsetMhz, "MHz");
+        });
+        return $"GPU: {card.Name}\nPower limit: {power}\nCore offset: {Offset(ClockDomain.Core)}\n" +
+            $"Memory offset: {Offset(ClockDomain.Memory)}\nXBAR offset: {xbar}";
     }
 
     /// <summary>The core P0 interval consistent with the domain's existing relative global-plus-point budget.</summary>
@@ -222,7 +258,7 @@ public sealed partial class TuningTools
         try
         {
             await tuningPolicy.Approve(policy.Trim().ToLowerInvariant(), () => ReadPolicyScope(card),
-                () => JsonSerializer.Serialize(PolicyCapabilities(card)),
+                () => PolicyConsentSummary(card),
                 (question, ct) => Consent.AskMandatory(server, question, ct), cancellationToken);
             return Out(new { success = true, gpu_writes = 0, tuning_policy = PolicyReport(card, tuningPolicy) });
         }
