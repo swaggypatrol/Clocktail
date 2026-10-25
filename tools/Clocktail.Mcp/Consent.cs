@@ -119,15 +119,17 @@ public static class Consent
                     },
                 }, wait.Token);
                 // Declined or dismissed (cancel: Esc in Claude Code) is the person's no, not a question that could not be shown.
-                if (!r.IsAccepted) return false;
+                // A transport may ignore cancellation and return a checked response after the deadline.
+                if (wait.IsCancellationRequested || !r.IsAccepted) return false;
                 return r.Content is { } c && c.TryGetValue("confirm", out var v) && v.ValueKind == JsonValueKind.True;
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return false; }   // nobody answered
-            catch (McpProtocolException e) when (e.ErrorCode == McpErrorCode.MethodNotFound) { return null; }
+            catch (McpProtocolException e) when (e.ErrorCode == McpErrorCode.MethodNotFound)
+            { return wait.IsCancellationRequested ? false : null; }
             // A transport or decoding failure may happen after the form was shown. Mandatory consent must not
             // open a second prompt when its display/outcome is uncertain. Existing callers retain their fallback.
             catch (Exception e) when (e is not OperationCanceledException and not OutOfMemoryException)
-            { return mandatory ? false : null; }
+            { return wait.IsCancellationRequested || mandatory ? false : null; }
         };
 
     /// <summary>A Yes/No dialog on the desktop, on top and No by default, answered within <see cref="DialogWait"/>; null

@@ -44,7 +44,7 @@ And it doesn't have to be Claude. Any model that's decent with tools will do. Th
 npx -y clocktail setup --lite
 ```
 
-The full toolbox is 52 tools and a manual's worth of instructions, about 19k tokens before you've said hello. A local model in a 32k window can't fit that next to its own agent's prompt, and Ollama won't tell you: it quietly drops the start of the conversation, instructions first, and your agent forgets what it was doing. `--lite` hands the agent 22 tools and a one-page brief, about 6.5k tokens. Give Ollama all the context your VRAM allows anyway (`OLLAMA_CONTEXT_LENGTH`; 64k is comfortable).
+The full toolbox is 53 tools and a manual's worth of instructions, about 19k tokens before you've said hello. A local model in a 32k window can't fit that next to its own agent's prompt, and Ollama won't tell you: it quietly drops the start of the conversation, instructions first, and your agent forgets what it was doing. `--lite` hands the agent 24 tools and a one-page brief, about 6.5k tokens. Give Ollama all the context your VRAM allows anyway (`OLLAMA_CONTEXT_LENGTH`; 64k is comfortable).
 
 ### The model matters more than the app
 
@@ -176,7 +176,7 @@ Or paste the line under "Set up Clocktail" into your agent and go make a cup of 
 | `src/Clocktail.Domain` | Transactions, the ownership journal (the original value of every setting it's touched), write rules, the daily profile, presets. |
 | `src/Clocktail.Broker` | The service: an elevated logon task that does every write over a named pipe and quietly puts your settings back after crashes and driver resets. |
 | `src/Clocktail.Cli` | The command line, for people who'd rather break things by hand. |
-| `tools/Clocktail.Mcp` | The MCP server your agent talks to: 52 tools and the manual. See its README. |
+| `tools/Clocktail.Mcp` | The MCP server your agent talks to: 53 tools and the manual. See its README. |
 | `tools/Clocktail.Lab` | The lab: a CUDA load engine for the memory and the crossbar, every result checked on the CPU. It writes nothing itself; its trials go through the service. |
 | `npm/` | The setup genie behind `npx clocktail`. |
 
