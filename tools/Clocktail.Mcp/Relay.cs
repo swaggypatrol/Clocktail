@@ -48,7 +48,7 @@ public sealed class RelayCore(
     /// where it is) were answered as if they had written nothing.</summary>
     public static readonly IReadOnlySet<string> RecordOnly = new HashSet<string>
     {
-        "mark_stable", "log_note", "save_profile", "delete_profile", "live_start", "live_stop", "watch",
+        "set_tuning_policy", "mark_stable", "log_note", "save_profile", "delete_profile", "live_start", "live_stop", "watch",
     };
 
     /// <summary>The tools that say they only read (their McpServerTool's ReadOnly), read from the tools themselves: one of

@@ -1,6 +1,8 @@
 # MSVDD and XBAR
 The interconnect rail and the crossbar clock: the free +2 %, the +6-7 % with XBAR, and the cliff to stay away from.
 
+Policy context: explicit step, daily allowance and curve-floor numbers below describe conservative defaults. Reference 5090 power and XBAR observations are examples. Approved explicit tuning follows card_settings effective bounds; see manual tuning-policy. Automatic tuners and other controls retain their existing policies.
+
 Since 0.3.5 no tool sets MSVDD's (or NVVDD's) offsets: driver 621.01 takes them and changes nothing. MSVDD's ceiling moves only with the voltage boost (below). The REL measurements were made on 617.42; they show how XBAR is held, which is why the boost pays.
 
 ## MSVDD REL: NVIDIA's own reliability limit

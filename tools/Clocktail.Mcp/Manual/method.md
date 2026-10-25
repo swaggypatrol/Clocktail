@@ -56,7 +56,7 @@ What the reference showed:
 - Above ~980-1035 mV it stops scaling at all.
 Why a curve, not a core offset: an offset raises every point by the same MHz. The knee could take +500 while the top takes almost nothing. An offset big enough for the knee crashes the top; one safe for the top wastes the knee. The curve lets every voltage go to its own edge.
 Why small steps at temperature: the edge moves with temperature (6 C moved a 450 W landing by a full point), and 2 of 3 hangs on the reference began right after a write under full load.
-Note: `adjust_curve` goes at most 200 MHz above the daily profile. From stock, map in rounds: raise, test, `keep_as_daily` (ask) a margin below the last pass, continue. Release a test cap (`set_clock_lock maxMhz=0`) before `keep_as_daily`: a cap is kept (a floor, point lock or Boost Lock never is). For a run nobody watches (overnight), `begin_session unattended=true`: after `maxCrashes` crashes (2 by default) it writes no new trial.
+Note: under conservative defaults, `adjust_curve` goes at most 200 MHz above the daily profile (approved policies: see `manual tuning-policy`). From stock, map in rounds: raise, test, `keep_as_daily` (ask) a margin below the last pass, continue. Release a test cap (`set_clock_lock maxMhz=0`) before `keep_as_daily`: a cap is kept (a floor, point lock or Boost Lock never is). For a run nobody watches (overnight), `begin_session unattended=true`: after `maxCrashes` crashes (2 by default) it writes no new trial.
 
 ## Phase 4: shape the daily curve
 - At each voltage: the boundary minus 30-60 MHz, the game margin.

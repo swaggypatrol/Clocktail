@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
@@ -15,7 +16,7 @@ namespace Clocktail.Mcp;
 /// dialog on the desktop, which no model can answer (only when the agent's question could not be shown at all: a declined
 /// or dismissed one is a no). Each caller's question says how long its change lasts. Trials need no yes: each is one bounded step, recorded, and undone
 /// by back_to_daily, end_session or a crash. CLOCKTAIL_CONFIRM: "auto" (the default), "dialog" (always the Windows
-/// dialog), "off" (never ask: for a person who approves every call in the agent themselves).
+/// dialog), "off" (skip for existing callers). Device/override policy approval always uses mandatory confirmation.
 /// </summary>
 public static class Consent
 {
@@ -37,6 +38,24 @@ public static class Consent
     /// <summary>Null when the person said yes (or asking is off); else why nothing may be done, for the agent.</summary>
     public static Task<string?> Ask(McpServer? server, string what, CancellationToken ct) =>
         Ask(Mode, Form(server, what), q => Dialog(q), what, ct);
+
+    public static Task<string?> AskMandatory(McpServer? server, string what, CancellationToken ct) =>
+        AskMandatory(Mode, Form(server, what, mandatory: true), q => Dialog(q), what, ct);
+
+    public static async Task<string?> AskMandatory(string mode, Func<CancellationToken, Task<bool?>>? form,
+        Func<string, bool?> dialog, string what, CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested) return "Confirmation was cancelled: nothing was changed";
+        Func<CancellationToken, Task<bool?>>? guardedForm = form == null ? null : async token =>
+        {
+            var answer = await form(token);
+            return token.IsCancellationRequested ? false : answer;
+        };
+        var refusal = await Ask(mode == "dialog" ? "dialog" : "auto", guardedForm,
+            question => ct.IsCancellationRequested ? null : dialog(question), what, ct);
+        if (ct.IsCancellationRequested) return "Confirmation was cancelled: nothing was changed";
+        return refusal == null ? null : "Mandatory confirmation was not granted. Call set_tuning_policy explicitly to ask again; CLOCKTAIL_CONFIRM=off cannot approve this policy.";
+    }
 
     /// <summary>
     /// The decision, with the two ways of asking passed in: <paramref name="form"/> (null when the client offers no
@@ -71,14 +90,20 @@ public static class Consent
 
     /// <summary>The elicitation form, or null when the client offers none: one checkbox the person ticks, so an empty
     /// accept (Codex auto-accepts a form with no fields) is not a yes.</summary>
-    private static Func<CancellationToken, Task<bool?>>? Form(McpServer? server, string what) =>
-        server?.ClientCapabilities?.Elicitation is null ? null : async ct =>
+    private static Func<CancellationToken, Task<bool?>>? Form(McpServer? server, string what, bool mandatory = false) =>
+        server?.ClientCapabilities?.Elicitation is null ? null
+            : ElicitationForm(async (request, token) => await server.ElicitAsync(request, token), what, mandatory);
+
+    // The same request/response path is exercised by software tests without a client or Windows dialog.
+    internal static Func<CancellationToken, Task<bool?>> ElicitationForm(
+        Func<ElicitRequestParams, CancellationToken, Task<ElicitResult>> elicit, string what,
+        bool mandatory, TimeSpan? timeout = null) => async ct =>
         {
             using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            wait.CancelAfter(FormWait);
+            wait.CancelAfter(timeout ?? FormWait);
             try
             {
-                var r = await server.ElicitAsync(new ElicitRequestParams
+                var r = await elicit(new ElicitRequestParams
                 {
                     Message = $"Clocktail: {what}",
                     RequestedSchema = new ElicitRequestParams.RequestSchema
@@ -98,7 +123,11 @@ public static class Consent
                 return r.Content is { } c && c.TryGetValue("confirm", out var v) && v.ValueKind == JsonValueKind.True;
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return false; }   // nobody answered
-            catch (Exception e) when (e is not OperationCanceledException and not OutOfMemoryException) { return null; }
+            catch (McpProtocolException e) when (e.ErrorCode == McpErrorCode.MethodNotFound) { return null; }
+            // A transport or decoding failure may happen after the form was shown. Mandatory consent must not
+            // open a second prompt when its display/outcome is uncertain. Existing callers retain their fallback.
+            catch (Exception e) when (e is not OperationCanceledException and not OutOfMemoryException)
+            { return mandatory ? false : null; }
         };
 
     /// <summary>A Yes/No dialog on the desktop, on top and No by default, answered within <see cref="DialogWait"/>; null

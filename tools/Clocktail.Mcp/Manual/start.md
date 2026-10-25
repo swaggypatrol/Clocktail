@@ -9,6 +9,7 @@ Every number in this manual was measured on one reference card: RTX 5090 Founder
 ## The tools
 | Need | Tool |
 |---|---|
+| Approve device limits or configured overrides for this session; conservative revokes (no GPU writes) | `set_tuning_policy` |
 | "How's my card doing", "is it safe", "what did we change" | `card_report` |
 | Where it runs now: voltages, clock, V/F point, power, temperature, memory temperature, the 16-pin input, the PCIe link | `gpu_status` |
 | What is set: power limit, offsets, curve, rails, XBAR/SYS/Video, the clock ratio, clock locks, fans, current limits, the daily profile, what each control can do here | `card_settings` |
@@ -55,3 +56,5 @@ What each write tool changes on the card, how far one call goes and how to combi
 - Say what the number means, not just the number: "NVVDD 940 mV at 2857 MHz, 598 W against a 600 W wall: the power limit is what stops it, not voltage or temperature."
 - Under load, readings move every second. Sample more than once (`limiter` already does) before drawing a conclusion.
 - When you do not know, say so, and say what reading would tell.
+
+See `manual tuning-policy`.

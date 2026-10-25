@@ -92,6 +92,9 @@ public sealed record Experiment(string Game, string? Note, DateTimeOffset Starte
     /// until a new session begins (the daily profile stays on). Null: no budget, the person is at the machine.</summary>
     int? CrashBudget = null)
 {
+    /// <summary>Session identity, independent of clocks. Older sessions cannot receive device consent.</summary>
+    public string? SessionId { get; init; }
+
     public const string FileName = "experiment.json";
     public const string DataFileName = "datapoints.jsonl";
     /// <summary>The person or the agent judged the trial good in the game.</summary>

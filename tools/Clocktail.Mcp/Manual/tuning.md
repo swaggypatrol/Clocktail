@@ -1,6 +1,8 @@
 # The tuning method
 How a session runs, how big a step is, how to test a part of the curve the game never reaches, and when something becomes daily.
 
+Policy context: explicit step, daily allowance and curve-floor numbers below describe conservative defaults. Reference 5090 power and XBAR observations are examples. Approved explicit tuning follows card_settings effective bounds; see manual tuning-policy. Automatic tuners and other controls retain their existing policies.
+
 ## The loop
 1. `begin_session` with the game, and `live_start` with it: the card is watched for the whole session, a line every 10 s under load. In Claude Code, follow its log with the Monitor tool and say what you see as lines arrive; otherwise `live_read` when the person talks.
 2. Where the card runs: the live lines (clock, voltage and the curve point, what held it), or `gpu_status` for one look (NVVDD and the curve point at that instant; `adjust_curve` centres its window on the median under load over the last 3 s, or over the last 2 minutes once the load has stopped).

@@ -25,7 +25,7 @@ namespace Clocktail.Mcp;
 /// Read-only: the driver is only read, in the card's lane, and the broker is only asked to show.
 /// </summary>
 [McpServerToolType]
-public sealed partial class SettingsTools(Card card)
+public sealed partial class SettingsTools(Card card, TuningPolicy? tuningPolicy = null)
 {
     /// <summary>The limiter's samples: readings jitter (a game's load moves by the frame), so it takes the majority.</summary>
     public const int LimiterSamples = 5;
@@ -92,6 +92,7 @@ public sealed partial class SettingsTools(Card card)
 
         string json = Out(new
         {
+            tuning_policy = Section(() => TuningTools.PolicyReport(card, tuningPolicy)),
             gpu = card.Name,
             driver = VerifiedOn.Driver(card.DriverVersion),
             vbios = card.Vbios,

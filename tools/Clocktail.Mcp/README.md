@@ -12,6 +12,7 @@ What the agent starts is a relay that loads no driver library and runs the same 
 
 | Tool | What |
 |---|---|
+| `set_tuning_policy` | Mandatory session consent for device limits or configured overrides; conservative revokes. No GPU writes. |
 | `card_report` | 🩺 How's my card doing: every setting as stock → now, the change and a ✅ / ⚠️ / ⛔ safety mark, live readings, one verdict; between the tables the V/F curve drawn in Braille dots (now, stock, and ● where the card runs). A "Not set by Clocktail" row names another tool's settings (the card is then not at stock), and "Overclocking tool running" a program that writes the card back. |
 | `manual` | The agent's manual: the method phase by phase and why, every control and how to combine them, Blackwell, reading the card, stability, presets, troubleshooting. Its short version is the server's instructions. |
 | `install_service` | Install or update the service (one UAC prompt). Every write tool needs it. |
@@ -56,3 +57,5 @@ What the agent starts is a relay that loads no driver library and runs the same 
 | `log_note` / `read_log` | The tuning log. |
 
 Rule of thumb: the highest clock `stress_test` passes, minus 30–60 MHz, is what games hold.
+
+See [Explicit tuning policies](Manual/tuning-policy.md).

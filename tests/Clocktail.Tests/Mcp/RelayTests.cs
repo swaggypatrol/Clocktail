@@ -177,7 +177,7 @@ public class RelayTests
         Assert.Equal([
                 "card_report", "card_settings", "curve_around", "data_points", "delete_profile", "diagnostic_report", "gpu_status", "lab_status",
                 "limiter", "list_presets", "live_read", "live_start", "live_stop", "log_note", "manual", "mark_stable", "preview_daily", "read_log",
-                "save_profile", "watch",
+                "save_profile", "set_tuning_policy", "watch",
             ], names.Where(n => !RelayCore.MayWriteCard(n)).Order(StringComparer.Ordinal));
         foreach (var w in new[] { "shift_curve", "set_curve", "flatten_curve", "adjust_nvvdd", "adjust_clock_domain", "set_core_offset", "set_clock_lock",
                      "set_clock_ratio", "set_voltage_boost", "set_fan_start", "set_power_cap", "begin_session", "lab_test", "tune_memory",

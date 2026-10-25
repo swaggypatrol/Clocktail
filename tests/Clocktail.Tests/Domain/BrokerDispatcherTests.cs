@@ -1347,7 +1347,7 @@ public class BrokerDispatcherTests : IDisposable
         var log = File.ReadAllText(TuningLog.PathBeside(_journal.Path));
         Assert.Contains("Crash · during trial · A", log);
         Assert.DoesNotContain("Crash · daily profile", log);
-        Assert.Contains($"The GPU stopped answering at {stopped.ToLocalTime():HH:mm:ss.f}", log);   // in local time, as the log's headings
+        Assert.Contains(FormattableString.Invariant($"The GPU stopped answering at {stopped.ToLocalTime():HH:mm:ss.f}"), log);   // in local time, as the log's headings
     }
 
     /// <summary>A trial taken off the card before the GPU stopped answering is not blamed, nor one written after: the crash
@@ -2330,5 +2330,97 @@ public class BrokerDispatcherTests : IDisposable
         Assert.False(r.Result!.Value.GetProperty("switched").GetBoolean());
         Assert.NotNull(DailyProfile.Load(DailyProfile.PathBeside(_journal.Path)));
         Assert.Equal(450_000u, _requests[0xfe]);           // still the trial's: what the answer says is pending
+    }
+
+    [Fact]
+    public void Policy_scope_reads_are_write_free_and_session_ids_do_not_depend_on_time()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"game"}""")).Ok);
+        string Scope() => d.Dispatch(Exp("policy-scope")).Result!.Value.GetProperty("generation").GetString()!;
+        string first = Scope();
+        Assert.Equal(first, Scope());
+        Assert.Equal(0, FakeDriver.Sets);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"game"}""")).Ok); // fake host time is unchanged
+        Assert.NotEqual(first, Scope());
+        Assert.Equal(0, FakeDriver.Sets);
+        var stale = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: BrokerRequest.ScopedTrial,
+            Value: """{"curve":"0*127","power_mw":450000,"keep_curve":true}""", ExpectedTuningScope: first));
+        Assert.False(stale.Ok);
+        Assert.Equal("consent_required", stale.Code);
+        Assert.Equal(0, FakeDriver.Sets);
+    }
+
+    [Theory]
+    [InlineData("crashed")]
+    [InlineData("after-reset")]
+    [InlineData("recover")]
+    [InlineData("crash")]
+    [InlineData("end")]
+    [InlineData("driver")]
+    public void Policy_scope_expires_before_a_relaxed_trial_can_write(string change)
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"game"}""")).Ok);
+        var first = d.Dispatch(Exp("policy-scope")).Result!.Value.GetProperty("generation").GetString();
+        if (change == "driver") _gpu.Rebind(2);
+        else if (change == "recover") d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover));
+        else if (change is "crashed" or "after-reset") d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: change));
+        else d.Dispatch(Exp(change));
+        var stale = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: BrokerRequest.ScopedTrial,
+            Value: """{"curve":"0*127","power_mw":450000,"keep_curve":true}""", ExpectedTuningScope: first));
+        Assert.Equal("consent_required", stale.Code);
+        Assert.Equal(0, FakeDriver.Sets);
+    }
+
+    [Fact]
+    public void Valid_scope_does_not_bypass_device_bounds_or_crash_budget()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"game","unattended":true,"max_crashes":1}""")).Ok);
+        var scope = d.Dispatch(Exp("policy-scope")).Result!.Value.GetProperty("generation").GetString();
+        var tooLow = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: BrokerRequest.ScopedTrial,
+            Value: """{"curve":"0*127","power_mw":250000,"keep_curve":true}""", ExpectedTuningScope: scope));
+        Assert.False(tooLow.Ok); // fake 5090 minimum remains 400 W at the lower layer
+        Assert.Equal(0, FakeDriver.Sets);
+        Assert.True(d.Dispatch(Exp("try", """{"curve":"0*127","power_mw":450000,"keep_curve":true}""")).Ok);
+        Assert.True(d.Dispatch(Exp("crash")).Ok);
+        scope = d.Dispatch(Exp("policy-scope")).Result!.Value.GetProperty("generation").GetString();
+        int sets = FakeDriver.Sets;
+        var exhausted = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: BrokerRequest.ScopedTrial,
+            Value: """{"curve":"0*127","power_mw":450000,"keep_curve":true}""", ExpectedTuningScope: scope));
+        Assert.Equal(BrokerCode.CrashBudget, exhausted.Code);
+        Assert.Equal(sets, FakeDriver.Sets);
+    }
+
+    [Fact]
+    public void Older_sessions_without_an_identity_and_closed_brokers_cannot_supply_a_scope()
+    {
+        var d = Power();
+        new Experiment("old", null, _host.Now).Save(Experiment.PathBeside(_journal.Path));
+        Assert.Equal(JsonValueKind.Null, d.Dispatch(Exp("policy-scope")).Result!.Value.GetProperty("generation").ValueKind);
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"new"}""")).Ok);
+        Assert.NotEqual(JsonValueKind.Null, d.Dispatch(Exp("policy-scope")).Result!.Value.GetProperty("generation").ValueKind);
+        Assert.True(d.Close(TimeSpan.FromSeconds(1)));
+        Assert.Equal(JsonValueKind.Null, d.Dispatch(Exp("policy-scope")).Result!.Value.GetProperty("generation").ValueKind);
+        Assert.Equal(0, FakeDriver.Sets);
+    }
+
+    [Fact]
+    public void Scoped_trial_requires_a_scope_and_plain_trial_cannot_carry_one()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"game"}""")).Ok);
+        var scope = d.Dispatch(Exp("policy-scope")).Result!.Value.GetProperty("generation").GetString();
+        string payload = """{"curve":"0*127","power_mw":450000,"keep_curve":true}""";
+        Assert.Equal("consent_required", d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment,
+            Kind: BrokerRequest.ScopedTrial, Value: payload)).Code);
+        Assert.Equal("consent_required", d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment,
+            Kind: "try", Value: payload, ExpectedTuningScope: scope)).Code);
+        Assert.Equal(0, FakeDriver.Sets);
+        var accepted = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment,
+            Kind: BrokerRequest.ScopedTrial, Value: payload, ExpectedTuningScope: scope));
+        Assert.True(accepted.Ok, accepted.Error);
+        Assert.Equal(450_000u, _requests[0xfe]);
     }
 }

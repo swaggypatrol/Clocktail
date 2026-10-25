@@ -137,7 +137,7 @@ public class NotStockTests
         var asking = typeof(Card).Assembly.GetTypes().SelectMany(t => t.GetMethods())
             .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is { } a && a.Destructive && !a.ReadOnly && a.Name != "install_service")   // UAC asks for that one
             .ToList();
-        Assert.Equal(6, asking.Count);   // stock asks only when it would clear another tool's settings
+        Assert.Equal(7, asking.Count);   // stock asks only when it would clear another tool's settings
         foreach (var m in asking)
         {
             Assert.Contains(m.GetParameters(), p => p.ParameterType == typeof(McpServer));     // to put the question to the client

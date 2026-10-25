@@ -1,6 +1,8 @@
 # Troubleshooting
 When a tool fails, when the card or the service misbehaves, and where things live.
 
+Policy context: explicit step, daily allowance and curve-floor numbers below describe conservative defaults. Reference 5090 power and XBAR observations are examples. Approved explicit tuning follows card_settings effective bounds; see manual tuning-policy. Automatic tuners and other controls retain their existing policies.
+
 | Symptom | What it means | What to do |
 |---|---|---|
 | "the Clocktail service does not answer" | the service is not installed or not running | `install_service` (one admin prompt); if it was installed, tell the person to run `npx -y clocktail verify` |

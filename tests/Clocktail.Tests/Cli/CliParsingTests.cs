@@ -1,3 +1,4 @@
+using CliProgram = Clocktail.Cli.Program;
 using Clocktail.Cli;
 
 namespace Clocktail.Tests.Cli;
@@ -19,9 +20,9 @@ public class CliParsingTests
     [Fact]
     public void A_command_line_with_two_kinds_of_write_names_both()
     {
-        Assert.Equal(["power", "P0 clock offsets"], Program.WriteGroups(["--power-limit", "500", "--core-offset", "15"]));
-        Assert.Equal(["P0 clock offsets"], Program.WriteGroups(["--core-offset", "15", "--memory-offset", "100"]));   // one kind, two writes
-        Assert.Empty(Program.WriteGroups(["--vf", "--gpu", "0"]));                                                   // reads only
-        Assert.Equal(2, Program.WriteGroups(["--vf-undervolt", "25", "--xbar-offset", "300"]).Count);
+        Assert.Equal(["power", "P0 clock offsets"], CliProgram.WriteGroups(["--power-limit", "500", "--core-offset", "15"]));
+        Assert.Equal(["P0 clock offsets"], CliProgram.WriteGroups(["--core-offset", "15", "--memory-offset", "100"]));   // one kind, two writes
+        Assert.Empty(CliProgram.WriteGroups(["--vf", "--gpu", "0"]));                                                   // reads only
+        Assert.Equal(2, CliProgram.WriteGroups(["--vf-undervolt", "25", "--xbar-offset", "300"]).Count);
     }
 }

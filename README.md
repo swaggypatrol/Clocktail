@@ -191,3 +191,5 @@ If your card answers differently, ask your agent for a diagnostic report and att
 ## Warning
 
 This is unofficial software. Overclocking can crash your games, mess up your output and shorten the life of your hardware. Use it at your own risk. If something goes wrong, the tuning log will tell you exactly what happened. It won't say sorry.
+
+MCP explicit tuning retains conservative defaults. Device limits and wider legacy overrides require mandatory session confirmation through `set_tuning_policy`; environment configuration alone is insufficient. See [tuning policies](tools/Clocktail.Mcp/Manual/tuning-policy.md) for scope, precedence and compatibility.

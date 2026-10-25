@@ -1,6 +1,8 @@
 # Power, current, temperature and fans
 The wall, what a watt buys, current limits, the fan curve and what temperature costs.
 
+Policy context: explicit step, daily allowance and curve-floor numbers below describe conservative defaults. Reference 5090 power and XBAR observations are examples. Approved explicit tuning follows card_settings effective bounds; see manual tuning-policy. Automatic tuners and other controls retain their existing policies.
+
 ## Power
 - Board power request on the 5090 FE: **min 400 W, default 575 W, max 600 W**. The driver refuses less than 400 W. The FE request is the one enforced. A driver reset puts it back to 575 W; the service restores the daily one.
 - **The firmware's own board limit** (`card_settings` `power.firmware_w`, the board power-policy record) must equal the request. On 2026-10-21 the reference card held 575 W for hours while the request and NVML both said 600 W: the service had started, found the request already at 600 W and written nothing, and the firmware stayed on its VBIOS default. Every write of the request moves the firmware's limit with it, so the service now compares the two whenever it puts the profile on and writes the request again (a step away and back) when they differ; `card_report` marks a mismatch ⚠️. What reset the firmware that morning is not known.

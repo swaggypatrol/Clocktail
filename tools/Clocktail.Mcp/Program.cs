@@ -16,6 +16,18 @@ if (!worker && OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable
 // stdio is the protocol: every log line goes to stderr, never to stdout.
 var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
+builder.Services.AddSingleton(new TuningPolicySettings(Environment.GetEnvironmentVariable));
+builder.Services.AddSingleton(sp =>
+{
+    var policy = new TuningPolicy(sp.GetRequiredService<TuningPolicySettings>());
+    var card = sp.GetRequiredService<Card>();
+    policy.Log = message =>
+    {
+        Console.Error.WriteLine("clocktail policy: " + message);
+        card.Broker(Clocktail.Domain.Broker.BrokerRequest.OpExperiment, "note", "MCP tuning policy: " + message);
+    };
+    return policy;
+});
 builder.Services.AddSingleton<Card>();
 builder.Services.AddSingleton<Residency>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<Residency>());

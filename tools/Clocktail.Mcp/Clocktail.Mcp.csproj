@@ -12,6 +12,8 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
   </ItemGroup>
 
+  <ItemGroup><InternalsVisibleTo Include="Clocktail.Tests" /></ItemGroup>
+
   <!-- The agent's manual (ManualTools): one topic per file, instructions.md is what every agent gets on connecting. -->
   <ItemGroup>
     <EmbeddedResource Include="Manual\*.md" LogicalName="manual.%(Filename).md" />

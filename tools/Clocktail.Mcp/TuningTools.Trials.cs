@@ -20,9 +20,7 @@ namespace Clocktail.Mcp;
 /// </summary>
 public sealed partial class TuningTools
 {
-    /// <summary>set_memory_offset: the largest change per call (CLOCKTAIL_MCP_MEMORY_STEP_MHZ).</summary>
-    public static readonly int MemoryStepMhz = Env("CLOCKTAIL_MCP_MEMORY_STEP_MHZ", 250);
-    /// <summary>adjust_xbar / adjust_clock_domain: the largest offset change per call (CLOCKTAIL_MCP_XBAR_STEP_MHZ). The
+    /// <summary>Legacy adjust_clock_domain step, unaffected by explicit XBAR policy (CLOCKTAIL_MCP_XBAR_STEP_MHZ). The
     /// offset's range is the driver's (±1000 MHz on a 5090), unless CLOCKTAIL_MCP_MAX_XBAR_MHZ caps XBAR lower. Measured
     /// 0..+400 on the 5090; an overclocker's +450 without more voltage gave a grey screen.</summary>
     public static readonly int XbarStepMhz = Env("CLOCKTAIL_MCP_XBAR_STEP_MHZ", 50);
@@ -123,6 +121,7 @@ public sealed partial class TuningTools
     });
 
     [McpServerTool(Name = "set_memory_offset", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Policy: the defaults below are conservative; approved device/override bounds in card_settings take precedence for explicit tuning. " +
         "Set the memory (GDDR7) offset as a new trial: the P0 offset in MHz, which NVML shows doubled. A memory write zeroes " +
         "the V/F curve's offsets, so the curve on the card is written again right after it, in the same trial. At most 250 MHz " +
         "from where it is per call (CLOCKTAIL_MCP_MEMORY_STEP_MHZ), within the driver's range (-1000..+3000 on a 5090). On " +
@@ -132,20 +131,19 @@ public sealed partial class TuningTools
         "keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
     public string SetMemoryOffset(
         [Description("The memory offset to try, MHz (absolute, not a delta).")] double mhz,
-        [Description("Why this step.")] string? reason = null) => Guard(() =>
+        [Description("Why this step.")] string? reason = null) => PolicyGuard(() =>
     {
         var p0 = card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Memory) ?? throw new InvalidOperationException("the memory offset is unreadable");
-        int khz = (int)Math.Round(mhz * 1000), now = p0.DeltaKhz;
+        int khz = TuningValues.Khz(mhz), now = p0.DeltaKhz;
         if (khz == now) throw new ArgumentException($"the memory offset is {now / 1000.0} MHz already: nothing to try");
-        if (Math.Abs(khz - now) > MemoryStepMhz * 1000)
-            throw new ArgumentException($"a step is at most {MemoryStepMhz} MHz (CLOCKTAIL_MCP_MEMORY_STEP_MHZ); it is {now / 1000.0} MHz now");
-        if (khz < p0.MinKhz || khz > p0.MaxKhz)
-            throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000.0}..{p0.MaxKhz / 1000.0} MHz");
+        Limits.Ceiling("MEMORY_STEP_MHZ", Math.Abs((long)khz - now) / 1000.0);
+        TuningValues.DeviceRange(khz, p0.Editable ? p0.MinKhz : null, p0.Editable ? p0.MaxKhz : null, "P0 offset");
         return Trial(string.Create(CultureInfo.InvariantCulture, $"memory offset {now / 1000.0:+0.#;-0.#;0} → {khz / 1000.0:+0.#;-0.#;0} MHz"),
             reason, new() { ["memory_khz"] = khz });
     });
 
     [McpServerTool(Name = "set_core_offset", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Policy: the defaults below are conservative; approved device/override bounds in card_settings take precedence for explicit tuning. " +
         "Set the core's P0 clock offset as a new trial: MHz added to every point of the V/F curve at once (stock curve + N), " +
         "beside the point offsets adjust_curve moves. The two spend one firmware offset budget, and a P0 write zeroes the " +
         "curve's point offsets, so the curve on the card is written again right after it in the same trial. At most 15 MHz " +
@@ -155,18 +153,15 @@ public sealed partial class TuningTools
         "keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
     public string SetCoreOffset(
         [Description("The core P0 offset to try, MHz (absolute, not a delta).")] double mhz,
-        [Description("Why this step.")] string? reason = null) => Guard(() =>
+        [Description("Why this step.")] string? reason = null) => PolicyGuard(() =>
     {
         var p0 = card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Core) ?? throw new InvalidOperationException("the core offset is unreadable");
-        int khz = (int)Math.Round(mhz * 1000), now = p0.DeltaKhz;
+        int khz = TuningValues.Khz(mhz), now = p0.DeltaKhz;
         if (khz == now) throw new ArgumentException($"the core offset is {now / 1000.0} MHz already: nothing to try");
-        if (Math.Abs(khz - now) > StepMhz * 1000)
-            throw new ArgumentException($"a step is at most {StepMhz} MHz (CLOCKTAIL_MCP_STEP_MHZ); it is {now / 1000.0} MHz now");
-        if (khz < p0.MinKhz || khz > p0.MaxKhz)
-            throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000.0}..{p0.MaxKhz / 1000.0} MHz");
+        Limits.Ceiling("STEP_MHZ", Math.Abs((long)khz - now) / 1000.0);
+        TuningValues.DeviceRange(khz, p0.Editable ? p0.MinKhz : null, p0.Editable ? p0.MaxKhz : null, "P0 offset");
         int daily = int.TryParse(DailyWrite(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Core)), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var d) ? d : 0;
-        if (khz > daily + MaxAboveDailyMhz * 1000)
-            throw new ArgumentException($"at most {MaxAboveDailyMhz} MHz above the daily profile's {daily / 1000.0:+0.#;-0.#;0} MHz (CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ)");
+        Limits.Ceiling("MAX_ABOVE_DAILY_MHZ", ((long)khz - daily) / 1000.0);
         return Trial(string.Create(CultureInfo.InvariantCulture, $"core offset {now / 1000.0:+0.#;-0.#;0} → {khz / 1000.0:+0.#;-0.#;0} MHz"),
             reason, new() { ["writes"] = new[] { TrialWrite(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Core), khz) } });
     });
@@ -176,6 +171,7 @@ public sealed partial class TuningTools
         new { kind, key, value = Convert.ToString(value, CultureInfo.InvariantCulture) };
 
     [McpServerTool(Name = "adjust_xbar", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Policy: the defaults below are conservative; approved device/override bounds in card_settings take precedence for explicit tuning. " +
         "Move XBAR's clock offset and/or its voltage demand (on MSVDD) as a new trial. XBAR is the crossbar between the GPCs, " +
         "L2 and memory; under load it runs between about 0.9 x the core clock (set_clock_ratio moves that ratio) and the clock " +
         "MSVDD's reliability limit allows (MSVDD's REL, which only set_voltage_boost raises since driver 621.01: +5 mV per 25 %). " +
@@ -185,35 +181,38 @@ public sealed partial class TuningTools
         "over stock). On the reference card (MSVDD REL 0): +250 made Blender 6.3 % " +
         "faster than stock, +300 with +20 mV of demand 6-7 %. The cliff: above +250 with no demand, memory-bound work lets " +
         "MSVDD fall to its 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand keeps " +
-        "it off up to +300, so above +250 the demand must be +20 mV or more, and above +300 +50 mV (at +400 the memory phase " +
-        "still dropped to ~1830-1940 MHz with +20/+30 mV; raise the demand first). At most 50 MHz and 10 mV per call; " +
+        "it off up to +300. Conservative policy therefore requires +20 mV above +250 MHz and +50 mV above +300 MHz. " +
+        "Approved device mode reports these reference-card observations as an advisory and never adds demand automatically. " +
+        "At most 50 MHz and 10 mV per call under conservative defaults; " +
         "offset within the driver's range (±1000 MHz on a 5090), demand -25..+50 mV. Past +400 is unmeasured: an overclocker " +
         "saw grey-screen artefacts at +450 with no voltage added. If anything is unstable with XBAR raised, step it down 50 " +
         "MHz before touching the curve. keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
     public string AdjustXbar(
         [Description("MHz to add to XBAR's clock offset (negative lowers); default 0.")] double offsetDeltaMhz = 0,
         [Description("mV to add to XBAR's voltage demand (negative lowers); default 0.")] double vdemandDeltaMv = 0,
-        [Description("Why this step (what you saw, what you expect).")] string? reason = null) => Guard(() =>
+        [Description("Why this step (what you saw, what you expect).")] string? reason = null) => PolicyGuard(() =>
     {
         if (offsetDeltaMhz == 0 && vdemandDeltaMv == 0) throw new ArgumentException("both deltas are 0: nothing to try");
-        if (Math.Abs(offsetDeltaMhz) > XbarStepMhz) throw new ArgumentException($"an offset step is at most {XbarStepMhz} MHz (CLOCKTAIL_MCP_XBAR_STEP_MHZ)");
+        Limits.Ceiling("XBAR_STEP_MHZ", Math.Abs(offsetDeltaMhz));
         if (Math.Abs(vdemandDeltaMv) > VdemandStepMv) throw new ArgumentException($"a demand step is at most {VdemandStepMv} mV (CLOCKTAIL_MCP_VDEMAND_STEP_MV)");
         var (offNow, demandNow) = SettingsTools.Domain(card, ClockDomainId.Xbar);
-        int off = offNow + (int)Math.Round(offsetDeltaMhz * 1000), demand = demandNow + (int)Math.Round(vdemandDeltaMv * 1000);
+        int off = checked(offNow + TuningValues.Khz(offsetDeltaMhz)), demand = checked(demandNow + TuningValues.Khz(vdemandDeltaMv));
         var (min, max) = OffsetRange(ClockDomainId.Xbar);
-        max = Math.Min(max, MaxXbarMhz);
-        if (off > max * 1000 || off < min * 1000)
-            throw new ArgumentException($"the XBAR offset stays within {min}..+{max} MHz (it would be {off / 1000.0})");
+        TuningValues.DeviceRange(off / 1000.0, min, max, "XBAR offset");
+        Limits.Ceiling("MAX_XBAR_MHZ", off / 1000.0);
         if (demand > MaxVdemandMv * 1000 || demand < MinVdemandMv * 1000)
             throw new ArgumentException($"the voltage demand stays within {MinVdemandMv}..+{MaxVdemandMv} mV (it would be {demand / 1000.0})");
-        if (XbarDemandNeededMv(off / 1000.0) is { } need && demand < need * 1000)
-            throw new ArgumentException($"XBAR at {off / 1000.0:+0.#} MHz needs at least +{need} mV of voltage demand (above +{XbarCliffMhz}: +{XbarCliffDemandMv}; " +
-                $"above +{XbarHighMhz}: +{XbarHighDemandMv}): without it memory-bound work drops MSVDD to its floor and pins the core near 1610 MHz. Raise the demand first");
+        var advisory = XbarDemandNeededMv(off / 1000.0) is { } need && demand < need * 1000
+            ? new { code = "reference_xbar_demand", source = "reference RTX 5090 observations", suggested_mv = need,
+                actual_mv = demand / 1000.0, message = "This offset needed more voltage demand in reference-card tests; other boards may differ. No extra demand was applied." } : null;
+        if (advisory != null && !Limits.Device)
+            throw new TuningPolicyException(Limits.Requested == "device" ? "consent_required" : "policy_limit",
+                "Conservative policy requires more XBAR demand from reference-card observations. Read card_settings; call set_tuning_policy device for mandatory consent to use an advisory instead.");
         var items = new Dictionary<string, object?>();
         var parts = new List<string>();
         if (off != offNow) { items["xbar_khz"] = off; parts.Add(string.Create(CultureInfo.InvariantCulture, $"XBAR offset {offNow / 1000.0:+0.#;-0.#;0} → {off / 1000.0:+0.#;-0.#;0} MHz")); }
         if (demand != demandNow) { items["xbar_vdemand_uv"] = demand; parts.Add(string.Create(CultureInfo.InvariantCulture, $"XBAR voltage demand {demandNow / 1000.0:+0.#;-0.#;0} → {demand / 1000.0:+0.#;-0.#;0} mV")); }
-        return Trial(string.Join(", ", parts), reason, items);
+        return Merge(Trial(string.Join(", ", parts), reason, items), new { advisories = advisory == null ? Array.Empty<object>() : new object[] { advisory } });
     });
 
     [McpServerTool(Name = "adjust_clock_domain", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
@@ -525,7 +524,7 @@ public sealed partial class TuningTools
             ["keep_curve"] = true, ["context"] = context,
         };
         foreach (var (k, v) in items) args[k] = v;
-        var r = card.Broker(BrokerRequest.OpExperiment, "try", JsonSerializer.Serialize(args));
+        var r = PolicyTrial(JsonSerializer.Serialize(args));
         if (!r.Ok) return Reply(r);
         bool? intact = ReadAfter(out var unread)?.Curve.Offsets().SequenceEqual(before);
         return Out(new

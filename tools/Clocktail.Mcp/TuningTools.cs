@@ -17,17 +17,13 @@ namespace Clocktail.Mcp;
 /// is recorded as the trial's and puts the daily profile back unchanged.
 /// </summary>
 [McpServerToolType]
-public sealed partial class TuningTools(Card card, Residency residency, LiveWatch live)
+public sealed partial class TuningTools(Card card, Residency residency, LiveWatch live, TuningPolicy tuningPolicy)
 {
-    /// <summary>The largest change one adjust_curve call may make to a point (CLOCKTAIL_MCP_STEP_MHZ).</summary>
-    public static readonly int StepMhz = Env("CLOCKTAIL_MCP_STEP_MHZ", 15);
-    /// <summary>How far above the daily profile any point may go (CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ). The 2026-10-18
-    /// positive control hung at +105 on 900-1000 mV under 598 W; below 860 mV the daily curve is barely tuned (stock
-    /// under 800 mV), so the cap leaves room there (the user, 2026-10-19).</summary>
-    public static readonly int MaxAboveDailyMhz = Env("CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ", 200);
-    /// <summary>The highest wall set_power_limit may set (CLOCKTAIL_MCP_MAX_POWER_W): the daily profile's 600 W.</summary>
+    // Explicit tuning uses the injected TuningPolicySettings snapshot. These legacy bounds are retained solely
+    // for F8 and persistent daily-power operations; policy approval must never broaden them.
+    /// <summary>Legacy F8/daily maximum (CLOCKTAIL_MCP_MAX_POWER_W).</summary>
     public static readonly int MaxPowerW = Env("CLOCKTAIL_MCP_MAX_POWER_W", 600);
-    /// <summary>The lowest wall set_power_limit may set (CLOCKTAIL_MCP_MIN_POWER_W): the driver refuses anything under 400 W on this card.</summary>
+    /// <summary>Legacy F8/daily minimum (CLOCKTAIL_MCP_MIN_POWER_W).</summary>
     public static readonly int MinPowerW = Env("CLOCKTAIL_MCP_MIN_POWER_W", 400);
     /// <summary>The lowest NVVDD / MSVDD current limit set_current_limit may set (CLOCKTAIL_MCP_MIN_NVVDD_A /
     /// CLOCKTAIL_MCP_MIN_MSVDD_A); the driver's own range starts at 1 mA, so this floor is the tool's.</summary>
@@ -43,10 +39,6 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// <summary>The default window around the operating point: further below than above, because under a wall a raised
     /// curve moves the operating point down (the card runs the same clock a point lower).</summary>
     public const int WindowBelowMv = 20, WindowAboveMv = 10;
-    /// <summary>The lowest voltage adjust_curve touches (CLOCKTAIL_MCP_MIN_MV): points under it keep the daily profile's
-    /// offset. The user, 2026-10-19: below 850 mV the card is as good as idle, so tuning starts there; and a window that
-    /// stops at the floor keeps a walled card from sliding under it, so the floor point is tested at its own voltage.</summary>
-    public static readonly int MinMv = Env("CLOCKTAIL_MCP_MIN_MV", 850);
     /// <summary>The operating point is the median NVVDD under load over this long: a game's voltage moves with the scene.</summary>
     public static readonly TimeSpan OperatingSpan = TimeSpan.FromSeconds(3);
     /// <summary>adjust_curve on an idle card: the last load within this long (a stress run that just ended), its last 10 s.</summary>
@@ -109,6 +101,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             },
             point,
             daily = dailyNote,
+            tuning_policy = tuningPolicy.Describe(ReadPolicyScope(card)),
             session = session.Ok ? session.Result?.GetProperty("experiment") : null,
             broker = session.Error,
         });
@@ -148,6 +141,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         [Description("With unattended: the crashes allowed before trials stop, 1..10 (default 2).")] int maxCrashes = 2)
     {
         if (maxCrashes is < 1 or > 10) return Out(new { success = false, error = "maxCrashes is 1..10" });
+        tuningPolicy.Revoke("session begin or replacement requested");
         var r = card.Broker(BrokerRequest.OpExperiment, "begin", JsonSerializer.Serialize(new { game, note, unattended, max_crashes = maxCrashes }));
         if (!r.Ok) return Reply(r);
         var warnings = new List<string>();
@@ -160,10 +154,11 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         }
         catch (Exception e) when (e is InvalidOperationException or InvalidDataException or IOException or Clocktail.Hw.NvApiException) { }
         if (OtherTools.Running() is { Count: > 0 } running) warnings.Add(OtherTools.Advice(running));
-        return warnings.Count == 0 ? Reply(r) : Merge(Reply(r), new { warnings });
+        return Merge(Reply(r), new { warnings, tuning_policy = PolicyReport(card, tuningPolicy) });
     }
 
     [McpServerTool(Name = "adjust_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Policy: the defaults below are conservative; approved device/override bounds in card_settings take precedence for explicit tuning. " +
         "Raise or lower the Core V/F points around where the card runs now, as a new trial of the session. Each call moves " +
         "each point by at most the step (default 15 MHz) and never above the daily profile by more than the cap (default " +
         "200 MHz); the firmware's own limits are held by the broker. The operating point is the median NVVDD under load " +
@@ -178,32 +173,36 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     public string AdjustCurve(
         [Description("MHz to add to each point in the window (negative lowers).")] double deltaMhz,
         [Description("Lowest voltage of the window, mV; omit for the operating point minus 20 mV.")] double? fromMv = null,
-        [Description("Highest voltage of the window, mV; omit for the operating point plus 10 mV.")] double? toMv = null) => Guard(() =>
+        [Description("Highest voltage of the window, mV; omit for the operating point plus 10 mV.")] double? toMv = null) => PolicyGuard(() =>
     {
         if (deltaMhz == 0) throw new ArgumentException("deltaMhz is 0: nothing to try");
-        if (Math.Abs(deltaMhz) > StepMhz) throw new ArgumentException($"{deltaMhz} MHz is more than one step ({StepMhz} MHz); split it into several trials");
+        Limits.Ceiling("STEP_MHZ", Math.Abs(deltaMhz));
         var look = card.Read();
         var daily = DailyOffsets(out _);
         // Where the card ran under load: the last 3 s, else the last load within 2 minutes (a stress run that just ended). An
         // idle card's NVVDD (~800-835 mV) is not an operating point: the window would sit under the 850 mV floor.
         uint? at = residency.MedianUv(OperatingSpan) ?? residency.LastLoadMedianUv(LastLoadWithin, LastLoadSpan);
         const string Idle = "the card has not been under load in the last 2 minutes, so there is no operating point: give fromMv and toMv (e.g. around the last stress run's p50 nvvdd_mv, or the crash voltage in data_points)";
-        uint lo = fromMv is { } f ? (uint)(f * 1000) : (at ?? throw new InvalidOperationException(Idle)) - WindowBelowMv * 1000;
-        uint hi = toMv is { } h ? (uint)(h * 1000) : (at ?? throw new InvalidOperationException(Idle)) + WindowAboveMv * 1000;
+        uint lo = fromMv is { } f ? TuningValues.Uv(f) : (at ?? throw new InvalidOperationException(Idle)) - WindowBelowMv * 1000;
+        uint hi = toMv is { } h ? TuningValues.Uv(h) : (at ?? throw new InvalidOperationException(Idle)) + WindowAboveMv * 1000;
         var pts = look.Curve.Points;
-        if (hi < MinMv * 1000) throw new ArgumentException($"the window ({lo / 1000.0}-{hi / 1000.0} mV) is all under the {MinMv} mV floor (CLOCKTAIL_MCP_MIN_MV): points there keep the daily offsets");
-        lo = Math.Max(lo, (uint)MinMv * 1000);
+        int floorMv = Limits.Bound("MIN_MV") ?? (fromMv == null ? 850 : 0);
+        if (hi < floorMv * 1000L) Limits.Floor("MIN_MV", hi / 1000.0);
+        // Omitting the lower voltage keeps the original operating window, even in device mode.
+        if (fromMv != null && lo < floorMv * 1000L
+            && (Limits.Requested == "device" || Limits.Settings.Relaxations.ContainsKey("MIN_MV")))
+            Limits.Floor("MIN_MV", lo / 1000.0);
+        lo = Math.Max(lo, checked((uint)floorMv * 1000));
+        if (lo > hi) throw new ArgumentException("The curve voltage window is empty or inverted");
         var window = pts.Where(p => p.VoltageUv >= lo && p.VoltageUv <= hi).ToList();
         if (window.Count == 0) throw new ArgumentException($"no curve point between {lo / 1000.0} and {hi / 1000.0} mV");
 
-        int delta = (int)Math.Round(deltaMhz * 1000);
+        int delta = TuningValues.Khz(deltaMhz);
         var next = look.Curve.Offsets();
         foreach (var p in window)
         {
-            next[p.Index] += delta;
-            int above = next[p.Index] - daily.ElementAtOrDefault(p.Index);
-            if (above > MaxAboveDailyMhz * 1000)
-                throw new ArgumentException($"point {p.Index} ({p.VoltageUv / 1000.0} mV) would be {above / 1000.0} MHz above the daily profile; the cap is {MaxAboveDailyMhz} MHz");
+            next[p.Index] = checked(next[p.Index] + delta);
+            Limits.Ceiling("MAX_ABOVE_DAILY_MHZ", ((long)next[p.Index] - daily.ElementAtOrDefault(p.Index)) / 1000.0);
         }
         // A point raised past the one above it would cap the whole curve there: lift each point above the window that
         // would be overtaken just enough to match (onto the 7.5 MHz grid). That runs a clock already being tested at a
@@ -213,10 +212,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         {
             long need = (long)pts[k - 1].BaseKhz + next[k - 1] - pts[k].BaseKhz;
             if (need <= next[k]) break;
-            next[k] = (int)(Math.Ceiling(need / 7500.0) * 7500);
-            int above = next[k] - daily.ElementAtOrDefault(k);
-            if (above > MaxAboveDailyMhz * 1000)
-                throw new ArgumentException($"point {k} ({pts[k].VoltageUv / 1000.0} mV) would have to be lifted to {above / 1000.0} MHz above the daily profile to stay under point {k - 1}; the cap is {MaxAboveDailyMhz} MHz");
+            next[k] = checked((int)(Math.Ceiling(need / 7500.0) * 7500));
+            Limits.Ceiling("MAX_ABOVE_DAILY_MHZ", ((long)next[k] - daily.ElementAtOrDefault(k)) / 1000.0);
             lifted = k;
         }
         if (lifted > 0) top = lifted;
@@ -230,7 +227,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         foreach (var p in pts.Where(p => p.Index >= window[0].Index && p.Index <= top))
             context.Add(string.Create(CultureInfo.InvariantCulture,
                 $"point {p.Index} ({p.VoltageUv / 1000.0} mV): offset {p.OffsetKhz / 1000.0} → {next[p.Index] / 1000.0} MHz (daily {daily.ElementAtOrDefault(p.Index) / 1000.0}, above it by {(next[p.Index] - daily.ElementAtOrDefault(p.Index)) / 1000.0}), stock {p.BaseKhz / 1000.0} MHz, effective {p.EffectiveKhz / 1000.0} → about {(p.EffectiveKhz + next[p.Index] - p.OffsetKhz) / 1000.0} MHz"));
-        var r = card.Broker(BrokerRequest.OpExperiment, "try",
+        CheckCurveDevice(look, next);
+        var r = PolicyTrial(
             JsonSerializer.Serialize(new { curve = VfOffsets.Encode(next), change, at_uv = at, at_mhz = t?.GraphicsClockMhz, context }));
         if (!r.Ok) return Reply(r);
         var after = ReadAfter(out var unread);
@@ -262,12 +260,13 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             long bare = (long)p.EffectiveKhz - p.OffsetKhz;
             if (p.VoltageUv < fromUv && bare + next[p.Index] <= targetKhz) continue;
             long want = (long)(Math.Floor((targetKhz - bare) / 7500.0) * 7500);
-            if (want < next[p.Index]) next[p.Index] = (int)want;
+            if (want < next[p.Index]) next[p.Index] = checked((int)want);
         }
         return next;
     }
 
     [McpServerTool(Name = "flatten_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Policy: the defaults below are conservative; approved device/override bounds in card_settings take precedence for explicit tuning. " +
         "Make the curve flat from a voltage up, as a new trial: every point from fromMv up runs at most the clock the point at " +
         "fromMv runs now (less marginMhz), or at most ceilingMhz. Only ever lowers, so it cannot push the card past what " +
         "it held; it is method step 4's 'flat where the chip stops scaling' in one call instead of many 15 MHz steps. Points " +
@@ -277,19 +276,19 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         [Description("Voltage the flat top starts at, mV.")] double fromMv,
         [Description("MHz under that point's clock to flatten to (default 0).")] double marginMhz = 0,
         [Description("Or flatten to this clock, MHz, instead of the point's.")] double? ceilingMhz = null,
-        [Description("Why (where the chip stopped scaling).")] string? reason = null) => Guard(() =>
+        [Description("Why (where the chip stopped scaling).")] string? reason = null) => PolicyGuard(() =>
     {
-        if (fromMv < MinMv) throw new ArgumentException($"fromMv is at least {MinMv} mV (CLOCKTAIL_MCP_MIN_MV)");
+        Limits.Floor("MIN_MV", fromMv);
         if (marginMhz < 0) throw new ArgumentException("marginMhz lowers the top: give it as a positive number");
         var look = card.Read();
         if (look.Telemetry?.GpuUtilPercent is { } u && u > FlattenMaxUtilPct)
             throw new InvalidOperationException($"the GPU is {u} % busy: a curve written under load began 2 of 3 hangs on the reference card. Flatten at idle");
         var pts = look.Curve.Points;
-        uint fromUv = (uint)Math.Round(fromMv * 1000);
+        uint fromUv = TuningValues.Uv(fromMv);
         var at = pts.Where(p => p.VoltageUv >= fromUv).MinBy(p => p.VoltageUv) ?? throw new ArgumentException($"no curve point at or above {fromMv} mV");
-        long target = ceilingMhz is { } c ? (long)Math.Round(c * 1000) : at.EffectiveKhz - (long)Math.Round(marginMhz * 1000);
+        long target = ceilingMhz is { } c ? TuningValues.Khz(c) : (long)at.EffectiveKhz - TuningValues.Khz(marginMhz);
         var before = look.Curve.Offsets();
-        var next = FlattenPlan(pts, before, fromUv, target, (uint)MinMv * 1000);
+        var next = FlattenPlan(pts, before, fromUv, target, checked((uint)(Limits.Bound("MIN_MV") ?? 0) * 1000));
         var moved = pts.Where(p => p.Index < next.Length && next[p.Index] != before[p.Index]).ToList();
         if (moved.Count == 0) throw new ArgumentException(string.Create(CultureInfo.InvariantCulture, $"the curve is already at or under {target / 1000.0} MHz from {fromMv} mV: nothing to lower"));
         string change = string.Create(CultureInfo.InvariantCulture,
@@ -299,7 +298,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         foreach (var p in moved)
             context.Add(string.Create(CultureInfo.InvariantCulture,
                 $"point {p.Index} ({p.VoltageUv / 1000.0} mV): offset {p.OffsetKhz / 1000.0} → {next[p.Index] / 1000.0} MHz, effective {p.EffectiveKhz / 1000.0} → about {(p.EffectiveKhz + next[p.Index] - p.OffsetKhz) / 1000.0} MHz"));
-        var r = card.Broker(BrokerRequest.OpExperiment, "try",
+        CheckCurveDevice(look, next);
+        var r = PolicyTrial(
             JsonSerializer.Serialize(new { curve = VfOffsets.Encode(next), change, at_uv = look.NvvddUv, at_mhz = look.Telemetry?.GraphicsClockMhz, context }));
         if (!r.Ok) return Reply(r);
         var after = ReadAfter(out var unread);
@@ -312,15 +312,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         });
     });
 
-    /// <summary>shift_curve: the largest shift per call (CLOCKTAIL_MCP_SHIFT_STEP_MV). A 250 mV shift at 600 W bugchecked
-    /// the reference card (0x133, re/robustness.md).</summary>
-    public static readonly int ShiftStepMv = Env("CLOCKTAIL_MCP_SHIFT_STEP_MV", 25);
-
     /// <summary>The first point a new curve would put more than the cap above the daily profile, or null.</summary>
     public static int? OverDaily(int[] next, int[] daily, int capMhz) =>
-        Enumerable.Range(0, next.Length).Cast<int?>().FirstOrDefault(i => next[i!.Value] - daily.ElementAtOrDefault(i.Value) > capMhz * 1000);
+        Enumerable.Range(0, next.Length).Cast<int?>().FirstOrDefault(i => (long)next[i!.Value] - daily.ElementAtOrDefault(i.Value) > (long)capMhz * 1000);
 
     [McpServerTool(Name = "set_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Policy: the defaults below are conservative; approved device/override bounds in card_settings take precedence for explicit tuning. " +
         "Write a whole V/F curve as a new trial: every editable point's offset in kHz, in card_settings' encoding (runs as " +
         "offset*count, e.g. '0*60,30000*67'; '0*127' is the stock curve), as the CLI's --vf-offsets does. For loading a " +
         "curve worked out elsewhere, or putting back one a data point recorded; a band is adjust_curve's. No point more than " +
@@ -329,7 +326,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "keep_as_daily keeps it.")]
     public string SetCurve(
         [Description("Every editable point's offset, kHz, as runs offset*count.")] string curve,
-        [Description("Why this curve (where it came from).")] string? reason = null) => Guard(() =>
+        [Description("Why this curve (where it came from).")] string? reason = null) => PolicyGuard(() =>
     {
         int[] next;
         try { next = VfOffsets.Decode(curve); } catch (FormatException e) { throw new ArgumentException($"'{curve}' is not a curve: {e.Message}"); }
@@ -339,6 +336,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     });
 
     [McpServerTool(Name = "shift_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Policy: the defaults below are conservative; approved device/override bounds in card_settings take precedence for explicit tuning. " +
         "Move the curve on the card left by mv as a new trial: from the knee up each point runs the clock the current curve " +
         "runs mv above it, never past what it runs at NVVDD's MAX; below the knee nothing moves. The same clocks at less " +
         "voltage, so on a power-limited load more clock under the same wall. This is not the CLI's --vf-undervolt, which " +
@@ -348,13 +346,15 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "above the daily profile's. Refused while the GPU is busy: write it at idle. back_to_daily undoes it; keep_as_daily keeps it.")]
     public string ShiftCurve(
         [Description("mV to move the curve left by.")] double mv,
-        [Description("Why (what the last pass showed).")] string? reason = null) => Guard(() =>
+        [Description("Why (what the last pass showed).")] string? reason = null) => PolicyGuard(() =>
     {
         if (mv <= 0) throw new ArgumentException("mv moves the curve left: give it as a positive number (adjust_curve lowers)");
-        if (mv > ShiftStepMv) throw new ArgumentException($"a shift is at most {ShiftStepMv} mV per call (CLOCKTAIL_MCP_SHIFT_STEP_MV); split it into several trials");
+        Limits.Ceiling("SHIFT_STEP_MV", mv);
         var look = card.Read();
+        if (look.NvvddMaxUv is not > 0)
+            throw new TuningPolicyException("device_limit", "NVVDD MAX is unreadable: shift_curve cannot cap the shifted curve. Read diagnostic_report before retrying.");
         var limits = VfLimits.From(card.WithDriver(Clocktail.Domain.Clocks.Pstates20Reader.Read));
-        var shape = VfShapes.ShiftCurrent(look.Curve, limits, (int)Math.Round(mv * 1000), look.NvvddMaxUv);
+        var shape = VfShapes.ShiftCurrent(look.Curve, limits, checked((int)TuningValues.Uv(mv)), look.NvvddMaxUv);
         if (shape.AppliedUv == 0) throw new ArgumentException($"{mv} mV is less than one regulator step ({VfShapes.VidStepUv / 1000.0} mV): it moves no point");
         return CurveTrial(look, shape.Offsets, string.Create(CultureInfo.InvariantCulture, $"curve shifted left {shape.AppliedUv / 1000.0} mV from {shape.FloorUv / 1000.0} mV"), reason);
     });
@@ -365,9 +365,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         if (look.Telemetry?.GpuUtilPercent is { } u && u > FlattenMaxUtilPct)
             throw new InvalidOperationException($"the GPU is {u} % busy: a curve written under load began 2 of 3 hangs on the reference card. Write it at idle");
         var daily = DailyOffsets(out _);
-        if (OverDaily(next, daily, MaxAboveDailyMhz) is { } bad)
-            throw new ArgumentException(string.Create(CultureInfo.InvariantCulture,
-                $"point {bad} ({look.Curve.Points[bad].VoltageUv / 1000.0} mV) would be {(next[bad] - daily.ElementAtOrDefault(bad)) / 1000.0} MHz above the daily profile; the cap is {MaxAboveDailyMhz} MHz (CLOCKTAIL_MCP_MAX_ABOVE_DAILY_MHZ)"));
+        CheckDaily(next, daily);
         var before = look.Curve.Offsets();
         var moved = look.Curve.Points.Where(p => p.Index < next.Length && next[p.Index] != before[p.Index]).ToList();
         if (moved.Count == 0) throw new ArgumentException("that is the curve on the card already: nothing to try");
@@ -377,7 +375,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             context.Add(string.Create(CultureInfo.InvariantCulture,
                 $"point {p.Index} ({p.VoltageUv / 1000.0} mV): offset {p.OffsetKhz / 1000.0} → {next[p.Index] / 1000.0} MHz, effective {p.EffectiveKhz / 1000.0} → about {(p.EffectiveKhz + next[p.Index] - p.OffsetKhz) / 1000.0} MHz"));
         change += $": points {moved[0].Index}-{moved[^1].Index}";
-        var r = card.Broker(BrokerRequest.OpExperiment, "try",
+        CheckCurveDevice(look, next);
+        var r = PolicyTrial(
             JsonSerializer.Serialize(new { curve = VfOffsets.Encode(next), change, at_uv = look.NvvddUv, at_mhz = look.Telemetry?.GraphicsClockMhz, context }));
         if (!r.Ok) return Reply(r);
         var after = ReadAfter(out var unread);
@@ -390,6 +389,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     [McpServerTool(Name = "set_power_limit", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Policy: the defaults below are conservative; approved device/override bounds in card_settings take precedence for explicit tuning. " +
         "Set the board power limit for the session, as a new trial with the curve left as it is. A lower wall makes the card " +
         "run lower down the curve, so adjust_curve can then sample points it never reaches at the full wall (and find where " +
         "the curve's slope bends). Later adjust_curve trials run under this wall until back_to_daily, end_session or a crash " +
@@ -398,18 +398,20 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "than 400 W reaches, cap the frame rate in the game instead: a lighter load runs lower on the curve.")]
     public string SetPowerLimit(
         [Description("The board power limit, W.")] double watts,
-        [Description("Why this wall (which part of the curve it is meant to reach).")] string? reason = null) => Guard(() =>
+        [Description("Why this wall (which part of the curve it is meant to reach).")] string? reason = null) => PolicyGuard(() =>
     {
-        if (watts > MaxPowerW) throw new ArgumentException($"{watts} W is above the cap ({MaxPowerW} W)");
-        if (watts < MinPowerW) throw new ArgumentException($"{watts} W is below {MinPowerW} W (CLOCKTAIL_MCP_MIN_POWER_W)");
+        Limits.Ceiling("MAX_POWER_W", watts);
+        Limits.Floor("MIN_POWER_W", watts);
+        var board = card.WithDriver(PowerRequestsReader.ReadBoard);
+        TuningValues.DeviceRange(watts * 1000, board.MinMw, board.MaxMw, "ordinary trial power");
+        uint mw = checked((uint)TuningValues.Khz(watts));
         var look = card.Read();
         var t = look.Telemetry;
-        uint mw = (uint)Math.Round(watts * 1000);
         string change = string.Create(CultureInfo.InvariantCulture, $"power limit {t?.PowerEnforcedWatts:0.#} → {mw / 1000.0} W");
         var context = new List<string> { Readings(look) };
         if (reason != null) context.Add($"Purpose: {reason}");
         var before = look.Curve.Offsets();
-        var r = card.Broker(BrokerRequest.OpExperiment, "try", JsonSerializer.Serialize(new
+        var r = PolicyTrial(JsonSerializer.Serialize(new
         {
             curve = VfOffsets.Encode(before), change, at_uv = look.NvvddUv, at_mhz = t?.GraphicsClockMhz,
             power_mw = mw, keep_curve = true, context,
@@ -762,6 +764,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "this for the crashes it cannot see. Afterwards, read data_points before the next step.")]
     public string MarkCrash([Description("What happened and where (scene, loading, alt-tab).")] string note)
     {
+        tuningPolicy.Revoke("trial crash reported");
         // The crash is recorded and the daily profile put back whatever the residency can say.
         string stays;
         try { stays = TrialStays(out var last) + last; }
@@ -769,7 +772,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         var r = card.Broker(BrokerRequest.OpExperiment, "crash", note + stays);
         var back = r.Result is { } res && res.TryGetProperty("back", out var b) && b.ValueKind == JsonValueKind.Object ? b : (JsonElement?)null;
         var point = r.Result is { } res2 && res2.TryGetProperty("point", out var p) ? p : (JsonElement?)null;
-        return Applied(r with { Result = back }, point);
+        return Merge(Applied(r with { Result = back }, point), new { tuning_policy = PolicyReport(card, tuningPolicy) });
     }
 
     [McpServerTool(Name = "back_to_daily", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
@@ -1006,11 +1009,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "End the session: the trial in force ends as survived and the daily profile goes back on (stock when none is kept).")]
     public string EndSession()
     {
+        tuningPolicy.Revoke("session end requested");
         var r = card.Broker(BrokerRequest.OpExperiment, "end");
         // "end" wraps the profile's answer (or a recovery's) in "back", beside the trial's data point.
         var back = r.Result is { } res && res.TryGetProperty("back", out var b) && b.ValueKind == JsonValueKind.Object ? b : (JsonElement?)null;
         var point = r.Result is { } res2 && res2.TryGetProperty("point", out var p) ? p : (JsonElement?)null;
-        return Applied(r with { Result = back }, point);
+        return Merge(Applied(r with { Result = back }, point), new { tuning_policy = PolicyReport(card, tuningPolicy) });
     }
 
     [McpServerTool(Name = "data_points", ReadOnly = true, OpenWorld = false), Description(
@@ -1346,10 +1350,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     private static string Guard(Func<string> tool)
     {
         try { return tool(); }
-        catch (Exception e) when (e is ArgumentException or InvalidOperationException or InvalidDataException or FormatException
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or InvalidDataException or FormatException or OverflowException
                                       or Clocktail.Hw.NvApiException or Clocktail.Hw.NvmlException or IOException or UnauthorizedAccessException)
         {
-            return Out(new { success = false, error = e.Message });
+            return Out(new { success = false, error = e.Message, code = (e as TuningPolicyException)?.Code });
         }
     }
 

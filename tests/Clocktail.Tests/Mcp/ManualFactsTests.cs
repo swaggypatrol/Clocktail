@@ -19,7 +19,7 @@ public class ManualFactsTests
     {
         string controls = ManualTools.Manual("controls");
         var trials = Tools.Where(t => !t.ReadOnly && t.Name is { } n && (n.StartsWith("set_") || n.StartsWith("adjust_") || n is "flatten_curve" or "shift_curve")
-                                      && n != "set_daily_power_limit").Select(t => t.Name!).ToList();
+                                      && n is not ("set_daily_power_limit" or "set_tuning_policy")).Select(t => t.Name!).ToList();
         Assert.Equal(17, trials.Count);
         foreach (var tool in trials)
             Assert.Contains($"| `{tool}` |", controls);

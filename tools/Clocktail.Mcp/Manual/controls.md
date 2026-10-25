@@ -1,10 +1,12 @@
 # Every control
 What each write tool changes on the card, how far one call goes, what it is for, what it interacts with, and how to combine them.
 
+Policy context: explicit step, daily allowance and curve-floor numbers below describe conservative defaults. Reference 5090 power and XBAR observations are examples. Approved explicit tuning follows card_settings effective bounds; see manual tuning-policy. Automatic tuners and other controls retain their existing policies.
+
 ## How every write works
 - Every change except the daily wall is a **trial** inside a session: `begin_session` first (a trial without one is refused). Each trial ends as stable (`mark_stable`), survived (replaced by the next one, or `back_to_daily`) or crash, and becomes a data point.
 - The service does the write, reads it back and records the value it found (the ownership journal), so `back_to_daily`, `end_session`, a crash and `stock` can always put back what Clocktail wrote. What `stock` clears of another tool's is not recorded anywhere.
-- Every tool moves a bounded step per call and refuses what passes NVIDIA's own limits for the card (1150 mV, the board's 400-600 W, the firmware's ranges). A refusal says why: explain the limit, never work around it.
+- Conservative policy uses bounded explicit steps. Device-derived limits always apply; reference-board numbers are examples. Approved device or configured-override bounds are reported by card_settings (see manual tuning-policy). A refusal says why: explain the limit.
 - `keep_as_daily` keeps what the trials left on the card, not just the last step; `preview_daily` shows exactly what it would keep. Walls, current limits, the F8 request, fixed fan duties and clock locks other than a cap are never kept. With `adopt=true` it also keeps what another tool left and Clocktail never wrote (the curve, the P0 and XBAR/SYS/Video offsets, the voltage demands, the boost).
 - `stock` gives back what Clocktail wrote, then writes NVIDIA's own value to every setting another tool left (no clock lock, every curve and clock offset and voltage demand 0, no boost, the board's default wall, fans on their curve) and keeps no record of the other tool's value. The rails, the firmware fan curve and the clock ratio have no known default and go back to what Clocktail found. The uninstall gives back only what Clocktail changed.
 - `keep_as_daily`, `load_preset`, `set_daily_power_limit`, `set_power_cap`, `delete_profile`, and `stock` when it would clear another tool's settings, ask the person themselves (a question in the agent where it offers one, else a Windows dialog; `CLOCKTAIL_CONFIRM=off` turns it off). Without a yes nothing changes.
@@ -57,6 +59,7 @@ MSVDD feeds the crossbar (XBAR), L2, SYS and Video; it runs at what the core ask
 ## What each tool changes, and what is kept
 | Tool | Changes | One call | Kept by keep_as_daily |
 |---|---|---|---|
+| `set_tuning_policy` | session permission for explicit tuning; no GPU changes | conservative / overrides / device | never: approval is session-only |
 | `adjust_curve` | the V/F curve in a voltage window | 15 MHz | yes |
 | `flatten_curve` | the curve flat from a voltage up (only lowers) | any, down | yes |
 | `set_curve` | the whole curve, every point's offset | 200 MHz over daily at most | yes |

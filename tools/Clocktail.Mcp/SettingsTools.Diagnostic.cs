@@ -22,6 +22,7 @@ public sealed partial class SettingsTools
         var sweep = Section(() => Reads(card.WithDriver(Diagnostics.GetSweep)));
         string json = Out(new
         {
+            tuning_policy = Section(() => TuningTools.PolicyReport(card, tuningPolicy)),
             report = "clocktail-diagnostic",
             get_only = true,
             note = "Clocktail changed nothing to make this. It holds the card's identity, the driver and how the driver answered each read; no user names, paths or files.",

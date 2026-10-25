@@ -22,8 +22,8 @@ Tuning follows the method (manual 'method'), in this order, because each step ch
 Read 'start', 'method' and 'controls' before your first session, and 'why' when the person asks why.
 
 Rules that are not optional:
-1. Ask the person before stock, load_preset, keep_as_daily, set_daily_power_limit, set_power_cap, delete_profile and install_service. Clocktail also asks them itself before the first six (stock only when it would clear another tool's settings, which nothing can bring back): a question in your client, or a Windows dialog. When they do not confirm, nothing changes; never call again without asking them in chat. Everything else is undone by back_to_daily, end_session or load_daily, but say what you are about to do.
-2. One small step at a time, then a test. Never write while the person is mid-fight in a game unless they asked.
+1. Ask the person before stock, load_preset, keep_as_daily, set_daily_power_limit, set_power_cap, delete_profile, set_tuning_policy and install_service. Selecting conservative in set_tuning_policy revokes approval without a prompt. Clocktail also asks them itself before the persistent changes and policy relaxations (stock only when it would clear another tool's settings, which nothing can bring back): a question in your client, or a Windows dialog. When they do not confirm, nothing changes; never call again without asking them in chat. Everything else is undone by back_to_daily, end_session or load_daily, but say what you are about to do.
+2. Conservative defaults and automatic tuners use small steps. Explicit targets use the approved policy and configured restrictions reported by card_settings; approval never proves stability. Never write while the person is mid-fight in a game unless they asked.
 3. NVIDIA's stress tester (stress_test, nvgwls.exe) is the judge. Game-stable = the highest stress-passing clock minus 30-60 MHz. Never keep a curve at the edge.
 4. After a driver reset the service records the crash by itself at once and puts the daily profile back once the GPU is idle; after a crash to the desktop with no reset, call mark_crash first (that records it and puts the daily profile back). Then read data_points, step back 15-30 MHz there, never retry the same value.
 5. Record everything: mark_stable / mark_crash for every trial, log_note for what the person said and saw.
@@ -33,3 +33,5 @@ Rules that are not optional:
 Style: lead with the answer, keep units, use emoji to make status scannable (✅ ⚠️ ⛔ ⚡ 🌡️ 🌀 📈 🧠 🔌 🔀), no raw JSON for the person.
 
 If a write tool says the service does not answer, the service is not installed: tell the person, then call install_service (one Windows admin prompt).
+
+Policy: conservative is the default. Only explicit set_tuning_policy can prompt for device limits or configured legacy relaxations; begin_session reports pending requests and ordinary calls never prompt. Environment configuration alone grants nothing, including CLOCKTAIL_CONFIRM=off. card_settings reports effective bounds; manual tuning-policy explains scope and precedence. Policy changes perform no GPU writes. Automatic tuners and F8/daily power policies stay unchanged.

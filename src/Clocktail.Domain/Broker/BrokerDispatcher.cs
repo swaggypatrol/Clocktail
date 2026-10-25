@@ -97,6 +97,16 @@ public sealed class BrokerDispatcher
     /// through <see cref="Dispatch"/> on the same thread, go straight through; taken before the write window, never inside it.
     /// </summary>
     private readonly object _operation = new();
+    private readonly string _policyLifetime = Guid.NewGuid().ToString("N");
+    private readonly Dictionary<string, long> _policyGenerations = new();
+
+    // Called under _operation, including the read-only policy-scope operation. Never saved as authorization.
+    private string? PolicyScope(IGpuTarget target)
+    {
+        var exp = Experiment.Load(Experiment.PathBeside(target.Journal.Path));
+        return exp?.SessionId is not { } id || target.Session.Faulted || Volatile.Read(ref _closed) ? null
+            : $"{_policyLifetime}:{target.Session.Generation}:{_policyGenerations.GetValueOrDefault(target.StableId)}:{id}";
+    }
 
     /// <summary>The measurement lease of the request in flight (<see cref="BrokerRequest.Lease"/>), for the judge: the
     /// holder's own writes, nested ones too, pass the lock it holds.</summary>
@@ -224,6 +234,17 @@ public sealed class BrokerDispatcher
             var target = _gpus.Resolve(req.GpuId);
             if (target == null)
                 return Fail(req.GpuId == null ? "no GPU is available" : $"no GPU with id '{req.GpuId}'", BrokerCode.NoGpu);
+
+            bool scopedTrial = req.Op == BrokerRequest.OpExperiment && req.Kind == BrokerRequest.ScopedTrial;
+            if (scopedTrial && string.IsNullOrEmpty(req.ExpectedTuningScope)
+                || req.ExpectedTuningScope != null && (!scopedTrial || req.ExpectedTuningScope != PolicyScope(target)))
+                return Fail("The approved tuning session or recovery generation changed; call set_tuning_policy again", "consent_required");
+
+            // Invalidate before the operation, even if recovery or session replacement fails.
+            if (req.Op == BrokerRequest.OpRecover
+                || req.Op == BrokerRequest.OpProfile && req.Kind is "crashed" or "after-reset"
+                || req.Op == BrokerRequest.OpExperiment && req.Kind is "begin" or "end" or "crash")
+                _policyGenerations[target.StableId] = _policyGenerations.GetValueOrDefault(target.StableId) + 1;
 
             // A recovery a client asks for on its own (the CLI's --recover, a write session given back after a failed step, a
             // 0.3.6 client's stock: "off", then a recovery) takes the card off any trial in force, so the trial leaves the
@@ -697,6 +718,12 @@ public sealed class BrokerDispatcher
         string path = Experiment.PathBeside(target.Journal.Path), data = Experiment.DataPathBeside(target.Journal.Path);
         switch (req.Kind)
         {
+            case "policy-scope":
+            {
+                var exp = Experiment.Load(path);
+                return Ok(new { success = true, gpu = target.StableId, session = exp?.SessionId,
+                    game = exp?.Game, generation = PolicyScope(target) });
+            }
             case "show":
                 return Ok(new { success = true, path, data, experiment = Experiment.Load(path), points = Experiment.ReadLast(data, 20) });
             case "begin":
@@ -731,7 +758,7 @@ public sealed class BrokerDispatcher
                 int? budget = unattended ? (int)(UInt(a, "max_crashes") ?? 2) : null;
                 lock (_experiment)
                 {
-                    var exp = new Experiment(game, Text(a, "note"), _host.Now, CrashBudget: budget);
+                    var exp = new Experiment(game, Text(a, "note"), _host.Now, CrashBudget: budget) { SessionId = Guid.NewGuid().ToString("N") };
                     exp.Save(path);
                     Log(target, $"Session started · {game}", [exp.Note,
                         .. closed != null ? (string?[])[$"Last trial: {closed.Change}, ran {closed.Minutes} min", "Back to the daily profile:", .. writes] : []]);
@@ -746,6 +773,7 @@ public sealed class BrokerDispatcher
                 Log(target, exp != null ? $"Note · {exp.Game}" : "Note", [req.Value]);
                 return Ok(new { success = true });
             }
+            case BrokerRequest.ScopedTrial:
             case "try":
             {
                 var a = Args(req.Value);
@@ -960,7 +988,7 @@ public sealed class BrokerDispatcher
                     r.Result, r.Code);
             }
             default:
-                return Fail($"experiment needs show, begin, try, stable, crash, note, alive, quiet, release, fans-back or end, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"experiment needs show, policy-scope, begin, try, try-scoped, stable, crash, note, alive, quiet, release, fans-back or end, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 

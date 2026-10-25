@@ -17,8 +17,8 @@ public static class LiteMode
 
     public static readonly IReadOnlySet<string> Tools = new HashSet<string>(StringComparer.Ordinal)
     {
-        "card_report", "limiter", "curve_around", "manual",
-        "begin_session", "adjust_curve", "flatten_curve", "set_memory_offset", "stress_test",
+        "card_report", "card_settings", "limiter", "curve_around", "manual",
+        "set_tuning_policy", "begin_session", "adjust_curve", "flatten_curve", "set_memory_offset", "stress_test",
         "mark_stable", "mark_crash", "back_to_daily", "end_session", "data_points",
         "stock", "load_daily", "preview_daily", "keep_as_daily", "set_daily_power_limit",
         "list_presets", "load_preset", "install_service",

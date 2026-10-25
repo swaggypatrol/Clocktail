@@ -48,7 +48,9 @@ public sealed record BrokerRequest(
     /// the crash is the trial's that was on the card then, even one taken off the record since. Null when not known
     /// (0.3.8).</summary>
     DateTimeOffset? HungAt = null,
-    DateTimeOffset? AnsweredAt = null)
+    DateTimeOffset? AnsweredAt = null,
+    /// <summary>Optional MCP lifecycle fingerprint, checked atomically before an explicit trial. Not consent.</summary>
+    string? ExpectedTuningScope = null)
 {
     public const string OpPing = "ping";
     public const string OpOwnership = "ownership";
@@ -107,6 +109,9 @@ public sealed record BrokerRequest(
     /// and "after-reset" puts the daily profile back unchanged once the GPU is idle. Not itself a write: "try" and "end" write through the ordinary ops.
     /// </summary>
     public const string OpExperiment = "experiment";
+
+    /// <summary>Separate verb so brokers predating scoped tuning reject it rather than ignore an unknown field.</summary>
+    public const string ScopedTrial = "try-scoped";
 
     /// <summary>A game's frame rate: <see cref="Kind"/> "start" (<see cref="Value"/> is JSON {seconds, process?}) starts a
     /// PresentMon capture into the GPU's fps folder and answers its path; "stop" ends it. Not a write: the card is untouched.</summary>
