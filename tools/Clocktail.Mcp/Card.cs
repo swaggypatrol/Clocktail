@@ -28,6 +28,24 @@ public sealed class Card : IDisposable
     private readonly DriverLane _lane = new(DriverWait);
     private uint? _railMask;
 
+
+    private readonly Func<Look>? _readOverride;
+    private readonly Func<BrokerRequest, BrokerResponse>? _brokerOverride;
+    private readonly string? _identityOverride;
+    // Fake-driver test seam only; no native GPU or broker is opened by this constructor.
+    internal Card(NvClient hw, GpuSession session, string identity, Func<Look> read,
+        Func<BrokerRequest, BrokerResponse> broker)
+    {
+        _mgr = null!;
+        _gpu = null!;
+        _hw = hw;
+        _session = session;
+        OtherGpus = [];
+        _identityOverride = identity;
+        _readOverride = read;
+        _brokerOverride = broker;
+    }
+
     public Card()
     {
         _mgr = GpuManager.Open();
@@ -45,7 +63,7 @@ public sealed class Card : IDisposable
     /// <summary>The other NVIDIA GPUs in this PC, by name: Clocktail neither reads nor tunes them.</summary>
     public IReadOnlyList<string> OtherGpus { get; }
 
-    public string StableId => _gpu.Identity.StableId;
+    public string StableId => _identityOverride ?? _gpu.Identity.StableId;
 
     /// <summary>The card's PCI address as CUDA writes it ("0000:01:00.0"): how the lab finds the same GPU.</summary>
     public string PciBusId => _gpu.Target?.Pci ?? throw new NotSupportedException("the GPU has no verified PCI identity");
@@ -91,8 +109,8 @@ public sealed class Card : IDisposable
     ];
 
     /// <summary>Why the driver this process opened is gone, or null while it is there. Takes no driver call and no lane.</summary>
-    public string? DriverGone() => DriverLoss.Why(_mgr.Nvml, [_session]);
-    public string Name => _gpu.Identity.Name;
+    public string? DriverGone() => _brokerOverride == null ? DriverLoss.Why(_mgr.Nvml, [_session]) : _session.Faulted ? "fake driver lost" : null;
+    public string Name => _identityOverride ?? _gpu.Identity.Name;
     public string Vbios => _gpu.Identity.Vbios;
     /// <summary>NVAPI's driver version (61742 = 617.42).</summary>
     public uint DriverVersion => _mgr.Driver.Version;
@@ -107,6 +125,7 @@ public sealed class Card : IDisposable
 
     public Look Read()
     {
+        if (_readOverride != null) return _readOverride();
         using (_lane.Enter("a full read of the card"))
         {
             TelemetrySnapshot? t = null;
@@ -263,7 +282,7 @@ public sealed class Card : IDisposable
     {
         bool reads = op is BrokerRequest.OpPing or BrokerRequest.OpOwnership || kind is "show" or "saved" or "preview" or "preview-adopt" or "alive" or "quiet";
         BrokerResponse? r;
-        try { r = BrokerClient.TryCall(new BrokerRequest(op, StableId, Kind: kind, Value: value)); }
+        try { var request = new BrokerRequest(op, StableId, Kind: kind, Value: value); r = _brokerOverride != null ? _brokerOverride(request) : BrokerClient.TryCall(request); }
         catch (Exception e) when (e is IOException or InvalidDataException or ObjectDisposedException or TimeoutException)
         {
             return new(false, null, $"the Clocktail service stopped answering after the request was sent ({e.Message}); {WriteOutcome.ReadFirst}",
@@ -275,5 +294,5 @@ public sealed class Card : IDisposable
         return new(r.Ok, r.Result, r.Error ?? (r.Ok ? null : r.Code ?? "failed"), r.Code, reads ? null : WriteOutcome.Of(r.Ok, r.Code, r.Result));
     }
 
-    public void Dispose() => _mgr.Dispose();
+    public void Dispose() => _mgr?.Dispose();
 }

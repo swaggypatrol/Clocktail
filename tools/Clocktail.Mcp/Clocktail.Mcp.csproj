@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup><InternalsVisibleTo Include="Clocktail.Tests" /></ItemGroup>
 
   <!-- The MCP server for tuning the curve live in a game (stdio). Not elevated: it reads the card itself, as the tray
        does, and sends every write to the broker, which holds every limit. Not in Clocktail.sln, like the other tools. -->

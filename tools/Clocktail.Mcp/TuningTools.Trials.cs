@@ -136,13 +136,13 @@ public sealed partial class TuningTools
         if (khz < p0.MinKhz || khz > p0.MaxKhz)
             throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000.0}..{p0.MaxKhz / 1000.0} MHz");
         return Trial(string.Create(CultureInfo.InvariantCulture, $"memory offset {now / 1000.0:+0.#;-0.#;0} → {khz / 1000.0:+0.#;-0.#;0} MHz"),
-            reason, new() { ["memory_khz"] = khz });
+            reason, new() { ["memory_khz"] = khz }, coreDeltaKhz: 0);
     });
 
     [McpServerTool(Name = "set_core_offset", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set the core's P0 clock offset as a new trial: MHz added to every point of the V/F curve at once (stock curve + N), " +
-        "beside the point offsets adjust_curve moves. The two spend one firmware offset budget, and a P0 write zeroes the " +
-        "curve's point offsets, so the curve on the card is written again right after it in the same trial. Anywhere in the " +
+        "beside the point offsets adjust_curve moves. The two spend one firmware offset budget. P0 and V/F controls can " +
+        "overlap: the broker preserves the existing shape, repairs native side effects and verifies the effective change. Anywhere in the " +
         "driver's range. On the reference card +15 gave +15/+22/+15 MHz at " +
         "the same voltage. The edge differs by voltage, so a band is adjust_curve's; this shifts the whole curve. " +
         "keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
@@ -156,7 +156,7 @@ public sealed partial class TuningTools
         if (khz < p0.MinKhz || khz > p0.MaxKhz)
             throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000.0}..{p0.MaxKhz / 1000.0} MHz");
         return Trial(string.Create(CultureInfo.InvariantCulture, $"core offset {now / 1000.0:+0.#;-0.#;0} → {khz / 1000.0:+0.#;-0.#;0} MHz"),
-            reason, new() { ["writes"] = new[] { TrialWrite(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Core), khz) } });
+            reason, new() { ["writes"] = new[] { TrialWrite(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Core), khz) } }, coreDeltaKhz: (long)khz - now);
     });
 
     /// <summary>One item of a trial's "writes": any registry write, through its own path and rules.</summary>
@@ -491,7 +491,7 @@ public sealed partial class TuningTools
 
     /// <summary>One trial with the V/F curve left as it is: the broker writes <paramref name="items"/> beside the curve
     /// on the card (written again when the memory offset is among them) and records the trial.</summary>
-    private string Trial(string change, string? reason, Dictionary<string, object?> items)
+    private string Trial(string change, string? reason, Dictionary<string, object?> items, long? coreDeltaKhz = null)
     {
         var look = card.Read();
         var t = look.Telemetry;
@@ -506,14 +506,20 @@ public sealed partial class TuningTools
         foreach (var (k, v) in items) args[k] = v;
         var r = card.Broker(BrokerRequest.OpExperiment, "try", JsonSerializer.Serialize(args));
         if (!r.Ok) return Reply(r);
-        bool? intact = ReadAfter(out var unread)?.Curve.Offsets().SequenceEqual(before);
+        var after = ReadAfter(out var unread);
+        bool? intact = after == null ? null : after.Curve.Offsets().SequenceEqual(before);
+        if (after != null && coreDeltaKhz is { } delta)
+        {
+            try { intact = VfEffectiveCurve.Mismatch(look.Curve, after.Curve, delta) == null; }
+            catch (InvalidDataException e) { intact = false; unread = e.Message; }
+        }
         return Out(new
         {
-            success = true,
+            success = coreDeltaKhz == null || intact == true,
             change,
             written = r.Written,
             curve_intact = intact,
-            warning = unread ?? (intact == false ? "the V/F curve is not what it was before this write: call back_to_daily before going on" : null),
+            warning = unread ?? (intact == false ? "the effective V/F curve did not verify after this write: call back_to_daily before going on" : null),
         });
     }
 }

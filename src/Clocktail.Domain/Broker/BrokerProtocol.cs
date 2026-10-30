@@ -48,8 +48,14 @@ public sealed record BrokerRequest(
     /// the crash is the trial's that was on the card then, even one taken off the record since. Null when not known
     /// (0.3.8).</summary>
     DateTimeOffset? HungAt = null,
-    DateTimeOffset? AnsweredAt = null)
+    DateTimeOffset? AnsweredAt = null,
+    /// <summary>For a P0 write: preserve the effective curve, shifting it by the change in the core target.</summary>
+    bool PreserveEffectiveCurve = false)
 {
+    // Broker-only intent for a saved daily with a core target but no point curve. It restores a uniform effective
+    // displacement, rather than retaining a trial's point shape. This is not accepted from the wire contract.
+    internal int? EffectiveCoreTargetKhz { get; init; }
+
     public const string OpPing = "ping";
     /// <summary>Guarded game-test session: info, begin, check, lever, finish and interrupted-run recovery.</summary>
     public const string OpGame = "game";

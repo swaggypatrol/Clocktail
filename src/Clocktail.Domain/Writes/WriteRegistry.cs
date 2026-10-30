@@ -39,7 +39,14 @@ public sealed record WriteOptions(bool AllowCreate = false, bool IsRecovery = fa
 /// A write path's answer to "set this key to this value": the cell, and the plan that does it from a fresh
 /// snapshot, or a null plan with the reason when the value is one this path cannot write from.
 /// </summary>
-public sealed record Prepared(OwnedCell Cell, Func<ReadOnlyMemory<byte>, Mutation>? Plan, string? CannotWrite = null);
+public sealed record Prepared(OwnedCell Cell, Func<ReadOnlyMemory<byte>, Mutation>? Plan, string? CannotWrite = null)
+{
+    /// <summary>Other controls the setter can change implicitly. Save these originals in the transaction's
+    /// write-ahead callback, even when their current value is zero.</summary>
+    public IReadOnlyList<CoupledOriginal> CoupledOriginals { get; init; } = [];
+}
+
+public sealed record CoupledOriginal(OwnedCell Cell, byte[] Snapshot);
 
 /// <summary>What a setter's equal-value drill found: the real setter was called with exactly what was just read,
 /// and nothing the path can observe moved.</summary>
@@ -102,7 +109,12 @@ public static class WriteRegistry
                     return new Prepared(cell, null, $"'{value}' is not a number of kilohertz");
                 // The points are read here: the core offset spends one firmware budget with them, and any Pstates20
                 // write resets them. Recovery too: see ClockOffsets.Plan. Not when the curve is given back right after.
-                return new Prepared(cell, ClockOffsets.Plan(domain, khz, o.CurveFollows ? null : ClockOffsets.Curve(hw, gpu)));
+                if (o.CurveFollows) return new Prepared(cell, ClockOffsets.Plan(domain, khz));
+                var (budget, controls) = ClockOffsets.CurveForWrite(hw, gpu);
+                return new Prepared(cell, ClockOffsets.Plan(domain, khz, budget, canRecordCurveOriginal: controls != null))
+                {
+                    CoupledOriginals = controls == null ? [] : [new(VfWrites.ControlCell(controls), controls.Control)],
+                };
             }),
 
         new(PowerCap.Kind, "fe | f8", "mW, or 'absent'",

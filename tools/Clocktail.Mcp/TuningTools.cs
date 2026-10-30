@@ -1303,10 +1303,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         // Nothing written on purpose (a daily profile kept on another VBIOS, a trial in force) says why.
         string? skipped = r.Result is { } sr ? Str(sr, "skipped") : null;
         // A daily profile that went on without a group of it (a cell the driver refused or dropped took the cells tuned with
-        // it along): which group stays at stock and why, for the person.
+        // it along): which group did not apply and its final readback, for the person.
         var notApplied = r.Result is { } nr && nr.TryGetProperty("not_applied", out var na) && na.ValueKind == JsonValueKind.Array ? na : (JsonElement?)null;
         string? next = written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst
-            : notApplied != null ? "tell the person which part of the daily profile stays at stock and why (not_applied); the rest of it is on the card" : null;
+            : notApplied != null ? "tell the person which part of the daily profile did not apply, why, and its final readback (not_applied); report any unknown readback as unknown" : null;
         return Out(new { success = r.Ok, error, code = r.Ok ? null : r.Code, written, next, skipped, not_applied = notApplied, data_point = point, writes = lines });
     }
 

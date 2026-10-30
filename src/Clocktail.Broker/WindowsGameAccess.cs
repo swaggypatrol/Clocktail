@@ -89,6 +89,7 @@ internal sealed class WindowsGameAccess(GpuManager manager, GpuDevice device, IG
         string encoded = VfOffsets.Encode(curve.Offsets());
         if (cells["vf/core"].Value != encoded) throw new InvalidDataException("the curve changed during its baseline read");
         return new(Identity, encoded, power.CapMw ?? wall, power.Board.MinMw, (int)(curve.Points.Max(p => p.EffectiveKhz) / 1000),
-            manager.Nvml!.Memory(device.NvmlHandle).Total, cells.Values.OrderBy(GameSnapshot.Id).ToList());
+            manager.Nvml!.Memory(device.NvmlHandle).Total, cells.Values.OrderBy(GameSnapshot.Id).ToList(),
+            curve.Mode == VfMode.Regional ? curve.Points.Select(VfEffectiveCurve.Displacement).ToArray() : null);
     }
 }

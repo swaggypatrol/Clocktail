@@ -529,7 +529,7 @@ public sealed partial class BrokerDispatcher
                     var a = ApplyProfile(target, profile, path);
                     return (a, a);
                 }).Answer;
-                Log(target, "Daily profile applied",[req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
+                Log(target, ProfileApplyTitle(r),[req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
                 return r;
             }
             case "resume":
@@ -542,7 +542,7 @@ public sealed partial class BrokerDispatcher
                     return Ok(new { success = true, skipped = "a trial is in force: the agent running it decides", profile });
                 }
                 var r = ApplyProfile(target, profile, path);
-                Log(target, "Daily profile applied after waking up", [req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
+                Log(target, ProfileApplyTitle(r) + " after waking up", [req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
                 return r;
             }
             case "load":
@@ -556,7 +556,7 @@ public sealed partial class BrokerDispatcher
                     var a = ApplyProfile(target, profile, path);
                     return (a, a);
                 }).Answer;
-                Log(target, "Daily profile loaded", Writes(r));
+                Log(target, r.Ok ? "Daily profile loaded" : ProfileApplyTitle(r), Writes(r));
                 return r;
             }
             case "preset":
@@ -684,7 +684,7 @@ public sealed partial class BrokerDispatcher
                     return Ok(new { success = true, skipped = "a trial began after the crash: the agent running it decides", profile });
                 }
                 var r = profile == null ? Ok(new { success = true, path, profile, applied = Array.Empty<object>() }) : ApplyProfile(target, profile, path);
-                Log(target, "Daily profile put back after the crash", [
+                Log(target, r.Ok ? "Daily profile put back after the crash" : ProfileApplyTitle(r) + " after the crash", [
                     req.Value is { } why ? $"Reason: {why}" : null,
                     profile == null ? "No daily profile: the card stays at stock" : profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null,
                     .. Writes(r)]);
@@ -782,8 +782,7 @@ public sealed partial class BrokerDispatcher
                         if (w.TryGetProperty("create", out var cr) && cr.ValueKind == JsonValueKind.True) creates.Add($"{kind}/{key.ToLowerInvariant()}");
                         extra.Add(new ProfileWrite(kind, key, Text(w, "value") ?? throw new ArgumentException("a trial write names its value")));
                     }
-                bool keepCurve = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("keep_curve", out var kc) && kc.ValueKind == JsonValueKind.True
-                    && memoryKhz == null && !extra.Any(w => w.Kind == ClockOffsets.Kind);
+                bool keepCurve = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("keep_curve", out var kc) && kc.ValueKind == JsonValueKind.True;
                 lock (_experiment)
                 {
                     var exp = Experiment.Load(path) ?? throw new InvalidOperationException("no experiment session is open; begin one first");
@@ -837,9 +836,18 @@ public sealed partial class BrokerDispatcher
                         queue.Add((DailyProfile.Rank(ClockDomainOffsets.Kind), WriteOf(target, ClockDomainOffsets.Kind, ClockDomainOffsets.Key(ClockDomainId.Xbar), Num(xk))));
                     foreach (var w in extra)
                         queue.Add((DailyProfile.Rank(w.Kind), WriteOf(target, w.Kind, w.Key, w.Value) with { AllowCreate = creates.Contains($"{w.Kind}/{w.Key.ToLowerInvariant()}") }));
+                    var coupledBefore = queue.Any(q => q.Request.Kind == ClockOffsets.Kind) ? VfReader.Read(_hw, target.Session) : null;
+                    var p0Before = coupledBefore == null ? null : Pstates20Reader.Read(_hw, target.Session);
                     foreach (var (_, request) in queue.OrderBy(q => q.Rank))
                     {
                         if (!written.All(x => x.Ok)) break;
+                        if (request.Kind == ClockOffsets.Kind && keepCurve)
+                        {
+                            var p0 = Dispatch(request with { PreserveEffectiveCurve = true });
+                            written.Add(p0);
+                            if (p0.Ok && p0.Result is { } verified) curve = verified.GetProperty("curve").GetString()!;
+                            continue;
+                        }
                         // The trial writes its curve right after (unless it keeps the one on the card): a curve this broker does
                         // not hold (adopted, or another tool's the person tunes from) is set aside too, and comes back with it.
                         if (request.Kind == ClockOffsets.Kind && CurveAside(target, request.Key!, request.Value!, curveFollows: !keepCurve) is { } aside)
@@ -857,7 +865,7 @@ public sealed partial class BrokerDispatcher
                         // The items before the one that failed landed: they go back to what they were, last first (the
                         // order they went on in respects every write's constraint, so the reverse does too: a curve set
                         // aside for a memory write comes back after the memory offset), and the trial before stays in force.
-                        var undone = PutBackLanded(target, written);
+                        var undone = PutBackLanded(target, written, coupledBefore, p0Before);
                         bool clean = undone.All(x => x.Ok);
                         Log(target, $"Trial did not land · {exp.Game}", [$"Change: {change}", .. context, .. written.SelectMany(Writes),
                             undone.Count == 0 ? "The previous trial (if any) is still on the card"
@@ -1062,7 +1070,8 @@ public sealed partial class BrokerDispatcher
             var wp = WriteRegistry.Find(item.Kind) ?? throw new InvalidOperationException($"this version cannot keep '{item.Id}'");
             var cell = wp.Prepare(_hw, target.Session, item.Key, item.Original, WriteOptions.Recovery).Cell;
             var now = writer.Look(target.Session, cell) ?? throw new InvalidOperationException($"{cell.Id} could not be read; nothing kept");
-            if (now != item.Original) writes.Add(new ProfileWrite(item.Kind, item.Key, now));
+            if (now != item.Original || item.Kind == VfWrites.Kind && held.Any(i => i.Kind == ClockOffsets.Kind))
+                writes.Add(new ProfileWrite(item.Kind, item.Key, now));
         }
         // Adopt: what another tool left on the card and Clocktail neither holds nor keeps (the curve, the P0 and clock-domain
         // offsets, the voltage demands, the boost) is kept as it is now. Its wall, fixed fans and clock locks are not: the
@@ -1132,6 +1141,11 @@ public sealed partial class BrokerDispatcher
             if (r.Ok)
             {
                 target.Journal.Release(c.Kind, c.Key);
+                if (c.Kind == ClockOffsets.Kind)
+                {
+                    var curve = VfReader.Read(_hw, target.Session);
+                    new OwnedWriter(_hw, target.Journal, target.Sentinel, _host).ReleaseIfRestored(target.Session, VfWrites.Cell(curve));
+                }
                 cleared.Add($"{c.Name}: {c.Describe(c.Now)} → stock ({c.Describe(c.Stock)})");
                 continue;
             }
@@ -1327,25 +1341,60 @@ public sealed partial class BrokerDispatcher
     private static JsonElement[] AppliedOf(BrokerResponse r) =>
         r.Result is { } res && res.TryGetProperty("applied", out var a) && a.ValueKind == JsonValueKind.Array ? [.. a.EnumerateArray()] : [];
 
-    /// <summary>Each write that landed, put back to the value it replaced, last first: a write that changed nothing is
-    /// skipped. Every put-back is an ordinary write, so the journal releases a cell that is back at its original.</summary>
-    private List<BrokerResponse> PutBackLanded(IGpuTarget target, IReadOnlyList<BrokerResponse> written)
+    /// <summary>Put landed cells back to their earliest before value. P0 restores precede the captured V/F curve,
+    /// since an inverse P0 write can itself wipe or mirror its controls. Other cells retain reverse write order.</summary>
+    private List<BrokerResponse> PutBackLanded(IGpuTarget target, IReadOnlyList<BrokerResponse> written,
+        VfCurveSnapshot? curveBefore = null, Pstates20Snapshot? p0Before = null)
     {
         var undone = new List<BrokerResponse>();
-        foreach (var w in written.Where(x => x.Ok).Reverse())
-            foreach (var item in AppliedOf(w).Reverse())
+        var cells = new Dictionary<(string Kind, string Key), string>();
+        foreach (var w in written.Where(x => x.Ok))
+            foreach (var item in AppliedOf(w))
             {
                 string? Get(string name) => item.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-                if (Get("outcome") != nameof(TxOutcome.Applied) || Get("kind") is not { } kind || Get("key") is not { } key || Get("before") is not { } before || before == Get("after"))
+                bool coupled = item.TryGetProperty("coupled", out var c) && c.ValueKind == JsonValueKind.True;
+                if (Get("outcome") != nameof(TxOutcome.Applied) || Get("kind") is not { } kind || Get("key") is not { } key || Get("before") is not { } before || before == Get("after") && !coupled)
                     continue;
-                undone.Add(Dispatch(WriteOf(target, kind, key, before)));
+                cells.TryAdd((kind, key), before);
             }
+        var order = cells.Reverse().ToList();
+        if (cells.Keys.Any(k => k.Kind == ClockOffsets.Kind))
+            order = [.. order.Where(c => c.Key.Kind != VfWrites.Kind), .. order.Where(c => c.Key.Kind == VfWrites.Kind)];
+        foreach (var (cell, before) in order)
+        {
+            if (cell.Kind == ClockOffsets.Kind && CurveAside(target, cell.Key, before, curveFollows: true) is { } aside)
+            {
+                undone.Add(aside);
+                if (!aside.Ok) break;
+            }
+            undone.Add(Dispatch(WriteOf(target, cell.Kind, cell.Key, before)));
+        }
+        if (curveBefore != null && p0Before != null && cells.Count != 0)
+        {
+            try
+            {
+                var curveNow = VfReader.Read(_hw, target.Session);
+                if (!curveBefore.Offsets().SequenceEqual(curveNow.Offsets()) || VfEffectiveCurve.Mismatch(curveBefore, curveNow) != null
+                    || Transaction.FirstDifference(p0Before.Raw, Pstates20Reader.Read(_hw, target.Session).Raw, Pstates20Layout.StatusRanges) != null)
+                    throw new InvalidOperationException("the previous P0 controls and effective curve did not all return");
+            }
+            catch (Exception e) when (e is InvalidOperationException or InvalidDataException)
+            {
+                target.Sentinel.Begin("trial rollback unverified", takeOver: true, e.Message);
+                undone.Add(new BrokerResponse(false, e.Message + "; run recovery before tuning",
+                    Element(new { applied = new[] { new { kind = VfWrites.Kind, key = VfWrites.CoreKey,
+                        outcome = nameof(TxOutcome.Failed), restore = nameof(RestoreState.RestoreFailed), state_known = false } } }), BrokerCode.Failed));
+            }
+        }
         return undone;
     }
 
-    private static IEnumerable<OwnedItem> CellsToPutBack(IGpuTarget target, DailyProfile? profile, bool whole)
+    private static IEnumerable<OwnedItem> CellsToPutBack(IGpuTarget target, DailyProfile? profile, bool whole, bool keepImplicitCurve = false)
     {
-        bool Written(OwnedItem i) => profile is { Suspended: false } p && p.Writes.Any(w => w.Kind == i.Kind && w.Key == i.Key);
+        // Older P0-only profiles have no VF entry, but still depend on the effective curve generated/preserved by P0.
+        // A later application must not give that dependency back before deciding that the raw P0 is already set.
+        bool Written(OwnedItem i) => profile is { Suspended: false } p &&
+            (p.Writes.Any(w => w.Kind == i.Kind && w.Key == i.Key) || keepImplicitCurve && i.Kind == VfWrites.Kind);
         // Only a record this broker may act on: one from before the boot (Settle drops it) or another GPU's is not a debt.
         var plan = target.Journal.Inspect();
         if (plan.Reason is not (RecoveryReason.OwnedByThisProcess or RecoveryReason.OwnerDied)) return [];
@@ -1579,6 +1628,9 @@ public sealed partial class BrokerDispatcher
     private static bool Partial(BrokerResponse r) =>
         r.Result is { ValueKind: JsonValueKind.Object } res && res.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True;
 
+    private static string ProfileApplyTitle(BrokerResponse r) => r.Ok ? "Daily profile applied"
+        : Partial(r) ? "Daily profile partly applied" : "Daily profile application incomplete";
+
     private static JsonElement Args(string? json)
     {
         if (string.IsNullOrWhiteSpace(json)) return default;
@@ -1600,38 +1652,51 @@ public sealed partial class BrokerDispatcher
     /// through the ordinary write op. A write that does not go on (refused, vetoed, or dropped by the driver, as 621.01
     /// drops every rail write) takes the rest of its group with it (<see cref="DailyProfile.Group"/>): the profile goes on
     /// again without that group, which puts any cell of it this broker holds back to its original, and the other groups go
-    /// on as kept. The card is then never left with half of a run, the curve set aside for a memory write and never
-    /// written back. The answer fails, names each group left at stock and why (not_applied), and carries every write.
+    /// on as kept. The answer fails, names each omitted group and its final readback (not_applied), and carries every
+    /// write. An unknown coupled outcome stops application: no later group is written behind a blocked sentinel.
     /// <paramref name="trialStays"/>: under a trial that stays in force, nothing held is put back first.
     /// </summary>
     private BrokerResponse ApplyProfile(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only = null, bool trialStays = false)
     {
-        var (r, failed) = ApplyOnce(target, profile, path, only, trialStays);
+        // Keep this intent across degraded retries: dropping an explicitly saved core/VF group must give that
+        // group's original curve back, rather than reclassifying it as the surviving memory's implicit curve.
+        bool implicitDependency = profile is { Suspended: false } && !profile.Writes.Any(w => w.Kind == VfWrites.Kind);
+        var (r, failed) = ApplyOnce(target, profile, path, only, trialStays, implicitDependency);
         if (failed == null || profile == null) return r;
         var runs = new List<BrokerResponse> { r };
-        var left = new List<(string Group, List<string> Cells, string Why)>();
+        var left = new List<(string Group, List<ProfileWrite> Writes, string Why)>();
         var writing = profile;
         while (failed != null)
         {
             string group = DailyProfile.Group(failed.Kind, failed.Key);
             bool In(ProfileWrite w) => DailyProfile.Group(w.Kind, w.Key) == group;
-            left.Add((group, [.. writing.Writes.Where(In).Select(w => $"{w.Kind}/{w.Key}")], r.Error ?? $"{failed.Kind}/{failed.Key} did not apply"));
+            left.Add((group, [.. writing.Writes.Where(In)], r.Error ?? $"{failed.Kind}/{failed.Key} did not apply"));
+            if (target.Sentinel.IsBlocked(out _)) break;
             writing = writing with { Writes = [.. writing.Writes.Where(w => !In(w))] };
-            (r, failed) = ApplyOnce(target, writing, path, only, trialStays);
+            (r, failed) = ApplyOnce(target, writing, path, only, trialStays, implicitDependency);
             runs.Add(r);
         }
         // The later runs write again what the first one already put on; only what they changed is worth a line.
         var applied = runs.Take(1).SelectMany(AppliedOf)
             .Concat(runs.Skip(1).SelectMany(AppliedOf).Where(a => !(a.TryGetProperty("outcome", out var o) && o.GetString() == nameof(TxOutcome.NoChange))))
             .ToArray();
-        string stays = string.Join("; ", left.Select(l => $"the {l.Group} ({string.Join(", ", l.Cells)}) stays at stock: {l.Why}"));
-        string error = r.Ok ? $"the daily profile is on, but {stays}" : $"{stays}; and the rest did not all go on: {r.Error}";
+        string stays = string.Join("; ", left.Select(l => $"the {l.Group} ({string.Join(", ", l.Writes.Select(w => $"{w.Kind}/{w.Key}"))}) did not apply: {l.Why}"));
+        string error = r.Ok ? $"the daily profile was partly applied; {stays}" : left.Count == 0 ? r.Error ?? "the daily profile application did not complete"
+            : $"{stays}; and the rest did not all go on: {r.Error}";
         string? skipped = r.Result is { } res && res.TryGetProperty("skipped", out var sk) && sk.ValueKind == JsonValueKind.String ? sk.GetString() : null;
         string? wall = r.Result is { } res2 && res2.TryGetProperty("wall", out var wl) && wl.ValueKind == JsonValueKind.String ? wl.GetString() : null;
         return new BrokerResponse(false, error, Element(new
         {
             success = false, partial = r.Ok, path, profile, applied,
-            not_applied = left.Select(l => new { group = l.Group, cells = l.Cells, why = l.Why }),
+            not_applied = left.Select(l => new
+            {
+                group = l.Group, cells = l.Writes.Select(w => $"{w.Kind}/{w.Key}"), why = l.Why,
+                readback = l.Writes.Select(w =>
+                {
+                    var current = LookNow(target, w.Kind, w.Key, w.Value);
+                    return new { kind = w.Kind, key = w.Key, requested = w.Value, current, state_known = current != null };
+                }),
+            }),
             skipped, wall,
         }), r.Ok ? runs[0].Code : r.Code);
     }
@@ -1646,18 +1711,32 @@ public sealed partial class BrokerDispatcher
 
     /// <summary>One run of <see cref="ApplyProfile"/>: stops at the first write that fails, and names it when it is one of
     /// the profile's own (a held cell that did not go back is not: nothing to leave out, the run just stops).</summary>
-    private (BrokerResponse Response, ProfileWrite? Failed) ApplyOnce(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only, bool trialStays = false)
+    private (BrokerResponse Response, ProfileWrite? Failed) ApplyOnce(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only,
+        bool trialStays, bool implicitDependency)
     {
         var applied = new List<JsonElement>();
         // A profile kept on another VBIOS goes on only when someone loads or keeps one (which binds it to this VBIOS):
         // until then whatever puts it on puts the card back to stock instead, as a suspended profile does.
         string? skipped = profile?.OtherVbios(target.Vbios);
         var writing = skipped != null ? null : profile;
+        var selected = writing is { Suspended: false } ? writing.Writes.Where(only ?? (_ => true)).Where(w => !DailyProfile.TrialOnly(w.Kind, w.Key)).ToList() : [];
+        bool curveFollows = selected.Any(w => w.Kind == VfWrites.Kind);
+        bool implicitCurve = !curveFollows && selected.Any(w => w.Kind == ClockOffsets.Kind);
+        // Only a core target defines a generated daily curve. A memory-only daily must give an unkept point-curve
+        // trial back to the captured external/daily original, rather than preserve that newer trial as a dependency.
+        bool keepImplicitCurve = implicitDependency && implicitCurve && selected.Any(w => w.Kind == ClockOffsets.Kind && w.Key == ClockOffsets.Key(ClockDomain.Core));
         // A trial's current limits and fixed fans are never part of a profile, nor anything else a trial set unless the
         // profile writes it too: whatever puts the whole profile on puts them back first (not under a trial that stays).
-        IEnumerable<OwnedItem> putBack = trialStays ? [] : CellsToPutBack(target, writing, whole: only == null);
+        IEnumerable<OwnedItem> putBack = trialStays ? [] : CellsToPutBack(target, writing, whole: only == null, keepImplicitCurve);
         foreach (var held in putBack.ToList())
         {
+            if (held.Kind == ClockOffsets.Kind && keepImplicitCurve)
+            {
+                var back = Dispatch(PutBack(target, held) with { PreserveEffectiveCurve = true });
+                applied.AddRange(AppliedOf(back));
+                if (!back.Ok) return (new BrokerResponse(false, $"{held.Id} did not go back: {WhyNot(back)}", Element(new { success = false, path, profile, applied }), back.Code), null);
+                continue;
+            }
             if (held.Kind == ClockOffsets.Kind && CurveAside(target, held.Key, held.Original) is { } aside)
             {
                 applied.AddRange(AppliedOf(aside));
@@ -1667,11 +1746,24 @@ public sealed partial class BrokerDispatcher
             applied.AddRange(AppliedOf(r));
             if (!r.Ok) return (new BrokerResponse(false, $"{held.Id} did not go back" + (WhyNot(r) is { } why ? $": {why}" : ""), Element(new { success = false, path, profile, applied }), r.Code), null);
         }
-        bool curveFollows = writing is { Suspended: false } && writing.Writes.Where(only ?? (_ => true)).Any(w => w.Kind == VfWrites.Kind);
         if (writing is { Suspended: false })
             // A lock a profile kept before locks were trial-only (0.2.5) stays off: CellsToPutBack released it above.
-            foreach (var w in writing.Writes.Where(only ?? (_ => true)).Where(w => !DailyProfile.TrialOnly(w.Kind, w.Key)))
+            foreach (var w in selected)
             {
+                // A saved P0-only daily still requests a core shift and memory preservation. Use the same coupled,
+                // verified path as an explicit trial; an explicit VF entry remains authoritative and goes on last.
+                if (w.Kind == ClockOffsets.Kind && implicitCurve)
+                {
+                    var p0 = Dispatch(WriteOf(target, w.Kind, w.Key, w.Value) with
+                    {
+                        PreserveEffectiveCurve = true,
+                        EffectiveCoreTargetKhz = w.Key == ClockOffsets.Key(ClockDomain.Core)
+                            ? int.Parse(w.Value, System.Globalization.CultureInfo.InvariantCulture) : null,
+                    });
+                    applied.AddRange(AppliedOf(p0));
+                    if (!p0.Ok) return (new BrokerResponse(false, $"{w.Kind}/{w.Key} did not apply: {WhyNot(p0)}", Element(new { success = false, path, profile, applied }), p0.Code), w);
+                    continue;
+                }
                 if (w.Kind == ClockOffsets.Kind && CurveAside(target, w.Key, w.Value, curveFollows) is { } aside)
                 {
                     applied.AddRange(AppliedOf(aside));
@@ -1711,6 +1803,7 @@ public sealed partial class BrokerDispatcher
     private BrokerResponse Write(IGpuTarget target, BrokerRequest req)
     {
         if (!_canWrite) return Fail(NeedsAdmin, BrokerCode.NeedsAdmin);
+        if (req.Kind == ClockOffsets.Kind && req.PreserveEffectiveCurve) return WriteP0WithCurve(target, req);
         var path = WriteRegistry.Find(req.Kind);
         if (path == null) return Fail($"'{req.Kind}' is not a write path (one of: {string.Join(", ", WriteRegistry.Kinds)})", BrokerCode.NotAPath);
         if (req.Key == null || req.Value == null) return Fail("a write names a kind, a key and a value", BrokerCode.BadRequest);
@@ -1724,7 +1817,18 @@ public sealed partial class BrokerDispatcher
         var p = path.Prepare(hw, target.Session, req.Key, req.Value, new WriteOptions(req.AllowCreate, Original: original));
         if (p.Plan == null) return Fail(p.CannotWrite ?? $"{p.Cell.Id} cannot be written from '{req.Value}'", BrokerCode.CannotWrite);
 
-        var r = writer.Apply(target.Session, p.Cell, p.Plan, req.TakeOver, req.Value);
+        // Even zero point controls can change implicitly when P0 is written. Capture them before that setter,
+        // rather than letting the following explicit V/F write mistake a native side effect for the original.
+        var r = path.Kind == ClockOffsets.Kind
+            ? new ClockOffsets(hw, target.Journal, target.Sentinel, _host).ApplyOwned(target.Session,
+                Enum.Parse<ClockDomain>(p.Cell.Key, true), int.Parse(req.Value, System.Globalization.CultureInfo.InvariantCulture), req.TakeOver)
+            : writer.Apply(target.Session, p.Cell, p.Plan, req.TakeOver, req.Value,
+                beforeWrite: () =>
+                {
+                    foreach (var coupled in p.CoupledOriginals) writer.ClaimOriginal(coupled.Cell, coupled.Snapshot);
+                });
+        if (path.Kind != ClockOffsets.Kind && r.StateKnown)
+            foreach (var coupled in p.CoupledOriginals) writer.ReleaseIfRestored(target.Session, coupled.Cell);
         return new BrokerResponse(r.Tx.Succeeded, Result: Element(new
         {
             success = r.Tx.Succeeded,

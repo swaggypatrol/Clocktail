@@ -1348,7 +1348,7 @@ public class BrokerDispatcherTests : IDisposable
         var log = File.ReadAllText(TuningLog.PathBeside(_journal.Path));
         Assert.Contains("Crash · during trial · A", log);
         Assert.DoesNotContain("Crash · daily profile", log);
-        Assert.Contains($"The GPU stopped answering at {stopped.ToLocalTime():HH:mm:ss.f}", log);   // in local time, as the log's headings
+        Assert.Contains("The GPU stopped answering at " + stopped.ToLocalTime().ToString("HH:mm:ss.f", System.Globalization.CultureInfo.InvariantCulture), log);   // in local time, as the log's headings
     }
 
     /// <summary>A trial taken off the card before the GPU stopped answering is not blamed, nor one written after: the crash
@@ -1925,8 +1925,11 @@ public class BrokerDispatcherTests : IDisposable
     [Fact]
     public void A_core_offset_trial_writes_the_curve_back_and_keep_takes_it_from_the_card()
     {
-        new FakeVf().Install();
+        var vf = new FakeVf();
+        vf.Install();
         int core = Clocktail.Domain.Clocks.Pstates20Layout.Clock(0, 0);
+        // Model the additive effective-frequency change as well as the raw P0 delta.
+        vf.Effective = (i, offset) => checked((uint)(vf.Base(i) + offset + BitConverter.ToInt32(FakeDriver.State[FakeVf.PstatesWord], core + 0xc)));
         var vfApplier = FakeDriver.RequestApplier!;
         FakeDriver.RequestApplier = (state, req) =>
         {
@@ -2129,9 +2132,9 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(res.GetProperty("partial").GetBoolean());
         var left = Assert.Single(res.GetProperty("not_applied").EnumerateArray());
         Assert.Equal("uncore", left.GetProperty("group").GetString());
-        Assert.StartsWith("the daily profile is on, but the uncore (rails/msvdd) stays at stock: rails/msvdd did not apply: readback differs", r.Error);
+        Assert.StartsWith("the daily profile was partly applied; the uncore (rails/msvdd) did not apply: rails/msvdd did not apply: readback differs", r.Error);
         Assert.StartsWith("partly applied, ", DriverResetResponder.ProfileSummary(r));
-        Assert.Contains("Failed: the daily profile is on, but the uncore", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+        Assert.Contains("Failed: the daily profile was partly applied; the uncore", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
     /// <summary>NVVDD's offsets go with the curve (a REL cut is part of it): when they do not go on, neither does the curve,
