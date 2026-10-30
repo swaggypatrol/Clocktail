@@ -24,17 +24,17 @@ public sealed partial class TuningTools
     /// CLOCKTAIL_MCP_MAX_XBAR_MHZ caps XBAR lower. Measured 0..+400 on the 5090; an overclocker's +450 without more voltage
     /// gave a grey screen. No step per call (the user, 2026-10-27: the driver's limits, no others).</summary>
     public static readonly int MaxXbarMhz = Env("CLOCKTAIL_MCP_MAX_XBAR_MHZ", int.MaxValue);
-    /// <summary>The voltage demand's range: the driver's standard one (<see cref="ClockVdemand"/>).</summary>
+    /// <summary>The validated standard voltage-demand range (<see cref="ClockVdemand"/>), not a queried per-card range.</summary>
     public const int MinVdemandMv = ClockVdemand.MinUv / 1000, MaxVdemandMv = ClockVdemand.MaxUv / 1000;
-    /// <summary>The MSVDD-floor cliff (2026-10-20): above +250 MHz with no demand, memory-bound work drops MSVDD to its
-    /// 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand kept MSVDD off it.
-    /// Above this offset the demand must be at least that.</summary>
+    /// <summary>The reference RTX 5090's MSVDD-floor cliff (2026-10-20): above +250 MHz with no demand, memory-bound work
+    /// dropped MSVDD to its 825 mV floor, pinned the core near 1610 MHz and cut bandwidth 14-16 %; +20 mV kept it off.
+    /// Reference advice for explicit trials; the automatic tuner retains these demand recommendations.</summary>
     public const int XbarCliffMhz = 250, XbarCliffDemandMv = 20;
-    /// <summary>Past +300 MHz +20 mV is not enough (2026-10-20, re/tuning-results §28): at +400 the memory phase's P10 core
+    /// <summary>Past +300 MHz +20 mV was not enough on the reference RTX 5090 (2026-10-20, re/tuning-results §28): at +400 the memory phase's P10 core
     /// clock fell to 1942 MHz with +20 mV and 1830 with +30, and stayed clean (2392) only with +50.</summary>
     public const int XbarHighMhz = 300, XbarHighDemandMv = 50;
 
-    /// <summary>The voltage demand an XBAR offset needs to stay off the MSVDD-floor cliff, mV; null below the cliff.</summary>
+    /// <summary>The reference RTX 5090's XBAR demand recommendation, mV; null through +250 MHz. Not a device constraint.</summary>
     public static int? XbarDemandNeededMv(double offsetMhz) =>
         offsetMhz > XbarHighMhz ? XbarHighDemandMv : offsetMhz > XbarCliffMhz ? XbarCliffDemandMv : null;
     /// <summary>set_fan_curve: full speed no later than the stock curve's (100 % at 88 °C), no duty under its 20 %.</summary>
@@ -171,11 +171,14 @@ public sealed partial class TuningTools
         "ratio and REL raised the offset pays further (the reference card on 617.42: +400 / +50 mV at ratio 0.95, REL +50 made the " +
         "lab's crossbar test 5.6 % faster than +250 there; on 621.01 with MSVDD at stock, +400 / +50 mV at ratio 0.9 was about 10 % " +
         "over stock). On the reference card (MSVDD REL 0): +250 made Blender 6.3 % " +
-        "faster than stock, +300 with +20 mV of demand 6-7 %. The cliff: above +250 with no demand, memory-bound work lets " +
-        "MSVDD fall to its 825 mV floor, the core is pinned near 1610 MHz and bandwidth falls 14-16 %; +20 mV of demand keeps " +
-        "it off up to +300, so above +250 the demand must be +20 mV or more, and above +300 +50 mV (at +400 the memory phase " +
-        "still dropped to ~1830-1940 MHz with +20/+30 mV; raise the demand first). Offset anywhere in the driver's range " +
-        "(±1000 MHz on a 5090), demand -25..+50 mV. Past +400 is unmeasured: an overclocker " +
+        "faster than stock, +300 with +20 mV of demand 6-7 %. Reference RTX 5090 observations: above +250 with no demand, " +
+        "memory-bound work let MSVDD fall to its 825 mV floor, pinned the core near 1610 MHz and cut bandwidth 14-16 %. " +
+        "Reference advice is +20 mV above +250 through +300 MHz, +50 mV above +300 (at +400 the memory phase still dropped " +
+        "to ~1830-1940 MHz with +20/+30 mV). A final offset/demand pair below this advice returns an advisory, including " +
+        "when only demand changes; other GPUs may differ and adding demand does not guarantee stability. Only the requested " +
+        "changes are sent: no automatic demand increase, offset reduction, retry, workload or profile save. Offset anywhere " +
+        "in the driver's range (±1000 MHz on a 5090), subject to CLOCKTAIL_MCP_MAX_XBAR_MHZ; demand in the validated standard " +
+        "range -25..+50 mV. Past +400 is unmeasured: an overclocker " +
         "saw grey-screen artefacts at +450 with no voltage added. If anything is unstable with XBAR raised, step it down 50 " +
         "MHz before touching the curve. keep_as_daily keeps it; back_to_daily, end_session and a crash put the daily profile's back.")]
     public string AdjustXbar(
@@ -183,6 +186,8 @@ public sealed partial class TuningTools
         [Description("mV to add to XBAR's voltage demand (negative lowers); default 0.")] double vdemandDeltaMv = 0,
         [Description("Why this step (what you saw, what you expect).")] string? reason = null) => Guard(() =>
     {
+        if (!double.IsFinite(offsetDeltaMhz) || !double.IsFinite(vdemandDeltaMv))
+            throw new ArgumentException("XBAR offset and voltage-demand deltas must be finite numbers");
         if (offsetDeltaMhz == 0 && vdemandDeltaMv == 0) throw new ArgumentException("both deltas are 0: nothing to try");
         var (offNow, demandNow) = SettingsTools.Domain(card, ClockDomainId.Xbar);
         int off = offNow + (int)Math.Round(offsetDeltaMhz * 1000), demand = demandNow + (int)Math.Round(vdemandDeltaMv * 1000);
@@ -192,14 +197,18 @@ public sealed partial class TuningTools
             throw new ArgumentException($"the XBAR offset stays within {min}..+{max} MHz (it would be {off / 1000.0})");
         if (demand > MaxVdemandMv * 1000 || demand < MinVdemandMv * 1000)
             throw new ArgumentException($"the voltage demand stays within {MinVdemandMv}..+{MaxVdemandMv} mV (it would be {demand / 1000.0})");
-        if (XbarDemandNeededMv(off / 1000.0) is { } need && demand < need * 1000)
-            throw new ArgumentException($"XBAR at {off / 1000.0:+0.#} MHz needs at least +{need} mV of voltage demand (above +{XbarCliffMhz}: +{XbarCliffDemandMv}; " +
-                $"above +{XbarHighMhz}: +{XbarHighDemandMv}): without it memory-bound work drops MSVDD to its floor and pins the core near 1610 MHz. Raise the demand first");
+        TrialAdvisory[]? advisories = XbarDemandNeededMv(off / 1000.0) is { } need && demand < need * 1000
+            ? [new("xbar_reference_voltage_demand", "reference RTX 5090 observations (2026-10-20)",
+                off / 1000.0, demand / 1000.0, need,
+                $"Reference RTX 5090 observations recommend +{need} mV demand at this XBAR offset. Below that, memory-bound work " +
+                "may let MSVDD reach its floor and reduce core clock and performance. Other GPUs may behave differently; " +
+                "adding demand does not guarantee stability. Only the requested changes are sent.")]
+            : null;
         var items = new Dictionary<string, object?>();
         var parts = new List<string>();
         if (off != offNow) { items["xbar_khz"] = off; parts.Add(string.Create(CultureInfo.InvariantCulture, $"XBAR offset {offNow / 1000.0:+0.#;-0.#;0} → {off / 1000.0:+0.#;-0.#;0} MHz")); }
         if (demand != demandNow) { items["xbar_vdemand_uv"] = demand; parts.Add(string.Create(CultureInfo.InvariantCulture, $"XBAR voltage demand {demandNow / 1000.0:+0.#;-0.#;0} → {demand / 1000.0:+0.#;-0.#;0} mV")); }
-        return Trial(string.Join(", ", parts), reason, items);
+        return Trial(string.Join(", ", parts), reason, items, advisories);
     });
 
     [McpServerTool(Name = "adjust_clock_domain", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
@@ -224,7 +233,7 @@ public sealed partial class TuningTools
             "sys" => ClockDomainId.Sys,
             "video" => ClockDomainId.Video,
             "core" or "graphics" => ClockDomainId.Graphics,
-            "xbar" => throw new ArgumentException("XBAR is adjust_xbar's: it carries the rules for the MSVDD-floor cliff"),
+            "xbar" => throw new ArgumentException("XBAR is adjust_xbar's: it carries the reference-card advice for the MSVDD-floor cliff"),
             _ => throw new ArgumentException("domain is 'sys', 'video' or 'core'"),
         };
         if (offsetDeltaMhz == 0 && vdemandDeltaMv == 0) throw new ArgumentException("both deltas are 0: nothing to try");
@@ -338,8 +347,8 @@ public sealed partial class TuningTools
         "Set XBAR's clock ratio to the core (the driver's NVVDD/MSVDD clock propagation ratio, the original's --xbar-ratio) " +
         "as a new trial. 0.8999 on a 5090 (58976/65536): under load XBAR is held to about 0.9 x the core clock, which is " +
         "why adjust_xbar stops paying past +250 MHz unless the ratio and MSVDD's limit (set_voltage_boost) go up with it. A higher ratio lets XBAR follow the core closer (about +29 MHz of XBAR " +
-        "per +0.01 at a 2900 MHz core) and asks MSVDD for the voltage that clock needs, so adjust_xbar's demand rules apply " +
-        "to the clock it reaches. On the reference card 0.92 ran XBAR 2595 MHz against a 2850 MHz core at the 600 W wall " +
+        "per +0.01 at a 2900 MHz core) and asks MSVDD for the voltage that clock needs; consider the reference demand " +
+        "observations in manual xbar-msvdd when judging it. On the reference card 0.92 ran XBAR 2595 MHz against a 2850 MHz core at the 600 W wall " +
         "(2535 / 2865 at stock), MSVDD 980 → 1005 mV. Alone it can pull the core down where MSVDD holds XBAR (0.95 at REL 0: " +
         "the core -3.5 %; on 621.01 with MSVDD at stock, 0.925 and 0.95 cost it 2.0 and 2.4 %); with MSVDD REL +50 and XBAR " +
         "+400 / +50 mV (617.42), 0.95 made the lab's crossbar test 5-6 % faster and the memory's bandwidth 7.8 % higher " +
@@ -489,14 +498,19 @@ public sealed partial class TuningTools
         return v.Count == 0 ? null : Math.Round(v[(int)Math.Clamp(Math.Round(q * (v.Count - 1)), 0, v.Count - 1)], 1);
     }
 
+    private sealed record TrialAdvisory(string code, string source, double target_offset_mhz, double target_demand_mv,
+        int reference_demand_mv, string message);
+
     /// <summary>One trial with the V/F curve left as it is: the broker writes <paramref name="items"/> beside the curve
     /// on the card (written again when the memory offset is among them) and records the trial.</summary>
-    private string Trial(string change, string? reason, Dictionary<string, object?> items)
+    private string Trial(string change, string? reason, Dictionary<string, object?> items, TrialAdvisory[]? advisories = null)
     {
         var look = card.Read();
         var t = look.Telemetry;
         var context = new List<string> { Readings(look) };
         if (reason != null) context.Add($"Purpose: {reason}");
+        if (advisories != null)
+            foreach (var advisory in advisories) context.Add(JsonSerializer.Serialize(advisory, Json));
         var before = look.Curve.Offsets();
         var args = new Dictionary<string, object?>
         {
@@ -505,7 +519,7 @@ public sealed partial class TuningTools
         };
         foreach (var (k, v) in items) args[k] = v;
         var r = card.Broker(BrokerRequest.OpExperiment, "try", JsonSerializer.Serialize(args));
-        if (!r.Ok) return Reply(r);
+        if (!r.Ok) return Reply(r, advisories);
         bool? intact = ReadAfter(out var unread)?.Curve.Offsets().SequenceEqual(before);
         return Out(new
         {
@@ -514,6 +528,7 @@ public sealed partial class TuningTools
             written = r.Written,
             curve_intact = intact,
             warning = unread ?? (intact == false ? "the V/F curve is not what it was before this write: call back_to_daily before going on" : null),
+            advisories,
         });
     }
 }

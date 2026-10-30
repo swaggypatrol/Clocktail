@@ -1313,8 +1313,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     private static string? Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
-    private static string Reply(BrokerAnswer r) =>
-        Out(new { success = r.Ok, error = r.Error, code = r.Ok ? null : r.Code, written = r.Written, next = r.Written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst : null, result = r.Result });
+    private static string Reply(BrokerAnswer r, TrialAdvisory[]? advisories = null) =>
+        Out(new { success = r.Ok, error = r.Error, code = r.Ok ? null : r.Code, written = r.Written, next = r.Written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst : null, result = r.Result, advisories });
 
     private static string Out(object o) => JsonText.Serialize(o, Json);
 

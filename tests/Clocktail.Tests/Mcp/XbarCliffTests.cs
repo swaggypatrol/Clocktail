@@ -2,7 +2,7 @@ using Clocktail.Mcp;
 
 namespace Clocktail.Tests.Mcp;
 
-/// <summary>The voltage demand an XBAR offset needs, as measured on the reference card (re/tuning-results §28): none to
+/// <summary>The XBAR voltage-demand advice from reference RTX 5090 observations (re/tuning-results §28): none to
 /// +250, +20 mV to +300, +50 mV past it (+400 with +20/+30 mV still fell to 1830-1942 MHz in the memory phase).</summary>
 public class XbarCliffTests
 {

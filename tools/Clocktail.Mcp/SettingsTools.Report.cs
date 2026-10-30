@@ -24,8 +24,8 @@ public sealed partial class SettingsTools
     public const string Safe = "✅", Look = "⚠️", Act = "⛔", Info = "ℹ️";
     /// <summary>Hotter than this is worth a look (the stock fan curve holds 83 °C); this hot, act.</summary>
     public const double WarmC = 85, HotC = 90;
-    /// <summary>What was measured on the reference card: memory +358 MHz, MSVDD REL up to +20 mV, VMIN +50 mV, XBAR up
-    /// to +400 MHz (above +250 only with +20 mV of voltage demand).</summary>
+    /// <summary>What was measured on the reference RTX 5090: memory +358 MHz, MSVDD REL up to +20 mV, VMIN +50 mV,
+    /// XBAR up to +400 MHz; the demand recommendations come from that card's MSVDD-floor observations.</summary>
     public const double MeasuredMemoryMhz = 358, MeasuredMsvddRelMv = 20, MeasuredVminAboveMv = 50, MeasuredXbarMhz = 400, XbarCliffMhz = 250, XbarCliffDemandMv = 20;
     /// <summary>The ceiling no rail's MAX may pass.</summary>
     public const double CeilingMv = 1150;
@@ -217,7 +217,7 @@ public sealed partial class SettingsTools
             rows.Add(new(icon, name, stockKnown ? $"REL {Sg(relS)}, VMIN {Sg(vminS)} mV" : "?", $"REL {Sg(rel)}, VMIN {Sg(vmin)} mV", change, mark, Join([.. notes])));
         }
 
-        // XBAR/SYS/Video: XBAR measured to +400, above +250 only with +20 mV of demand (the cliff); SYS and Video unmeasured.
+        // XBAR/SYS/Video: reference RTX 5090 demand advice, not a universal device requirement; SYS and Video unmeasured.
         foreach (var (key, name) in new[] { ("xbar", "XBAR (crossbar)"), ("sys", "SYS clock"), ("video", "Video clock") })
         {
             var d = Obj(s, "clock_domains", key);
@@ -231,8 +231,8 @@ public sealed partial class SettingsTools
             string mark = Safe, note;
             if (key != "xbar") { mark = Look; note = "not measured on the reference card"; }
             else if (off > MeasuredXbarMhz) { mark = Look; note = $"past the +{F(MeasuredXbarMhz)} MHz measured; +450 without voltage gave a grey screen elsewhere"; }
-            else if (off is { } o && TuningTools.XbarDemandNeededMv(o) is { } need && dem < need) { mark = Look; note = $"the cliff: at {Sg(o)} MHz it needs +{need} mV of voltage demand (+{TuningTools.XbarCliffDemandMv} above +{TuningTools.XbarCliffMhz}, +{TuningTools.XbarHighDemandMv} above +{TuningTools.XbarHighMhz})"; }
-            else note = off > XbarCliffMhz ? $"+{F(dem)} mV keeps MSVDD off its floor" : off > 0 ? "within the measured range" : "stock";
+            else if (off is { } o && TuningTools.XbarDemandNeededMv(o) is { } need && dem < need) { mark = Look; note = $"reference RTX 5090 advice: +{need} mV demand at {Sg(o)} MHz to avoid the observed MSVDD-floor/performance cliff; other GPUs may differ and adding demand does not guarantee stability"; }
+            else note = off > XbarCliffMhz ? $"+{F(dem)} mV meets the reference RTX 5090 demand advice; stability is not guaranteed" : off > 0 ? "within the measured range" : "stock";
             string change = Join(off != offS ? $"{Arrow(off - offS)} {Sg(off - offS)} MHz" : null, dem != demS ? $"{Arrow(dem - demS)} {Sg(dem - demS)} mV" : null) is { Length: > 0 } c ? c : "—";
             rows.Add(new("🔀", name, $"{Sg(offS)} MHz, {Sg(demS)} mV", $"{Sg(off)} MHz, {Sg(dem)} mV", change, mark,
                 Join(By($"clockdomain/{key}", $"vdemand/{key}"), note, clk is { } k && k > 0 ? $"running {F(k)} MHz now" : null)));

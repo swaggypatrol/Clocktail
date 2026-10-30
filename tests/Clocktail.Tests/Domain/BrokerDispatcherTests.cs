@@ -1348,7 +1348,7 @@ public class BrokerDispatcherTests : IDisposable
         var log = File.ReadAllText(TuningLog.PathBeside(_journal.Path));
         Assert.Contains("Crash · during trial · A", log);
         Assert.DoesNotContain("Crash · daily profile", log);
-        Assert.Contains($"The GPU stopped answering at {stopped.ToLocalTime():HH:mm:ss.f}", log);   // in local time, as the log's headings
+        Assert.Contains("The GPU stopped answering at " + stopped.ToLocalTime().ToString("HH:mm:ss.f", System.Globalization.CultureInfo.InvariantCulture), log);   // in local time, as the log's headings
     }
 
     /// <summary>A trial taken off the card before the GPU stopped answering is not blamed, nor one written after: the crash

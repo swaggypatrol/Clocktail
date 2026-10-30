@@ -53,8 +53,8 @@ On a tuned curve with a flat top, NVML reports gpu_idle at full load. It reports
 ## Why raise MSVDD? Is that safe?
 NVIDIA ships the 5090's MSVDD 50 mV inside its own reliability limit (REL -50). REL 0 is that limit itself, not past it. It made the crossbar faster and Blender ~2 % faster for ~2 W. REL +20, past NVIDIA's limit, bought ~1 % more; Clocktail goes no further.
 
-## Why does XBAR need a voltage demand?
-Above about +250 MHz of XBAR offset, memory-bound work lets MSVDD fall to its 825 mV floor, and then the core is pinned near 1610 MHz with 14-16 % less bandwidth. The firmware's reason is unknown. +20 mV of demand keeps MSVDD off the floor up to +300; past +300 it takes +50 mV (at +400 with +20/+30 mV the memory phase still dropped to 1830-1940 MHz). Raising VMIN does not help.
+## Why does XBAR have voltage-demand advice?
+On the reference RTX 5090, above about +250 MHz of XBAR offset, memory-bound work let MSVDD fall to its 825 mV floor, and then the core was pinned near 1610 MHz with 14-16 % less bandwidth. The firmware's reason is unknown. +20 mV of demand kept MSVDD off the floor up to +300; past +300 the reference recommendation is +50 mV (at +400 with +20/+30 mV the memory phase still dropped to 1830-1940 MHz). Raising VMIN did not help that card. Explicit `adjust_xbar` reports this as structured advice on the final offset/demand pair, including demand-only changes. It sends only the requested changes; +300 MHz / 0 mV from stock sends no demand write. Other GPUs may differ and adding demand does not guarantee stability. Device checks and the validated standard -25..+50 mV demand range still apply; `tune_uncore` keeps its existing reference demand policy.
 
 ## Why does XBAR stay at 0.9 x the core clock?
 The driver holds XBAR to the core clock times a ratio, 0.8999 stock. Past about +250 MHz the XBAR offset runs into it and stops paying. `set_clock_ratio` raises the ratio: on the reference card 0.92 ran XBAR 60 MHz higher at the 600 W wall, for 25 mV more MSVDD and 15 MHz of core. Whether that buys frames is not measured.
