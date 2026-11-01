@@ -42,9 +42,9 @@ public interface IGpuTargets
 /// pipe only moves <em>where</em> this runs, not <em>what</em> it does. Everything that makes a write safe lives
 /// here, so neither caller can skip it:
 /// <list type="bullet">
-/// <item>the firmware ceiling is whatever the write path's rules enforce (board max for power, the standard rail
-/// ceiling, the driver's clock range, the fan's firmware range), in the plan before the write and in the cell's
-/// post-write check inside the transaction; this dispatcher exposes no knob that widens it;</item>
+/// <item>the limits are the hardware's own, as the write path's rules enforce them (the board's power range, a rail's
+/// reported voltage domain, the driver's clock range, the fan's firmware range) in the plan before the write, with a
+/// path's post-write proof inside the transaction; this dispatcher exposes no knob that widens them;</item>
 /// <item>only one write window is open at a time (<see cref="_writeWindow"/>), so two writes never land together
 /// and leave a black screen no one can attribute;</item>
 /// <item>a write refuses while a stability run holds its lock, so an automatic write never changes the state
@@ -105,15 +105,6 @@ public sealed partial class BrokerDispatcher
     public static readonly AsyncLocal<string?> CurrentLease = new();
 
     /// <summary>
-    /// The lease of the service's own safety action, the fan guard's fans back to the curve (a card at 85 °C, or one whose
-    /// temperature cannot be read, under a fixed fan duty): it passes a measurement's judge.lock, as the holder's own writes
-    /// do. A run then measures a card whose fans changed under it; the lab sees its trial change and judges nothing, and
-    /// stress_test's crash still goes to the same settings. Since 0.3.7 stress_test holds the lock too, and its runs are what
-    /// the fan guard was made for: an agent blocked in a run cannot watch the temperature.
-    /// </summary>
-    public const string SafetyLease = "clocktail-safety";
-
-    /// <summary>
     /// The judge's word on the operation in flight (<see cref="JudgeNow"/>), null outside one. Refused at a write, the
     /// operation writes nothing after it, even if the lock is gone by its next write. Let through, it is admitted: a run
     /// that takes judge.lock after that and waits for it (<see cref="JudgeLock.Info.Waits"/>: "quiet" is answered once no
@@ -134,14 +125,14 @@ public sealed partial class BrokerDispatcher
     /// <summary>
     /// The judge of every write and of the sentinel's second look, from the run holding judge.lock now (<paramref name="live"/>,
     /// null when none): its own writes pass (they carry its RunId as their lease: the lab writes its next candidate while it
-    /// holds the card), so do the fan guard's (<see cref="SafetyLease"/>), and so does the rest of an operation let through
-    /// before the run took the lock, when the run waits for it (<see cref="Judged"/>). Anything else waits: the run's reason.
+    /// holds the card), and so does the rest of an operation let through before the run took the lock, when the run waits
+    /// for it (<see cref="Judged"/>). Anything else waits: the run's reason.
     /// </summary>
     public static Func<string?> Judge(Func<JudgeLock.Info?> live) => () =>
     {
         if (live() is not { } run) return null;
         string? lease = CurrentLease.Value;
-        if (run.RunId != null && run.RunId == lease || lease == SafetyLease) return null;
+        if (run.RunId != null && run.RunId == lease) return null;
         if (run.Waits && Judged.Value is { Sure: true }) return null;
         return JudgeLock.Reason(run);
     };
@@ -150,18 +141,16 @@ public sealed partial class BrokerDispatcher
     private static readonly AsyncLocal<bool> ClientAsks = new();
 
     /// <summary>
-    /// A client's request: over the pipe, or the CLI's in-process. The service's own requests are not a client's: the fan
-    /// guard's "fans-back" and the lease it runs under (<see cref="SafetyLease"/>) pass a measurement's judge.lock, the
+    /// A client's request: over the pipe, or the CLI's in-process. The service's own requests are not a client's: the
     /// recoveries after a driver reset leave the trial to the "crashed" step after them, and "crashed" is the service's
-    /// record of a reset it saw (a client's crash is the experiment's "crash"), so a client sending any of these is refused.
+    /// record of a reset it saw (a client's crash is the experiment's "crash"), so a client sending either is refused.
     /// A recovery a client asks for takes the card off the trial in force, which then leaves the record (<see cref="DispatchOne"/>).
     /// </summary>
     public BrokerResponse FromClient(BrokerRequest req)
     {
-        if (req.Lease == SafetyLease || req.Op == BrokerRequest.OpExperiment && req.Kind == "fans-back"
-            || req.Op == BrokerRequest.OpRecover && req.Kind is BrokerRequest.RecoverAfterDriverReset or BrokerRequest.RecoverAfterDriverResetAgain
+        if (req.Op == BrokerRequest.OpRecover && req.Kind is BrokerRequest.RecoverAfterDriverReset or BrokerRequest.RecoverAfterDriverResetAgain
             || req.Op == BrokerRequest.OpProfile && req.Kind == "crashed")
-            return Fail("that request is the service's own (its fan guard's, or its answer to a driver reset); a client cannot send it", BrokerCode.BadRequest);
+            return Fail("that request is the service's own (its answer to a driver reset); a client cannot send it", BrokerCode.BadRequest);
         bool prior = ClientAsks.Value;
         ClientAsks.Value = true;
         try { return Dispatch(req); }
@@ -172,7 +161,7 @@ public sealed partial class BrokerDispatcher
     {
         string? prior = CurrentLease.Value;
         var judged = Judged.Value;
-        if (req.Lease is { } lease && lease != SafetyLease) CurrentLease.Value = lease;   // SafetyLease: HandBack's to set, not a request's
+        if (req.Lease is { } lease) CurrentLease.Value = lease;
         bool entered = false, top = false;
         try
         {
@@ -195,11 +184,9 @@ public sealed partial class BrokerDispatcher
     }
 
     /// <summary>Why the operation in flight may not write now (a stability run measuring), or null: the judge, asked at
-    /// every write; a refusal is kept for the rest of the operation, and a write let through admits it (<see cref="Judged"/>).
-    /// The fan guard's put-backs pass (<see cref="SafetyLease"/>).</summary>
+    /// every write; a refusal is kept for the rest of the operation, and a write let through admits it (<see cref="Judged"/>).</summary>
     private string? JudgeNow()
     {
-        if (CurrentLease.Value == SafetyLease) return null;
         if (Judged.Value is { Busy: { } refused }) return refused;
         string? busy = _judgeBusyReason();
         if (Judged.Value != null) Judged.Value = busy == null ? Verdict.Admitted : new Verdict(busy);
@@ -388,11 +375,11 @@ public sealed partial class BrokerDispatcher
             case "preview":
             case "preview-adopt":
             {
-                // What keep, or a preset or saved profile (Value: its name), would make the daily profile, against the daily
+                // What keep, or a saved profile (Value: its name), would make the daily profile, against the daily
                 // profile and the card: nothing is written or saved. The agent shows it before asking. "preview-adopt" is
                 // what "adopt" would keep (0.4.0).
                 bool adopt = req.Kind == "preview-adopt";
-                var (writes, left, _) = req.Value is { Length: > 0 } name && !adopt ? (PresetWrites(target, name), [], []) : KeepWrites(target, profile, adopt);
+                var (writes, left, _) = req.Value is { Length: > 0 } name && !adopt ? (SavedWrites(target, name), [], []) : KeepWrites(target, profile, adopt);
                 var cardNow = CardValues(target, writes);
                 return Ok(new
                 {
@@ -560,30 +547,16 @@ public sealed partial class BrokerDispatcher
                 return r;
             }
             case "preset":
-            {
-                // Value: a preset's name, or a saved profile's. It replaces the daily profile (the old one's writes go into
-                // the log) and goes on now.
-                var preset = Presets.Find(req.Value);
-                if (preset == null) return LoadSaved(target, req.Value, profile, path);
-                if (!preset.Fits(target.Name))
-                    return Fail($"'{preset.Name}' was tuned on an {preset.Gpu}; this card is {target.Name}. Nothing was written", BrokerCode.CannotWrite);
-                var loaded = new DailyProfile(DailyProfile.InWriteOrder(preset.Writes), _host.Now, History: profile?.History).On(target.Vbios, target.Driver)
-                    .Noted(_host.Now, $"preset '{preset.Name}' loaded");
-                var r = Leave(target, Experiment.Survived, $"preset '{preset.Name}' went on", _ => Loading(target, $"preset '{preset.Name}'", loaded, profile, path)).Answer;
-                if (!r.Ok) return r;
-                loaded.Save(path);
-                Log(target, $"Preset loaded · {preset.Title}", [
-                    .. (profile?.Writes ?? []).Select(w => $"Old: {w.Kind}/{w.Key} = {w.Value}"),
-                    .. Writes(r)]);
-                return r;
-            }
+                // Value: a saved profile's name (the op keeps its old name; no profile ships with Clocktail). It replaces
+                // the daily profile (the old one's writes go into the log) and goes on now.
+                return LoadSaved(target, req.Value, profile, path);
             case "save":
             {
                 // Value: the name, any name. The daily profile as it is kept now, saved under it; one already saved under
                 // the name (whatever its case) is replaced.
                 var (name, bad) = SavedProfiles.Normalize(req.Value);
                 if (name == null) return Fail(bad!, BrokerCode.BadRequest);
-                if (profile == null) return Fail("no daily profile is kept yet: keep_as_daily (or load a preset) first, then save it", BrokerCode.CannotWrite);
+                if (profile == null) return Fail("no daily profile is kept yet: approve and keep this GPU's settings with keep_as_daily first, then save them", BrokerCode.CannotWrite);
                 var file = SavedProfiles.PathBeside(target.Journal.Path);
                 var saved = new DailyProfile(profile.Writes, _host.Now).Noted(_host.Now, $"saved as '{name}' from the daily profile kept {profile.KeptAt:yyyy-MM-dd HH:mm}");
                 bool replaced = SavedProfiles.Save(file, name, saved);
@@ -598,7 +571,7 @@ public sealed partial class BrokerDispatcher
                 });
             case "forget":
             {
-                // Value: a saved profile's name. The daily profile and the presets are never deleted here.
+                // Value: a saved profile's name. The daily profile is never deleted here.
                 var gone = SavedProfiles.Delete(SavedProfiles.PathBeside(target.Journal.Path), req.Value);
                 if (gone == null) return Fail($"no profile is saved as '{req.Value}'", BrokerCode.CannotWrite);
                 Log(target, $"Saved profile deleted · {gone.Value.Name}", [.. gone.Value.Profile.Writes.Select(w => $"Was: {w.Kind}/{w.Key} = {w.Value}")]);
@@ -941,13 +914,9 @@ public sealed partial class BrokerDispatcher
                 return Ok(new { success = true, path, data, experiment = Experiment.Load(path) });
             case "release":
                 // The agent running the trial is gone (its MCP server's input closed): what only a watching agent may hold
-                // goes back, a fixed fan duty (it can hold the fans at 30 % at a 600 W wall) and lowered current limits.
-                // With two agents on one card, one leaving hands these back for both: the safe side.
-                return HandBack(target, path, data, req.Value ?? "the agent disconnected", fansOnly: false);
-            case "fans-back":
-                // The service's own fan guard: the card got too hot (or unreadable) under a fixed fan duty. Only the fans
-                // go back to the curve; a lowered current limit only lowers power, so it stays.
-                return HandBack(target, path, data, req.Value ?? "the fan guard", fansOnly: true);
+                // goes back, a fixed fan duty (it can hold the fans low at a high wall with nobody watching) and lowered
+                // current limits. With two agents on one card, one leaving hands these back for both: the safe side.
+                return HandBack(target, path, data, req.Value ?? "the agent disconnected");
             case "end":
             {
                 var exp = Experiment.Load(path);
@@ -964,7 +933,7 @@ public sealed partial class BrokerDispatcher
                     r.Result, r.Code);
             }
             default:
-                return Fail($"experiment needs show, begin, try, stable, crash, note, alive, quiet, release, fans-back or end, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"experiment needs show, begin, try, stable, crash, note, alive, quiet, release or end, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 
@@ -1151,14 +1120,10 @@ public sealed partial class BrokerDispatcher
         catch (Exception e) when (e is ArgumentException or InvalidOperationException or InvalidDataException or FormatException) { return null; }
     }
 
-    /// <summary>A preset's writes, or a saved profile's, by name; throws when there is neither, or the preset is another model's.</summary>
-    private static List<ProfileWrite> PresetWrites(IGpuTarget target, string name)
-    {
-        if (Presets.Find(name) is { } preset)
-            return preset.Fits(target.Name) ? [.. preset.Writes] : throw new ArgumentException($"'{preset.Name}' was tuned on an {preset.Gpu}; this card is {target.Name}");
-        return SavedProfiles.Find(SavedProfiles.PathBeside(target.Journal.Path), name) is var (_, saved)
-            ? [.. saved.Writes] : throw new ArgumentException($"no preset or saved profile named '{name}'");
-    }
+    /// <summary>A saved profile's writes, by name; throws when there is none by that name.</summary>
+    private static List<ProfileWrite> SavedWrites(IGpuTarget target, string name) =>
+        SavedProfiles.Find(SavedProfiles.PathBeside(target.Journal.Path), name) is var (_, saved)
+            ? [.. saved.Writes] : throw new ArgumentException($"no saved profile named '{name}'");
 
     /// <summary>Each written cell's value on the card now, by "kind/key"; a cell that cannot be read is left out.</summary>
     private Dictionary<string, string> CardValues(IGpuTarget target, IEnumerable<ProfileWrite> writes)
@@ -1176,14 +1141,14 @@ public sealed partial class BrokerDispatcher
         return values;
     }
 
-    /// <summary>"preset" with a saved profile's name: it becomes the daily profile and goes on, as a preset does.</summary>
+    /// <summary>"preset" with a saved profile's name: it becomes the daily profile and goes on.</summary>
     private BrokerResponse LoadSaved(IGpuTarget target, string? value, DailyProfile? profile, string path)
     {
         var file = SavedProfiles.PathBeside(target.Journal.Path);
         if (SavedProfiles.Find(file, value) is not var (name, saved))
         {
-            string known = string.Join(", ", [.. Presets.All.Select(p => p.Name), .. SavedProfiles.All(file).Select(p => $"'{p.Name}'")]);
-            return Fail($"no preset or saved profile named '{value}' (known: {known})", BrokerCode.CannotWrite);
+            var known = SavedProfiles.All(file).Select(p => $"'{p.Name}'").ToList();
+            return Fail($"no saved profile named '{value}' ({(known.Count > 0 ? $"saved: {string.Join(", ", known)}" : "none is saved yet: save_profile keeps the daily profile under a name")})", BrokerCode.CannotWrite);
         }
         var loaded = new DailyProfile(DailyProfile.InWriteOrder(saved.Writes), _host.Now, History: profile?.History).On(target.Vbios, target.Driver)
             .Noted(_host.Now, $"saved profile '{name}' loaded");
@@ -1196,7 +1161,7 @@ public sealed partial class BrokerDispatcher
         return r;
     }
 
-    /// <summary>A preset or saved profile going on, for <see cref="Leave"/>: all of it, or (<see cref="NotLoaded"/>) the
+    /// <summary>A saved profile going on, for <see cref="Leave"/>: all of it, or (<see cref="NotLoaded"/>) the
     /// daily profile back as it was; the card is off the trial when either landed.</summary>
     private (BrokerResponse Answer, BrokerResponse PutBack) Loading(IGpuTarget target, string what, DailyProfile loaded, DailyProfile? profile, string path)
     {
@@ -1206,7 +1171,7 @@ public sealed partial class BrokerDispatcher
         return (answer, back);
     }
 
-    /// <summary>A preset or saved profile that did not all go on (a write this card refuses, e.g. a wall above its board
+    /// <summary>A saved profile that did not all go on (a write this card refuses, e.g. a wall above its board
     /// maximum) does not become the daily profile: the daily profile stays as it was and goes back on, so the card is
     /// never left holding part of a profile nothing keeps. The answer carries both runs' writes.</summary>
     private BrokerResponse NotLoaded(IGpuTarget target, string what, BrokerResponse failed, DailyProfile? profile, string path, out BrokerResponse back)
@@ -1232,44 +1197,38 @@ public sealed partial class BrokerDispatcher
     private long _lastAliveTicks = DateTimeOffset.UtcNow.UtcTicks;
 
     /// <summary>The GPUs whose last hand-back put nothing back: the tuning log has the first refusal of a run of them, not
-    /// every ask after it (the trial lease asks for minutes, the fan guard every 30 s). Asked under the operation lock.</summary>
+    /// every ask after it (the trial lease asks for minutes). Asked under the operation lock.</summary>
     private readonly HashSet<string> _refused = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// The trial-only cells (a fixed fan duty, and unless <paramref name="fansOnly"/> lowered current limits, a clock floor,
-    /// point lock or Boost Lock and the F8 request) back to their originals. The rest of the trial stays on the card and in
+    /// The trial-only cells (a fixed fan duty, lowered current limits, a clock floor, point lock or Boost Lock and the F8
+    /// request) back to their originals. The rest of the trial stays on the card and in
     /// force, recorded from here as a trial of its own without what went back, the part before as survived (as
     /// <see cref="Records"/> says: a trial whose ending is on record keeps it, and nothing more is recorded). What went back
     /// is the journal's word after the put-backs, not their answers: a cell still held stays in the trial's record (the
     /// caller asks again), and when nothing went back nothing is recorded but the refusal, once until something does go back.
     /// No curve is written: the GPU may be under load.
     /// </summary>
-    private BrokerResponse HandBack(IGpuTarget target, string path, string data, string why, bool fansOnly)
+    private BrokerResponse HandBack(IGpuTarget target, string path, string data, string why)
     {
-        bool Mine(OwnedItem i) => !fansOnly || i.Kind == FanControl.Kind;
-        var held = HeldTrialCells(target).Where(Mine).OrderBy(i => DailyProfile.Rank(i.Kind)).ToList();
+        var held = HeldTrialCells(target).OrderBy(i => DailyProfile.Rank(i.Kind)).ToList();
         if (held.Count == 0)
         {
             _refused.Remove(target.StableId);
             return Ok(new { success = true, released = Array.Empty<object>() });
         }
-        // The fan guard's fans go back under a measurement's judge.lock too (SafetyLease); everything else waits for it.
-        string? lease = CurrentLease.Value;
-        if (fansOnly) CurrentLease.Value = SafetyLease;
-        List<BrokerResponse> back;
-        try { back = held.Select(h => Dispatch(PutBack(target, h))).ToList(); }
-        finally { CurrentLease.Value = lease; }
-        var left = HeldTrialCells(target).Where(Mine).ToList();
+        var back = held.Select(h => Dispatch(PutBack(target, h))).ToList();
+        var left = HeldTrialCells(target).ToList();
         var gone = held.Where(h => !left.Any(l => l.Id == h.Id)).ToList();
         bool ok = left.Count == 0;
         if (gone.Count == 0 && _refused.Add(target.StableId))
-            Log(target, fansOnly ? "Fans not handed back" : "Trial-only settings not handed back", [$"Reason: {why}",
+            Log(target, "Trial-only settings not handed back", [$"Reason: {why}",
                 $"Still held: {string.Join(", ", left.Select(l => l.Id))}: asked again until they go (logged when they do)",
                 .. back.SelectMany(Writes)]);
         if (gone.Count > 0)
         {
             _refused.Remove(target.StableId);
-            string what = $"{Named(gone, left)} handed back{(fansOnly ? " to the curve" : "")}";
+            string what = $"{Named(gone, left)} handed back";
             DataPoint? closed = null;
             lock (_experiment)
             {
@@ -1282,7 +1241,7 @@ public sealed partial class BrokerDispatcher
                     (exp with { Trial = Without(t, gone, left) with { At = _host.Now, Marked = false, Change = $"{t.Change} ({what}: {why})" } }).Save(path);
                 }
             }
-            Log(target, !ok ? "Trial-only settings not all handed back" : fansOnly ? "Fans handed back to the curve" : "Trial-only settings handed back", [$"Reason: {why}",
+            Log(target, !ok ? "Trial-only settings not all handed back" : "Trial-only settings handed back", [$"Reason: {why}",
                 closed != null ? $"The trial ran {closed.Minutes} min with them: recorded as survived; the rest of it stays in force" : null,
                 ok ? null : $"Still held: {string.Join(", ", left.Select(l => l.Id))}: the trial keeps them in its record",
                 .. back.SelectMany(Writes)]);
@@ -1523,7 +1482,7 @@ public sealed partial class BrokerDispatcher
 
     /// <summary>
     /// Ends the trial in force, if any, with this outcome, and has <paramref name="back"/> take the card off it (the daily
-    /// profile, stock, a preset): it gives the caller's answer and the put-back's own response, which alone says whether
+    /// profile, stock, a saved profile): it gives the caller's answer and the put-back's own response, which alone says whether
     /// the card is off the trial (<see cref="Left"/>). The data point is written first: a crash happened whatever the
     /// put-back does. While the card is held busy (a stability run holding it, another operation) the trial stays in force
     /// with its ending on record (<see cref="ExperimentTrial.Ending"/>): a crash before something takes the card off it is

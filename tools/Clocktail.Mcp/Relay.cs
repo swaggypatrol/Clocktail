@@ -336,7 +336,7 @@ public static class Relay
 
     /// <summary>
     /// What only a watching agent may hold (a fixed fan duty, lowered current limits) goes back on every GPU the service
-    /// has, through the broker's "release": the broker keeps a trial until someone ends it, and a fan held at 30 % with no
+    /// has, through the broker's "release": the broker keeps a trial until someone ends it, and a fan held at a low duty with no
     /// agent watching temp_c stays there until a reboot. The relay loads no driver; it only asks the service.
     /// </summary>
     private static void Release(Action<string> log)

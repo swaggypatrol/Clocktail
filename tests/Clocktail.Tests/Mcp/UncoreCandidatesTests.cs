@@ -18,8 +18,19 @@ public class UncoreCandidatesTests
     [Theory]
     [InlineData("400/50/0.95")]
     [InlineData("400/50/fast/50")]
-    [InlineData("400/50/1.2/50")]
+    [InlineData("400/50/NaN/50")]
+    [InlineData("400/50/Infinity/50")]
+    [InlineData("400/50/-1/50")]
+    [InlineData("400/50/65536/50")]
+    [InlineData("400/2147484/0.95/50")]
     [InlineData("400/50/0.95/125")]
     public void A_setting_that_does_not_parse_is_refused(string text) =>
         Assert.Throws<ArgumentException>(() => TuningTools.Candidates(text));
+
+    [Theory]
+    [InlineData("450/0/1.2/50")]
+    [InlineData("500/-100/0.25/0")]
+    [InlineData("400/100/0.95/100")]
+    public void Representable_candidates_have_no_software_tuning_envelope(string text) =>
+        Assert.Single(TuningTools.Candidates(text)!);
 }

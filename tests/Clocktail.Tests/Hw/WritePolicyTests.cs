@@ -37,7 +37,7 @@ public class WritePolicyTests
         W32(b, 0x1c, 0); W32(b, 0x14, 1);                        // not P0
         Assert.Contains("+0x14", Check(Slot.SetPstates20, b));
         W32(b, 0x14, 0); I32(b, 0x28, int.MinValue);
-        Assert.Contains("+0x28", Check(Slot.SetPstates20, b));
+        Assert.Null(Check(Slot.SetPstates20, b));
     }
 
     [Fact]

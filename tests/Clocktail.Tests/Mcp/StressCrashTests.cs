@@ -45,8 +45,8 @@ public class StressCrashTests
     private static object Trial(string curve, uint? fanPct = null, string at = "10:00", string change = "+15", params object[] writes) =>
         new { At = at, Change = change, Curve = curve, Marked = false, PowerMw = 450_000u, FanPct = fanPct, Writes = writes.Length == 0 ? null : writes };
 
-    /// <summary>The trial a run measured is known by its settings: the fan guard handing the fans back mid-run writes the
-    /// trial again (a new "At", a longer change, no fixed duty, no trial-only writes) with the same settings, and a crash
+    /// <summary>The trial a run measured is known by its settings: the service handing the fans back mid-run (the agent gone
+    /// quiet) writes the trial again (a new "At", a longer change, no fixed duty, no trial-only writes) with the same settings, and a crash
     /// still goes to it; other settings are another trial.</summary>
     [Fact]
     public void The_trial_a_run_measured_is_known_by_its_settings_not_by_when_it_was_written()
@@ -66,8 +66,8 @@ public class StressCrashTests
     private static BrokerAnswer Busy() => new(false, null, "another operation has held the card for over 30 s; nothing was done, try again", BrokerCode.WindowBusy);
 
     /// <summary>A measurement starts once the service says nothing is in flight ("quiet"), asked again while it is busy;
-    /// a service from before 0.3.7 does not know "quiet", and its "show" stands in (said, so stress_test holds no lock its
-    /// fan guard cannot pass); one that cannot be reached writes nothing, so the run goes on; one that stays busy, or stops
+    /// a service from before 0.3.7 does not know "quiet", and its "show" stands in (said, so stress_test holds no lock that
+    /// service cannot honour); one that cannot be reached writes nothing, so the run goes on; one that stays busy, or stops
     /// answering, runs nothing.</summary>
     [Fact]
     public void A_run_starts_once_the_service_is_quiet_and_never_in_the_middle_of_a_write()

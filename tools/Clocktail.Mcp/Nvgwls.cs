@@ -52,9 +52,19 @@ public static class Nvgwls
     /// <summary>A failure of the card, not of the run: what counts against the settings under test.</summary>
     public static bool Failed(int? code) => code is null or 3 or 4 or 5 or 6;
 
-    /// <summary>stress_test's own stop: the run was ended because the card got too hot (two samples in a row at or above
-    /// the limit, or within 2 °C of the driver's slowdown point). Neither a pass nor a failure of the settings.</summary>
-    public static bool TooHot(double? tempC, int? marginC, double maxC) => tempC >= maxC || marginC <= 2;
+    /// <summary>How close to NVIDIA's own slowdown point (NVML's temperature margin) a run may go: the one thermal stop
+    /// stress_test and lab_test make by default.</summary>
+    public const int MarginStopC = 2;
+
+    /// <summary>stress_test's and lab_test's stop (two samples in a row): within <see cref="MarginStopC"/> °C of the
+    /// driver's slowdown point, or at the person's <paramref name="maxC"/> when they gave one. Neither a pass nor a failure
+    /// of the settings. Nothing read is not a reason to stop.</summary>
+    public static bool TooHot(double? tempC, int? marginC, int? maxC) => maxC is { } m && tempC >= m || marginC <= MarginStopC;
+
+    /// <summary>Why a run that stopped hot stopped, in words: the person's maxTempC, or the margin to the slowdown point.</summary>
+    public static string HotWhy(double? tempC, int? maxC) => maxC is { } m && tempC >= m
+        ? $"at the maxTempC of {m} °C asked for"
+        : $"within {MarginStopC} °C of NVIDIA's slowdown point";
 
     /// <summary>The verdict with the System log's word on it. A driver reset during the run is the card's failure whatever
     /// the exit code: every hang measured on the reference card was a driver reset (nvlddmkm 153) followed by exit code 2,

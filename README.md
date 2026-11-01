@@ -134,7 +134,7 @@ Two things authorize a setting: you, and NVIDIA's driver and firmware. Every wri
 
 Some agents run every tool without asking (Freebuff, anything in YOLO mode). The above is why that's survivable. The other way round, Claude Code asks before every single read. `npx -y clocktail setup --allow-reads` lets the read-only tools through (card_report, gpu_status and friends); every write still asks.
 
-There's no temperature stop of Clocktail's unless you ask for one with `maxTempC`. NVIDIA's own protections stay on. Nothing gets written while the GPU looks hung. Leave an unattended session running and it stops writing new trials after the crash budget you set (two, unless you say otherwise).
+stress_test and lab_test stop when the card gets within 2 °C of NVIDIA's own slowdown point, or at a `maxTempC` you set. game_test stops only at your `maxTempC`, and the memory and uncore sweeps don't stop for heat at all. NVIDIA's own protections stay on. Nothing gets written while the GPU looks hung. Leave an unattended session running and it stops writing new trials after the crash budget you set (two, unless you say otherwise).
 
 </details>
 

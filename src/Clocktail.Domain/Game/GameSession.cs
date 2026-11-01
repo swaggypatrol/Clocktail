@@ -176,11 +176,12 @@ public sealed class GameSession(string stableId, string path, IGameAccess access
             var now = Read();
             if (!now.Same(state.Expected) && !PartialRestore(state, now))
             {
-                bool fanSafetyRelease = currentSession?.Trial?.FanPct == null && now.Target == state.Expected.Target
+                // The fans alone back on the curve: the service handed a fixed duty back (the agent went quiet).
+                bool fansHandedBack = currentSession?.Trial?.FanPct == null && now.Target == state.Expected.Target
                     && now.Curve == state.Expected.Curve && now.PowerMw == state.Expected.PowerMw && now.MinPowerMw == state.Expected.MinPowerMw
                     && state.Expected.Cells.Any(c => c.Kind == "fan" && c.Value != "auto") && now.Cells.Count == state.Expected.Cells.Count
                     && now.Cells.All(c => state.Expected.Cells.Contains(c) || c.Kind == "fan" && c.Value == "auto");
-                return fanSafetyRelease ? RestoreDaily(state, run, "the service's fan safety release interrupted the test")
+                return fansHandedBack ? RestoreDaily(state, run, "the service handed the fixed fan duty back (the agent went quiet), which interrupted the test")
                     : No("the card changed outside this job; no stale baseline was applied");
             }
             state = state with { Restoring = true };

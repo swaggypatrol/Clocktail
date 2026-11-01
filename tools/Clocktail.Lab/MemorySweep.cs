@@ -287,7 +287,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
         if (_wrote && DailyBack("tune_memory finished") is { } notBack) why += "; " + notBack;
         int? best = Best(_steps);
         string? next = state == SweepStatus.Done && best is { } b
-            ? Inv($"the edge's side is {b:+0;-0;0} MHz (the step before any slowdown that lasted). Read the steps for where bandwidth stops rising: past that an offset buys latency only, which frames did not feel on the reference card (3DMark Speedway and Steel Nomad at +2900 were no better than at +1758). Tell the person; set_memory_offset there in steps of at most 250 MHz, judge it against the daily offset with a memory-sensitive benchmark A B B A (a ray-traced one, as Speedway), their games have the last word, keep_as_daily (ask); if a game fails, step down")
+            ? Inv($"the edge's side is {b:+0;-0;0} MHz (the step before any slowdown that lasted). Read the steps for where bandwidth stops rising: past that an offset buys latency only, which frames may not feel: judge it in frames, not in the lab's numbers. Tell the person; set_memory_offset there in steps of at most 250 MHz, judge it against the daily offset with a memory-sensitive benchmark A B B A (a ray-traced one, as Speedway), their games have the last word, keep_as_daily (ask); if a game fails, step down")
             : null;
         Save(state, at, why, next, best);
         log?.Invoke($"{state}: {why}");

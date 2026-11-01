@@ -5,8 +5,8 @@ using ModelContextProtocol.Server;
 namespace Clocktail.Mcp;
 
 /// <summary>
-/// The agent's manual: what an RTX 50 card is made of, how to read it, and how to tune it, in topics embedded in this
-/// server (Manual/*.md). The server's instructions are the short version every session starts with; this is the rest,
+/// The agent's manual: what an RTX 50 card is made of, how to read it, and how to tune it, in short topics embedded in
+/// this server (Manual/*.md). The server's instructions are the short version every session starts with; this is the rest,
 /// read on demand. Each topic's first line is its title and its second line the one-line summary the index shows.
 /// </summary>
 [McpServerToolType]
@@ -35,11 +35,11 @@ public sealed class ManualTools
     private static bool IsInstructions(string topic) => topic.StartsWith("instructions", StringComparison.OrdinalIgnoreCase);
 
     [McpServerTool(Name = "manual", ReadOnly = true, OpenWorld = false), Description(
-        "The Clocktail manual for the agent: the tuning method phase by phase and why each step comes where it does, " +
-        "answers to the questions people ask, Blackwell (voltage rails, clock domains, the V/F curve, what limits the clock), " +
-        "how to read every status field, every control and how to combine them, stability testing, presets and troubleshooting. " +
-        "Call it with no topic for the index. Read 'start', 'method' and 'controls' before the first tuning session, 'why' before answering a why, and the matching topic " +
-        "before answering a question about the card you are not sure of.")]
+        "The Clocktail manual for the agent, short topics: getting started, the method in outline, every control and what " +
+        "checks it, Blackwell's rails and clock domains, reading the status, tuning, stability testing, memory, XBAR/MSVDD, " +
+        "power and thermals, user-saved profiles, troubleshooting and why settings behave as they do. It says how to measure this card, not what another card " +
+        "ran. Call it with no topic for the index. Read 'start', 'method' and 'controls' before the first tuning session, and " +
+        "the matching topic before answering a question about the card you are not sure of.")]
     public static string Manual([Description("The topic, from the index; omit for the index.")] string? topic = null)
     {
         var topics = Topics.Value;

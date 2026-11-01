@@ -7,8 +7,9 @@ using ModelContextProtocol.Server;
 namespace Clocktail.Mcp;
 
 /// <summary>
-/// The person's own yes for a change that stays: a new daily profile (keep_as_daily, load_preset), the daily power limit,
-/// the F8 power request that cannot be deleted, a saved profile deleted. The instructions always said "ask the person
+/// The person's own yes: for a session of trials (begin_session), and for a change that stays: a new daily profile
+/// (keep_as_daily, load_preset), the daily profile back on (load_daily), stock, the daily power limit, the F8 power
+/// request that cannot be deleted, a saved profile deleted. The instructions always said "ask the person
 /// first", but an agent that runs every tool without asking (Freebuff, an auto-approve mode) and a model that skips the
 /// rule made it a wish: a tester saw one change the card unasked (2026-10-24). So Clocktail asks the person itself.
 /// By default (the user, 2026-10-27) in the agent's own chat: the first call changes nothing and answers with the
@@ -16,9 +17,9 @@ namespace Clocktail.Mcp;
 /// calls again with the code. A code is good once, for that very question, for <see cref="CodeValid"/>. Until then it
 /// was an MCP elicitation form, else a Windows dialog: the desktop app's Code tab declined every form unseen, so each
 /// yes took a dialog on the desktop. CLOCKTAIL_CONFIRM: "chat" (the default), "form" (the elicitation form where the
-/// client offers one, else the Windows dialog), "dialog" (always the Windows dialog), "off" (never ask: for a person who
-/// approves every call in the agent themselves). Trials need no yes: each is recorded, and undone by back_to_daily,
-/// end_session or a crash.
+/// client offers one, else the Windows dialog), "dialog" (always the Windows dialog); the old "off" (never ask) reads as
+/// "chat" since 0.6.0. A session of trials is asked for too (begin_session); each trial is recorded and undone by
+/// back_to_daily, end_session or a crash.
 /// </summary>
 public static class Consent
 {
@@ -35,7 +36,6 @@ public static class Consent
 
     public static string Mode => Environment.GetEnvironmentVariable(Variable)?.Trim().ToLowerInvariant() switch
     {
-        "off" or "0" or "false" or "no" => "off",
         "dialog" => "dialog",
         "form" or "auto" => "form",   // "auto" was the default's name until the chat question
         _ => "chat",
@@ -44,7 +44,7 @@ public static class Consent
     /// <summary>Why nothing was done, for the agent: the reason, a code for it, and in chat the question with its code.</summary>
     public sealed record Refusal(string Error, string Code, string? Question = null, string? ConfirmCode = null);
 
-    /// <summary>Null when the person said yes (or asking is off); else why nothing may be done yet.</summary>
+    /// <summary>Null when the person said yes; else why nothing may be done yet.</summary>
     public static async Task<Refusal?> Ask(McpServer? server, string what, string? confirm, CancellationToken ct) =>
         Mode == "chat" ? Chat(what, confirm, DateTimeOffset.UtcNow)
             : await Ask(Mode, Form(server, what), q => Dialog(q), what, ct) is { } no ? new Refusal(no, "not_confirmed") : null;
@@ -79,13 +79,13 @@ public static class Consent
     }
 
     /// <summary>
-    /// The decision outside the chat, with the two ways of asking passed in: <paramref name="form"/> (null when the client
+    /// The decision outside the chat (<see cref="Mode"/> "form" or "dialog"; "chat" never comes here, and no mode skips
+    /// the question: "off" reads as "chat"), with the two ways of asking passed in: <paramref name="form"/> (null when the client
     /// offers no elicitation) answers true for yes, false for no and null when it could not ask; <paramref name="dialog"/>
     /// the same for the Windows dialog. A form that could not ask falls back to the dialog; a no is final.
     /// </summary>
     public static async Task<string?> Ask(string mode, Func<CancellationToken, Task<bool?>>? form, Func<string, bool?> dialog, string what, CancellationToken ct)
     {
-        if (mode == "off") return null;
         if (mode == "form" && form != null)
         {
             switch (await form(ct))
@@ -101,8 +101,7 @@ public static class Consent
             true => null,
             false => Declined($"in the Windows dialog, or did not answer it within {DialogWait.TotalMinutes:0} minutes"),
             null => "Clocktail could not ask the person: the question could not be shown in the agent and no Windows desktop answered. " +
-                    $"Nothing was changed. Ask them in chat; {Variable}=chat (the default) asks in the agent's chat, and {Variable}=off " +
-                    "never asks.",
+                    $"Nothing was changed. Ask them in chat; {Variable}=chat (the default) asks in the agent's chat.",
         };
     }
 

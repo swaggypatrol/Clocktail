@@ -20,8 +20,6 @@ public static class ClockLimitWrites
     public const string Kind = "clocklimit";
     public const string MaxKey = "max", MinKey = "min", VoltageKey = "voltage";
 
-    /// <summary>The highest value an entry may hold: 5 GHz for a clock, Boost Lock's 1.5 V for a voltage.</summary>
-    public const uint MaxClockKhz = 5_000_000, LowestLockUv = 450_000;
 
     public static (int Entry, uint Mode) Entry(string key) => key.ToLowerInvariant() switch
     {
@@ -59,18 +57,10 @@ public static class ClockLimitWrites
         return b;
     }
 
-    /// <summary>Why a value cannot go in the entry, or null: a clock above 5 GHz, a voltage under 450 mV or above Boost
-    /// Lock's 1.5 V, a minimum above the maximum in force (or a maximum under the minimum).</summary>
+    /// <summary>Validate the entry identity only; value acceptance is NVIDIA's decision.</summary>
     public static string? Invalid(string key, uint value, IReadOnlyList<ClientLimit> now)
     {
-        var (entry, _) = Entry(key);
-        if (value == 0) return null;
-        if (entry == 6) return value < LowestLockUv || value > ClientLimitsLayout.BoostLockUv
-            ? string.Create(CultureInfo.InvariantCulture, $"a voltage lock is {LowestLockUv / 1000} mV..{ClientLimitsLayout.BoostLockUv / 1000} mV (1500 = Boost Lock)") : null;
-        if (value > MaxClockKhz) return string.Create(CultureInfo.InvariantCulture, $"{value / 1000.0} MHz is above {MaxClockKhz / 1000} MHz");
-        uint? max = now.FirstOrDefault(l => l.Domain == 0)?.Value, min = now.FirstOrDefault(l => l.Domain == 1)?.Value;
-        if (entry == 1 && max is > 0 && value > max) return string.Create(CultureInfo.InvariantCulture, $"a minimum of {value / 1000.0} MHz is above the maximum in force ({max / 1000.0} MHz)");
-        if (entry == 0 && min is > 0 && value < min) return string.Create(CultureInfo.InvariantCulture, $"a maximum of {value / 1000.0} MHz is under the minimum in force ({min / 1000.0} MHz)");
+        Entry(key); // Validate the key; NVIDIA decides which uint32 values it accepts.
         return null;
     }
 

@@ -80,16 +80,16 @@ public class ClockLimitWritesTests : IDisposable
     }
 
     [Fact]
-    public void A_clock_range_is_two_entries_and_a_minimum_above_the_maximum_is_refused()
+    public void Clock_lock_values_are_decided_by_the_driver_not_a_software_envelope()
     {
         var hw = Install();
         Assert.Equal(TxOutcome.Applied, Write(hw, ClockLimitWrites.MaxKey, "2400000").Tx.Outcome);
         Assert.Equal(TxOutcome.Applied, Write(hw, ClockLimitWrites.MinKey, "1200000").Tx.Outcome);
         Assert.Equal(["maximum clock 2400 MHz", "minimum clock 1200 MHz"], ClientLimitsLayout.Parse(FakeDriver.State[Word]).Select(l => l.Describe()));
         var bad = Write(hw, ClockLimitWrites.MinKey, "2500000");
-        Assert.Equal(TxOutcome.Aborted, bad.Tx.Outcome);
-        Assert.Contains("above the maximum in force", bad.Tx.Detail);
-        Assert.Equal(TxOutcome.Aborted, Write(hw, ClockLimitWrites.VoltageKey, "400000").Tx.Outcome);   // under 450 mV
+        Assert.Equal(TxOutcome.Applied, bad.Tx.Outcome);
+        Assert.Equal(TxOutcome.Applied, Write(hw, ClockLimitWrites.VoltageKey, "400000").Tx.Outcome);
+        Assert.Equal(TxOutcome.Applied, Write(hw, ClockLimitWrites.MaxKey, "6000000").Tx.Outcome);
     }
 
     [Fact]

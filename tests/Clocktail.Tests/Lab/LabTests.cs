@@ -324,7 +324,7 @@ public class LabTests
         var e = new FakeEngine();
         var (clock, sleep) = FakeTime(e);
         // The fake clock runs the load in microseconds; the sampler loops freely so its two readings come first.
-        var runner = new LabRunner(new LabConfig(LabConfig.Parse("burn", 60_000), SampleMs: 100), e, new TempSampler(() => 95), clock, sleep, sampleWait: _ => Thread.Yield());
+        var runner = new LabRunner(new LabConfig(LabConfig.Parse("burn", 60_000), SampleMs: 100, MaxTempC: 85), e, new TempSampler(() => 95), clock, sleep, sampleWait: _ => Thread.Yield());
         var phases = runner.Run(CancellationToken.None);
         var (verdict, reasons) = LabRunner.Judge(phases, 1, runner.Interrupted);
         Assert.Equal(LabResult.Inconclusive, verdict);

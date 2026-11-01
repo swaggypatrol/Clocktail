@@ -147,71 +147,6 @@ public class RailWritesTests : IDisposable
     }
 
     [Fact]
-    public void A_raise_is_allowed_up_to_the_standard_ceiling_and_refused_one_step_beyond_without_a_set_call()
-    {
-        var (rails, _) = Setup();
-        var over = rails.Apply(_gpu, Rail.Nvvdd, Rel(60_000));   // 1.095 + 0.060 = 1.155 V > 1.15 V
-        Assert.Equal(TxOutcome.Aborted, over.Tx.Outcome);
-        Assert.Contains("above the firmware-reported ceiling of 1150 mV", over.Tx.Detail);
-        Assert.Equal(0, FakeDriver.Sets);
-        Assert.Null(_journal.Load());
-
-        var top = rails.Apply(_gpu, Rail.Nvvdd, Rel(55_000));    // exactly 1.150 V
-        Assert.Equal(TxOutcome.Applied, top.Tx.Outcome);
-        Assert.Equal(1_150_000u, top.LimitsAfter!.Value.RelUv);
-        Assert.Equal(1_115_000u, top.LimitsAfter!.Value.MaxUv);   // ALT/OP 1.115 V now bounds MAX
-    }
-
-    [Fact]
-    public void OV_can_be_lowered_but_never_raised_because_it_already_sits_above_the_ceiling()
-    {
-        var (rails, _) = Setup();
-        var up = rails.Apply(_gpu, Rail.Nvvdd, new RailRules.Request(null, null, null, 5_000));
-        Assert.Equal(TxOutcome.Aborted, up.Tx.Outcome);
-        Assert.Contains("OV would rise to 1205 mV", up.Tx.Detail);
-        var down = rails.Apply(_gpu, Rail.Nvvdd, new RailRules.Request(null, null, null, -5_000));
-        Assert.Equal(TxOutcome.Applied, down.Tx.Outcome);
-    }
-
-    [Fact]
-    public void A_change_that_is_not_a_whole_number_of_voltage_steps_is_refused_before_the_write()
-    {
-        var (rails, _) = Setup();
-        var r = rails.Apply(_gpu, Rail.Nvvdd, Rel(-3_000));
-        Assert.Equal(TxOutcome.Aborted, r.Tx.Outcome);
-        Assert.Contains("not a whole number of the rail's 5 mV steps", r.Tx.Detail);
-        Assert.Equal(0, FakeDriver.Sets);
-    }
-
-    [Fact]
-    public void VMIN_cannot_be_raised_past_REL()
-    {
-        var (rails, _) = Setup();
-        // MSVDD: REL 1.045 V, VMIN 0.825 V; VMIN +225 mV = 1.050 V > REL.
-        var r = rails.Apply(_gpu, Rail.Msvdd, new RailRules.Request(225_000, null, null, null));
-        Assert.Equal(TxOutcome.Aborted, r.Tx.Outcome);
-        Assert.Contains("above the rail's resulting MAX", r.Tx.Detail);
-    }
-
-    [Fact]
-    public void A_driver_whose_MAX_lands_above_the_ceiling_gets_the_rail_back()
-    {
-        var (rails, _) = Setup();
-        _maxBias = 40_000;   // MAX = min(...) + 40 mV: 1.135 V at stock, 1.155 V after +20 mV REL
-        var r = rails.Apply(_gpu, Rail.Nvvdd, Rel(20_000));
-        Assert.Equal(TxOutcome.Applied, r.Tx.Outcome);
-        Assert.False(r.Succeeded);
-        Assert.Contains("nvvdd:", r.Violation);
-        Assert.NotNull(r.RolledBack);
-        Assert.Equal(TxOutcome.Applied, r.RolledBack!.Tx.Outcome);
-        Assert.Equal(0, ControlField(Rail.Nvvdd, RailSlot.Rel));
-        Assert.StartsWith("released", r.Ownership);
-        Assert.Equal(new RailOffsets(0, 0, 0, 0), r.AfterOffsets);
-        Assert.Null(_journal.Load()?.Items.FirstOrDefault());
-        Assert.Empty(r.Surprises);   // REL itself moved as predicted; only the derived MAX was off
-    }
-
-    [Fact]
     public void Offsets_that_moved_between_the_status_read_and_the_write_snapshot_abort_the_plan()
     {
         var (rails, _) = Setup();
@@ -311,118 +246,10 @@ public class RailWritesTests : IDisposable
         Assert.Equal(Hold.Released, new OwnedWriter(hw, _journal, _sentinel, _host).Write(_gpu, cell2, plan2).Hold);
     }
 
-    [Fact]
-    public void A_rail_left_above_the_ceiling_by_another_tool_can_still_be_moved_back_towards_it()
-    {
-        var (rails, _) = Setup();
-        // Another tool's XOC left NVVDD at REL +100 / ALT +100: MAX = min(1.195, 1.215, 1.2) = 1.195 V > 1.15 V.
-        W(FakeDriver.State[ControlWord], Field(Rail.Nvvdd, RailSlot.Rel), 100_000);
-        W(FakeDriver.State[ControlWord], Field(Rail.Nvvdd, RailSlot.Alt), 100_000);
-
-        var lower = rails.Apply(_gpu, Rail.Nvvdd, Rel(75_000));   // MAX 1.17 V: still above, but lower
-        Assert.Equal(TxOutcome.Applied, lower.Tx.Outcome);
-        Assert.Null(lower.Violation);
-        Assert.Null(lower.RolledBack);
-        Assert.Equal(75_000, ControlField(Rail.Nvvdd, RailSlot.Rel));
-
-        var msvdd = rails.Apply(_gpu, Rail.Msvdd, Rel(-55_000));  // the other rail's old excess does not trap it
-        Assert.True(msvdd.Succeeded, msvdd.Violation ?? msvdd.Tx.ToString());
-
-        // From above the ceiling a raise may go only as far as the state the hardware held before we owned the cell.
-        Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Rel(80_000)).Succeeded);
-        Assert.Equal(TxOutcome.Aborted, rails.Apply(_gpu, Rail.Nvvdd, Rel(105_000)).Tx.Outcome);
-    }
-
-    [Fact]
-    public void ALT_cannot_be_lowered_under_VMIN_because_ALT_is_part_of_MAX()
-    {
-        var (rails, _) = Setup();
-        // NVVDD ALT 1.115 V − 320 mV = 0.795 V < VMIN 0.8 V.
-        var r = rails.Apply(_gpu, Rail.Nvvdd, new RailRules.Request(null, null, -320_000, null));
-        Assert.Equal(TxOutcome.Aborted, r.Tx.Outcome);
-        Assert.Contains("above the rail's resulting MAX of 795 mV", r.Tx.Detail);
-        Assert.Equal(0, FakeDriver.Sets);
-        // −315 mV is fine for NVVDD (0.8 V) but would put a tracking MSVDD's ALT (and MAX) at 0.8 V, under its 0.825 V VMIN.
-        var coupled = rails.Apply(_gpu, Rail.Nvvdd, new RailRules.Request(null, null, -315_000, null));
-        Assert.Equal(TxOutcome.Aborted, coupled.Tx.Outcome);
-        Assert.Contains("under its VMIN of 825 mV", coupled.Tx.Detail);
-        Assert.Equal(TxOutcome.Applied, rails.Apply(_gpu, Rail.Nvvdd, new RailRules.Request(null, null, -290_000, null)).Tx.Outcome);
-    }
-
-    [Fact]
-    public void Range_bounds_are_exactly_what_the_plan_accepts()
-    {
-        Setup();
-        var snap = RailsReader.Read(new NvClient(FakeDriver.ApiFor(
-            [Slot.VoltVoltRailsGetInfo, Slot.VoltVoltRailsGetControl, Slot.VoltVoltRailsGetStatus, Slot.VoltVoltDevicesGetInfo],
-            [Slot.VoltVoltRailsSetControl])), _gpu);
-        foreach (var rail in snap.Rails)
-            foreach (var slot in new[] { RailSlot.Rel, RailSlot.Alt, RailSlot.Ov, RailSlot.Vmin })
-            {
-                var range = RailWriteRules.Range(rail, slot);
-                Assert.NotNull(range);
-                var (lo, hi) = range!.Value;
-                RailRules.Request Req(int v) => slot switch
-                {
-                    RailSlot.Rel => new(null, v, null, null), RailSlot.Alt => new(null, null, v, null),
-                    RailSlot.Ov => new(null, null, null, v), _ => new(v, null, null, null),
-                };
-                bool Ok(int v) => RailWriteRules.Check(rail, Req(v)) == null && RailRules.Plan(rail, Req(v), xoc: false) is Mutation.Apply;
-                Assert.True(Ok(lo), $"{rail.Rail} {slot} low {lo}");
-                Assert.True(Ok(hi), $"{rail.Rail} {slot} high {hi}");
-                Assert.False(Ok(lo - 5_000), $"{rail.Rail} {slot} below {lo}");
-                Assert.False(Ok(hi + 5_000), $"{rail.Rail} {slot} above {hi}");
-            }
-        // 5090 numbers: NVVDD REL up to +55 mV (1.15 V); OV cannot rise; VMIN at most up to MAX 1.095 V.
-        var nv = snap.Get(Rail.Nvvdd)!;
-        Assert.Equal(55_000, RailWriteRules.Range(nv, RailSlot.Rel)!.Value.MaxUv);
-        Assert.Equal(0, RailWriteRules.Range(nv, RailSlot.Ov)!.Value.MaxUv);
-        Assert.Equal(295_000, RailWriteRules.Range(nv, RailSlot.Vmin)!.Value.MaxUv);
-    }
-
-    [Fact]
-    public void The_snapshot_Range_is_exactly_what_the_plan_accepts_coupling_and_origin_included()
-    {
-        var (rails, hw) = Setup();
-        RailRules.Request Req(RailSlot slot, int v) => slot switch
-        {
-            RailSlot.Rel => new(null, v, null, null), RailSlot.Alt => new(null, null, v, null),
-            RailSlot.Ov => new(null, null, null, v), _ => new(v, null, null, null),
-        };
-        void Exact(RailsSnapshot snap, RailOffsets? origin)
-        {
-            foreach (var rail in snap.Rails)
-                foreach (var slot in new[] { RailSlot.Rel, RailSlot.Alt, RailSlot.Ov, RailSlot.Vmin })
-                {
-                    var (lo, hi) = RailWriteRules.Range(snap, rail.Rail, slot, rail.Rail == Rail.Nvvdd ? origin : null)!.Value;
-                    bool Ok(int v) => RailWrites.Decide(snap, rail.Rail, Req(slot, v), rail.Rail == Rail.Nvvdd ? origin : null) is Mutation.Apply;
-                    Assert.True(Ok(lo) && Ok(hi), $"{rail.Rail} {slot} [{lo}, {hi}]");
-                    Assert.False(Ok(lo - 5_000), $"{rail.Rail} {slot} below {lo}");
-                    Assert.False(Ok(hi + 5_000), $"{rail.Rail} {slot} above {hi}");
-                }
-        }
-        var stock = RailsReader.Read(hw, _gpu);
-        Exact(stock, null);
-        // The stock 5090 has the tracking signature: MSVDD's VMIN 0.825 V bounds NVVDD from below (UI thread's numbers).
-        Assert.Equal(-220_000, RailWriteRules.Range(stock, Rail.Nvvdd, RailSlot.Rel)!.Value.MinUv);
-        Assert.Equal(-290_000, RailWriteRules.Range(stock, Rail.Nvvdd, RailSlot.Alt)!.Value.MinUv);
-        Assert.Equal(-375_000, RailWriteRules.Range(stock, Rail.Nvvdd, RailSlot.Ov)!.Value.MinUv);
-        Assert.Equal(-355_000, RailWriteRules.Range(stock, Rail.Nvvdd, RailSlot.Vmin)!.Value.MinUv);
-        Assert.Equal(55_000, RailWriteRules.Range(stock, Rail.Nvvdd, RailSlot.Rel)!.Value.MaxUv);
-
-        // After OV −5 the slider reaches back to stock 1.2 V (the origin), and no further.
-        Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Ov(-5_000)).Succeeded);
-        var after = RailsReader.Read(hw, _gpu);
-        var origin = RailWrites.Decode(_journal.Load()!.Items.Single().Original);
-        Exact(after, origin);
-        Assert.Equal(0, RailWriteRules.Range(after, Rail.Nvvdd, RailSlot.Ov, origin)!.Value.MaxUv);
-        Assert.Equal(-5_000, RailWriteRules.Range(after, Rail.Nvvdd, RailSlot.Ov)!.Value.MaxUv);   // without the origin: stuck
-    }
-
     private static RailRules.Request Ov(int uv) => new(null, null, null, uv);
 
     [Fact]
-    public void A_lowered_OV_can_be_put_back_although_stock_OV_sits_above_the_ceiling()
+    public void A_lowered_OV_can_be_put_back_to_stock()
     {
         var (rails, _) = Setup();
         Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Ov(-5_000)).Succeeded);
@@ -446,99 +273,12 @@ public class RailWritesTests : IDisposable
     }
 
     [Fact]
-    public void The_rollback_after_a_violating_OV_write_reaches_the_state_before_it()
-    {
-        var (rails, _) = Setup();
-        _maxBias = unchecked((uint)-100_000);   // MAX derived 100 mV under min(REL, ALT, OV): OV -305 lands with VMIN > MAX
-        var r = rails.Apply(_gpu, Rail.Nvvdd, Ov(-305_000));
-        Assert.Equal(TxOutcome.Applied, r.Tx.Outcome);
-        Assert.Contains("VMIN 800 mV is above MAX", r.Violation);
-        Assert.Equal(TxOutcome.Applied, r.RolledBack!.Tx.Outcome);
-        Assert.Equal(0, ControlField(Rail.Nvvdd, RailSlot.Ov));
-        Assert.StartsWith("released", r.Ownership);
-    }
-
-    [Fact]
-    public void A_foreign_original_above_the_ceiling_can_be_restored_but_never_exceeded()
-    {
-        var (rails, hw) = Setup();
-        W(FakeDriver.State[ControlWord], Field(Rail.Nvvdd, RailSlot.Rel), 100_000);   // another tool's XOC: REL 1.195 V
-        Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Rel(75_000)).Succeeded);
-        Assert.Equal(TxOutcome.Aborted, rails.Apply(_gpu, Rail.Nvvdd, Rel(105_000)).Tx.Outcome);   // past the original: refused
-
-        var back = rails.Apply(_gpu, Rail.Nvvdd, Rel(100_000));   // exactly the original: a return
-        Assert.Equal(TxOutcome.Applied, back.Tx.Outcome);
-        Assert.Null(back.Violation);
-        Assert.StartsWith("released", back.Ownership);
-
-        // Once released there is no original any more: the same value is now an ordinary request, and a raise.
-        Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Rel(75_000)).Succeeded);
-        _journal.Clear();
-        Assert.Equal(TxOutcome.Aborted, rails.Apply(_gpu, Rail.Nvvdd, Rel(100_000)).Tx.Outcome);
-    }
-
-    [Fact]
-    public void Only_a_give_back_skips_the_direction_rules_a_complete_user_value_does_not()
-    {
-        var (_, hw) = Setup();
-        var (cell, plan) = RailWrites.Prepare(hw, _gpu, "nvvdd", "rel=100000,alt=0,ov=0,vmin=0");
-        Assert.Equal(TxOutcome.Aborted, new OwnedWriter(hw, _journal, _sentinel, _host).Apply(_gpu, cell, plan).Tx.Outcome);
-        Assert.Throws<FormatException>(() => RailWrites.Prepare(hw, _gpu, "nvvdd", "ov=0", original: "ov=0"));   // an original is complete
-    }
-
-    [Fact]
-    public void An_NVVDD_raise_that_would_lift_a_tracking_MSVDD_over_the_ceiling_is_refused_before_the_write()
-    {
-        var (rails, _) = Setup();
-        _coupled = true;
-        // The fixture has the 5090's signature: MSVDD bases (1.095/1.115/1.2) equal NVVDD's evaluated limits.
-        // MSVDD REL −50 → +50 (1.145 V) and ALT +35 (1.15 V): MSVDD MAX 1.145 V, inside the ceiling.
-        Assert.True(rails.Apply(_gpu, Rail.Msvdd, new RailRules.Request(null, 50_000, 35_000, null)).Succeeded);
-        // NVVDD REL +55 (1.15 V) would shift MSVDD REL to 1.2 V and its MAX to 1.15 V: still fine.
-        Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Rel(55_000)).Succeeded);
-        // NVVDD ALT +35: in its own plan fine (1.15 V), but a tracking MSVDD's MAX would go to 1.185 V.
-        var r = rails.Apply(_gpu, Rail.Nvvdd, new RailRules.Request(null, null, 35_000, null));
-        Assert.Equal(TxOutcome.Aborted, r.Tx.Outcome);
-        Assert.Contains("MSVDD tracks NVVDD", r.Tx.Detail);
-    }
-
-    [Fact]
     public void Without_the_tracking_signature_NVVDD_is_judged_on_its_own()
     {
         var (rails, _) = Setup();
         Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Rel(-5_000)).Succeeded);   // NVVDD REL eval now 1.090 ≠ MSVDD REL base 1.095
         Assert.True(rails.Apply(_gpu, Rail.Msvdd, new RailRules.Request(null, 50_000, 35_000, null)).Succeeded);
         Assert.True(rails.Apply(_gpu, Rail.Nvvdd, new RailRules.Request(null, 55_000, 35_000, null)).Succeeded);
-    }
-
-    [Fact]
-    public void PrepareVerified_judges_relative_to_its_own_snapshot()
-    {
-        var (_, hw) = Setup();
-        _maxBias = 100_000;   // MAX 1.195 V at stock: above the ceiling before anything is written
-        var writer = new OwnedWriter(hw, _journal, _sentinel, _host);
-        Assert.NotNull(RailWriteRules.CheckAfterWrite(RailsReader.Read(hw, _gpu)));   // the absolute form traps it
-        var (cell, plan, verify) = RailWrites.PrepareVerified(hw, _gpu, "nvvdd", "rel=-5000");
-        Assert.Equal(TxOutcome.Applied, writer.Apply(_gpu, cell, plan).Tx.Outcome);
-        Assert.Null(verify(hw, _gpu));   // MAX went down: not worse
-        (cell, plan, verify) = RailWrites.PrepareVerified(hw, _gpu, "nvvdd", "rel=5000");
-        Assert.Equal(TxOutcome.Applied, writer.Apply(_gpu, cell, plan).Tx.Outcome);
-        Assert.Contains("above the ceiling", verify(hw, _gpu));   // MAX went up while outside
-    }
-
-    [Fact]
-    public void A_lowered_OV_goes_back_slot_by_slot_even_while_other_slots_stay_changed()
-    {
-        var (rails, _) = Setup();
-        Assert.True(rails.Apply(_gpu, Rail.Nvvdd, new RailRules.Request(null, -5_000, null, -5_000)).Succeeded);
-        // OV alone back to stock 1.2 V (above the ceiling) while REL stays at −5: the target is not the whole
-        // original, but OV only goes as far as its origin.
-        var r = rails.Apply(_gpu, Rail.Nvvdd, Ov(0));
-        Assert.Equal(TxOutcome.Applied, r.Tx.Outcome);
-        Assert.Null(r.Violation);
-        Assert.Equal(0, ControlField(Rail.Nvvdd, RailSlot.Ov));
-        Assert.Equal(-5_000, ControlField(Rail.Nvvdd, RailSlot.Rel));
-        Assert.Equal(TxOutcome.Aborted, rails.Apply(_gpu, Rail.Nvvdd, Ov(5_000)).Tx.Outcome);   // past the origin: never
     }
 
     [Fact]
@@ -568,59 +308,98 @@ public class RailWritesTests : IDisposable
         Assert.NotNull(WritePolicySet.Default.Check(Slot.VoltVoltRailsSetControl, buf));
     }
 
-    [Fact]
-    public void The_top_names_the_binding_slot_the_next_wall_and_how_far_the_rules_let_it_move()
+    // No software envelope: anything inside the domain the firmware reports (445..1280 mV here) reaches the driver,
+    // past the old 1.15 V standard ceiling too, and goes back exactly through the journal's original.
+    [Theory]
+    [InlineData("rel=60000")]
+    [InlineData("rel=140000")]
+    [InlineData("ov=5000")]
+    [InlineData("rel=-3000")]
+    [InlineData("vmin=400000")]
+    [InlineData("alt=-320000")]
+    [InlineData("rel=100000,alt=100000,ov=80000,vmin=0")]
+    public void Requests_inside_the_reported_domain_are_not_vetoed_by_tuning_policy(string value)
     {
         var (_, hw) = Setup();
-        var stock = RailsReader.Read(hw, _gpu);
-        var nv = RailTop.Of(stock, Rail.Nvvdd)!;
-        Assert.Equal(1_095_000u, nv.MaxUv);
-        Assert.Equal([RailSlot.Rel], nv.Binding);
-        Assert.Equal((RailSlot?)RailSlot.Alt, nv.Next);
-        Assert.Equal(1_115_000u, nv.NextUv);
-        Assert.Equal(1_150_000u, nv.ReachUpUv);     // REL and ALT both stop at the ceiling; OV stays at 1.2 V
-        Assert.Equal(825_000u, nv.ReachDownUv);     // ALT/OV go down to MSVDD's VMIN (the tracking guard)
-        Assert.Equal(5_000u, nv.StepUv);
-
-        var ms = RailTop.Of(stock, Rail.Msvdd)!;
-        Assert.Equal(1_045_000u, ms.MaxUv);          // stock REL −50 mV is what binds MSVDD
-        Assert.Equal([RailSlot.Rel], ms.Binding);
-        Assert.Equal(1_150_000u, ms.ReachUpUv);
+        var (cell, plan) = RailWrites.Prepare(hw, _gpu, "nvvdd", value);
+        var r = new OwnedWriter(hw, _journal, _sentinel, _host).Apply(_gpu, cell, plan);
+        Assert.Equal(TxOutcome.Applied, r.Tx.Outcome);
+        Assert.True(FakeDriver.Sets > 0);
+        var original = _journal.Load()!.Items.Single().Original;
+        (cell, plan) = RailWrites.Prepare(hw, _gpu, "nvvdd", original, original);
+        Assert.Equal(TxOutcome.Applied, new OwnedWriter(hw, _journal, _sentinel, _host).Apply(_gpu, cell, plan).Tx.Outcome);
+        Assert.Empty(_journal.Load()?.Items ?? []);
     }
 
     [Fact]
-    public void A_tie_binds_both_slots_and_the_next_wall_moves_up()
+    public void Derived_voltage_and_inferred_coupling_do_not_override_driver_acceptance()
+    {
+        var (rails, _) = Setup();
+        _coupled = true;
+        _maxBias = 100_000;
+        Assert.True(rails.Apply(_gpu, Rail.Msvdd, new RailRules.Request(null, 50_000, 35_000, null)).Succeeded);
+        var r = rails.Apply(_gpu, Rail.Nvvdd, new RailRules.Request(null, 100_000, 100_000, null));
+        Assert.True(r.Succeeded);
+        Assert.Null(r.Violation);
+        Assert.Equal(100_000, ControlField(Rail.Nvvdd, RailSlot.Rel));
+    }
+
+    /// <summary>The firmware-reported domain maximum binds as its minimum does: a slot evaluating past 1280 mV here
+    /// is refused before the driver.</summary>
+    [Theory]
+    [InlineData("ov=85000")]                 // 1.285 V
+    [InlineData("rel=190000")]               // 1.285 V
+    [InlineData("vmin=485000")]              // 1.285 V
+    [InlineData("rel=-655000")]              // 440 mV, under the domain minimum
+    public void A_slot_past_the_reported_domain_is_refused_before_the_driver(string value)
+    {
+        var (_, hw) = Setup();
+        var (cell, plan) = RailWrites.Prepare(hw, _gpu, "nvvdd", value);
+        var r = new OwnedWriter(hw, _journal, _sentinel, _host).Apply(_gpu, cell, plan);
+        Assert.Equal(TxOutcome.Aborted, r.Tx.Outcome);
+        Assert.Contains("the reported device", r.Tx.Detail);
+        Assert.Equal(0, FakeDriver.Sets);
+        Assert.Null(_journal.Load());
+    }
+
+    /// <summary>Off the 5 mV grid is rounded before the write, so it lands and reads back; the rounding is a finding.
+    /// The original goes back exactly, off the grid or not: the hardware held it.</summary>
+    [Fact]
+    public void An_offset_off_the_step_grid_is_rounded_before_the_write_and_the_original_goes_back_exactly()
     {
         var (rails, hw) = Setup();
-        Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Rel(20_000)).Succeeded);
-        var origin = RailWrites.Decode(_journal.Load()!.Items.Single().Original);
-        var top = RailTop.Of(RailsReader.Read(hw, _gpu), Rail.Nvvdd, origin)!;
-        Assert.Equal(1_115_000u, top.MaxUv);
-        Assert.Equal([RailSlot.Rel, RailSlot.Alt], top.Binding);
-        Assert.Equal((RailSlot?)RailSlot.Ov, top.Next);
-        Assert.Equal(1_200_000u, top.NextUv);
+        var r = rails.Apply(_gpu, Rail.Nvvdd, Rel(-3_000));
+        Assert.True(r.Succeeded, r.Tx.ToString());
+        Assert.Equal(-5_000, ControlField(Rail.Nvvdd, RailSlot.Rel));
+        Assert.Contains("REL: -3 mV asked, -5 mV written (whole 5 mV steps)", r.Surprises);
+        Assert.Equal(1, FakeDriver.Sets);                                     // one write, no write-then-roll-back
+        Assert.StartsWith("released", rails.Apply(_gpu, Rail.Nvvdd, Rel(0)).Ownership);
+
+        W(FakeDriver.State[ControlWord], Field(Rail.Nvvdd, RailSlot.Rel), 3_000);   // another tool left it off the grid
+        r = rails.Apply(_gpu, Rail.Nvvdd, Rel(-5_000));                      // -8 mV from where it is: 2 steps
+        Assert.True(r.Succeeded);
+        Assert.Equal(-7_000, ControlField(Rail.Nvvdd, RailSlot.Rel));
+        var original = _journal.Load()!.Items.Single().Original;
+        Assert.Equal("rel=3000,alt=0,ov=0,vmin=0", original);
+        var (cell, plan) = RailWrites.GiveBack(hw, _gpu, Rail.Nvvdd, original);
+        Assert.Equal(Hold.Released, new OwnedWriter(hw, _journal, _sentinel, _host).Write(_gpu, cell, plan).Hold);
+        Assert.Equal(3_000, ControlField(Rail.Nvvdd, RailSlot.Rel));
     }
 
     [Fact]
-    public void A_max_under_all_three_binds_no_slot_and_cannot_be_lifted()
+    public void An_origin_is_for_recovery_not_a_ceiling_on_new_requests()
     {
-        var (_, hw) = Setup();
-        _maxBias = unchecked((uint)-10_000);
-        var top = RailTop.Of(RailsReader.Read(hw, _gpu), Rail.Nvvdd)!;
-        Assert.Equal(1_085_000u, top.MaxUv);
-        Assert.Empty(top.Binding);
-        Assert.Equal((RailSlot?)RailSlot.Rel, top.Next);
-        Assert.Equal(top.MaxUv, top.ReachUpUv);
+        var (rails, _) = Setup();
+        W(FakeDriver.State[ControlWord], Field(Rail.Nvvdd, RailSlot.Rel), 100_000);
+        Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Rel(75_000)).Succeeded);
+        Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Rel(105_000)).Succeeded);
+        var back = rails.Apply(_gpu, Rail.Nvvdd, Rel(100_000));
+        Assert.True(back.Succeeded);
+        Assert.StartsWith("released", back.Ownership);
+        Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Rel(75_000)).Succeeded);
+        _journal.Clear();
+        Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Rel(100_000)).Succeeded);
     }
 
-    [Theory]
-    [InlineData(1_095_000u, 1_090_000u, true)]    // drill 20: light load, stock
-    [InlineData(1_070_000u, 1_065_000u, true)]    // light load under REL −25
-    [InlineData(1_070_000u, 1_015_000u, false)]   // power-capped burn: the wall holds it, not the top
-    [InlineData(1_095_000u, 1_020_000u, false)]
-    public void The_top_holds_a_load_only_within_two_steps_of_it(uint max, uint operating, bool holds)
-    {
-        var top = new RailTop(Rail.Nvvdd, max, [RailSlot.Rel], RailSlot.Alt, 1_115_000, 1_150_000, 825_000, 5_000);
-        Assert.Equal(holds, top.Holds(operating));
-    }
+
 }

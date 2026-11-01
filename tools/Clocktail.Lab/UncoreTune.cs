@@ -1,12 +1,13 @@
 using System.Text.Json;
 using Clocktail.Domain.Broker;
+using Clocktail.Domain.Clocks;
 using Clocktail.Domain.Platform;
 
 namespace Clocktail.Lab;
 
 /// <summary>The settings the uncore tuner moves, all absolute: XBAR's clock offset and its voltage demand on MSVDD, the
-/// XBAR/core clock ratio (raw U16.16; 0.8999 = 58976 stock), the voltage boost (percent: every rail's REL limit +5 mV per
-/// 25 %, +20 at 100 % on a 5090, so MSVDD's ceiling and XBAR's with it).</summary>
+/// XBAR/core clock ratio (raw U16.16; 58976 = 0.8999), the voltage boost (percent; what it does to every rail's REL limit,
+/// MSVDD's and so XBAR's ceiling with it, is the driver's and the card's).</summary>
 public sealed record UncoreSetting(int XbarMhz, int DemandMv, uint RatioRaw, int BoostPct)
 {
     public double Ratio => RatioRaw / 65536.0;
@@ -15,29 +16,24 @@ public sealed record UncoreSetting(int XbarMhz, int DemandMv, uint RatioRaw, int
 }
 
 /// <summary>
-/// What tune_uncore asks for: the card, its curve, where the settings are now, and the limits. The demand rule is
-/// adjust_xbar's (measured on the reference card): above CliffMhz of XBAR offset the demand must be CliffDemandMv or more,
-/// above HighMhz HighDemandMv, or memory-bound work drops MSVDD to its floor and pins the core near 1610 MHz.
-/// BoostKey: the boost path the card takes ("legacy" on a 5090, whose NVVDD is kind 3, or "independent"). Candidates: a
-/// list to compare, each against Start, instead of the search.
+/// The card, its curve and search parameters. The search bounds steer the search, not the writes: explicit candidates
+/// reach the driver as given, held only to what the fields can mean (<see cref="Outside"/>). BoostKey: the boost path the
+/// card takes ("legacy" where NVVDD is kind 3, or "independent"). Candidates: a list to compare, each against Start,
+/// instead of the search.
 /// </summary>
 public sealed record UncoreSpec(string StableId, string Pci, string Curve, UncoreSetting Start,
     int XbarMaxMhz = 500, int XbarStepMhz = 50, int DemandMaxMv = 50, int DemandStepMv = 10,
-    int CliffMhz = 250, int CliffDemandMv = 20, int HighMhz = 300, int HighDemandMv = 50,
     double RatioMax = 0.95, double RatioStep = 0.025, int BoostMaxPct = 100, int BoostStepPct = 25,
     int Seconds = 20, int WarmupSeconds = 60, int GraceSeconds = 45, string BoostKey = "legacy",
     IReadOnlyList<UncoreSetting>? Candidates = null)
 {
-    /// <summary>The least voltage demand an XBAR offset needs.</summary>
-    public int Needed(int xbarMhz) => xbarMhz > HighMhz ? HighDemandMv : xbarMhz > CliffMhz ? CliffDemandMv : 0;
-
-    /// <summary>Why a setting is outside the limits or the demand rule; null when it may be tried.</summary>
+    /// <summary>What a candidate's fields cannot mean, or null: an XBAR offset the driver's signed field cannot hold, a
+    /// demand past ±1000 mV (a units slip), a ratio of 0 (no ratio), a boost outside 0..100 %. Not a tuning range.</summary>
     public string? Outside(UncoreSetting s) =>
-        s.XbarMhz > XbarMaxMhz ? $"XBAR past +{XbarMaxMhz} MHz"
-        : s.DemandMv > DemandMaxMv ? $"demand past +{DemandMaxMv} mV"
-        : s.DemandMv < Needed(s.XbarMhz) ? $"XBAR +{s.XbarMhz} MHz needs +{Needed(s.XbarMhz)} mV of demand (the cliff)"
-        : s.RatioRaw > (uint)Math.Round(RatioMax * 65536) ? FormattableString.Invariant($"the ratio past {RatioMax:0.000}")
-        : s.BoostPct < 0 || s.BoostPct > BoostMaxPct ? $"the boost outside 0..{BoostMaxPct} %"
+        (long)s.XbarMhz * 1000 is < int.MinValue or > int.MaxValue ? "XBAR does not fit the driver's signed field"
+        : ClockVdemand.Implausible((long)s.DemandMv * 1000) is { } slip ? slip
+        : s.RatioRaw < ClockRatio.MinRaw ? "a ratio of 0 is not a ratio"
+        : s.BoostPct < 0 || s.BoostPct > 100 ? "the boost outside the driver's 0..100 %"
         : null;
 }
 
@@ -169,7 +165,7 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
         return kept;
     }
 
-    /// <summary>XBAR's offset a step at a time, each with the least demand the rule asks for it (never less than the best's);
+    /// <summary>XBAR's offset a step at a time, each with the best's demand (no MHz-to-mV rule is imposed);
     /// a step that hits the cliff (the memory phase's core pinned) is tried again with more demand, a step at a time, before
     /// it counts as a miss.</summary>
     private void Xbar()
@@ -178,7 +174,7 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
         int misses = 0;
         for (int x = Best.XbarMhz + spec.XbarStepMhz; x <= spec.XbarMaxMhz && Ended == null; x += spec.XbarStepMhz)
         {
-            int demand = Math.Max(Best.DemandMv, spec.Needed(x));
+            int demand = Best.DemandMv;
             if (demand > spec.DemandMaxMv) break;
             string o = Try(Best with { XbarMhz = x, DemandMv = demand });
             while (Ended == null && o == Comparison.NotBetter && Log[^1].Veto == Comparison.Cliff && demand + spec.DemandStepMv <= spec.DemandMaxMv)

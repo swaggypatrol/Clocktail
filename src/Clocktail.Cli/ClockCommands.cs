@@ -18,15 +18,15 @@ internal static class ClockCommands
 
         Clock domains and voltage boost:
           --clock-domains          JSON: the driver's clock-domain table (id, range, offset, vdemand) (read-only)
-          --boost-read             JSON: both boost percentages, rail MAX vs ceiling, the default path rule (read-only)
+          --boost-read             JSON: both boost percentages, every rail's MAX, the default path rule (read-only)
           --xbar-offset MHz        XBAR clock offset, bounded by the driver's own range; journal + sentinel
           --sys-offset MHz         SYS clock offset, same path
           --video-offset MHz       clock domain 0x15 offset, same path
           --xbar-vdemand mV        XBAR voltage demand: mV added to every XBAR V/F point's voltage (not the rail's limit),
-                                   -25..+50 mV; also --sys-vdemand, --video-vdemand
+                                   up to ±1000 mV (a units check; the driver decides inside it); also --sys-vdemand, --video-vdemand
           --allow-clock-domain-write
                                    no longer needed: the clock-domain setter is on since its live drill (2026-10-20); accepted for old scripts
-          --boost PCT              voltage boost 0..100 %, then every rail MAX must stay under its ceiling or it is put back
+          --boost PCT              voltage boost 0..100 %, read back exactly; what it moves is the driver's
           --boost-path P           independent | legacy (default: the rule for this GPU)
           --boost-prove-equal P    write the current boost back unchanged through path P and show nothing moved
         """;
@@ -102,8 +102,7 @@ internal static class ClockCommands
             {
                 independent_percent = o.IndependentPercent, legacy_percent = o.LegacyPercent, nvvdd_kind = o.NvvddKind,
                 default_rule_path = o.DefaultRule(railsWritable)?.ToString(),
-                rails = o.Rails.Select(r => new { rail = r.Rail.ToString().ToLowerInvariant(), max_uv = r.MaxUv, ceiling_uv = r.CeilingUv }),
-                ceiling_violation = o.CeilingViolation(),
+                rails = o.Rails.Select(r => new { rail = r.Rail.ToString().ToLowerInvariant(), max_uv = r.MaxUv }),
             });
             return Done(out code, 0);
         }

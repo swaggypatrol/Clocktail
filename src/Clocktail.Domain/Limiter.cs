@@ -142,7 +142,7 @@ public static class Limiter
         ClockLimit.Idle => "The card is idle (under 120 W, or NVML's gpu_idle at under 10 % utilization): no limit decides the clock.",
         ClockLimit.None => "The card is loaded but under every limit: the load asks for less than the limits allow (CPU-bound, a frame cap, a light scene).",
         ClockLimit.Power => "Board power is at the power limit (its average within 10 W, or its instantaneous peaks within 15 W with NVML's power cap set): the card climbs the curve only as far as the watts allow; less voltage per MHz (or a higher limit) buys clock.",
-        ClockLimit.Current => "A rail draws within 3 % of its current limit with NVML's power cap set: the current limit, not the board wall, holds the clock (NVIDIA's own on a 5090: NVVDD 600 A, MSVDD 180 A, unless a trial lowered it).",
+        ClockLimit.Current => "A rail draws within 3 % of its current limit with NVML's power cap set: the current limit, not the board wall, holds the clock (the VBIOS default unless a trial lowered it: gpu_status shows each rail's amps against its limit).",
         ClockLimit.PowerPolicy => "NVML reports sw_power_cap with the board far under its power limit, no peak at it and no rail at its current limit: a power sub-policy holds the clock (seen in memory-heavy phases).",
         ClockLimit.Voltage => "NVVDD is within two steps (12.5 mV) of its MAX: the curve cannot climb higher; more clock needs a higher curve at the top voltage.",
         ClockLimit.Curve => "The clock is at the highest frequency the V/F curve reaches below MAX: the curve's own top (a flat top) holds it; raising the top points would let it climb.",

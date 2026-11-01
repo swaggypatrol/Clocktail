@@ -136,7 +136,7 @@ npx -y clocktail@latest setup --lite
 
 有些 AI 助手调用工具从来不问你（比如 Freebuff，或者任何开了 YOLO 模式的），上面这套就是它出不了大事的原因。Claude Code 正好反过来，哪怕只是读一下都要先问你。`npx -y clocktail setup --allow-reads` 会放行只读的工具（card_report、gpu_status 这些），写入照样要问。
 
-Clocktail 自己不设温度停止线，除非你用 `maxTempC` 要一条；NVIDIA 自己的保护一直都在。显卡看着像卡死了，就不写新的试验。夜里没人看着跑，崩到你定的次数（默认两次）就不再写新试验。
+stress_test 和 lab_test 离 NVIDIA 自己的降频点只剩 2 °C 时会停，你用 `maxTempC` 定了线就按你的；game_test 只按你的 `maxTempC` 停，显存和 uncore 扫描不看温度。NVIDIA 自己的保护一直都在。显卡看着像卡死了，就不写新的试验。夜里没人看着跑，崩到你定的次数（默认两次）就不再写新试验。
 
 </details>
 

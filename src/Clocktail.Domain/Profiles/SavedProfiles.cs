@@ -7,8 +7,8 @@ namespace Clocktail.Domain.Profiles;
 /// Daily profiles saved under a name, so a person can keep several and switch with a sentence. The name is whatever
 /// they call it ("quiet", "CS2 / low noise", "Sunday 🌙", in any language): every saved profile lives in one file beside the daily profile
 /// (saved-profiles.json, in this card's own state folder, so a saved profile is always this card's), keyed by its name,
-/// so no name has to be a valid file name. Names compare without case. Loading one makes it the daily profile, as a
-/// preset does; the daily profile stays the one the service puts back after every boot and driver reset.
+/// so no name has to be a valid file name. Names compare without case. Loading one makes it the daily profile;
+/// the daily profile stays the one the service puts back after every boot and driver reset.
 /// </summary>
 public static class SavedProfiles
 {
@@ -21,14 +21,13 @@ public static class SavedProfiles
         Path.Combine(Path.GetDirectoryName(Path.GetFullPath(journalPath))!, FileName);
 
     /// <summary>The name as it is kept (trimmed), or why it cannot be one: empty, too long, a control character, or a
-    /// preset's name (loading by name must never be ambiguous). Anything else goes.</summary>
+    /// invalid character. No former built-in tuning name is reserved.</summary>
     public static (string? Name, string? Error) Normalize(string? name)
     {
         var n = name?.Trim();
         if (string.IsNullOrEmpty(n)) return (null, "a saved profile needs a name");
         if (n.Length > MaxNameLength) return (null, $"a name is at most {MaxNameLength} characters");
         if (n.Any(char.IsControl)) return (null, "a name cannot hold line breaks or other control characters");
-        if (Presets.Find(n) != null) return (null, $"'{n}' is the name of a preset that ships with Clocktail: pick another name");
         return (n, null);
     }
 

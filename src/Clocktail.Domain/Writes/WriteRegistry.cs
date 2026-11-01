@@ -17,14 +17,12 @@ namespace Clocktail.Domain.Writes;
 /// the driver cannot delete afterwards). Recovery may always create: putting a recorded original back is never a
 /// new creation.</item>
 /// <item><see cref="Original"/>: the journal's original for this cell when this program owns it, in the cell's own
-/// encoding. A path whose rules bound a direction (a rail may not be raised above the ceiling) judges a request
-/// against this origin as well as the current state: a value that is no worse than where the user's hardware stood
-/// before this program touched it is a return, not an excursion. Without it, a lowered stock value that sits above
-/// the ceiling could never be put back by the user. Never a value the user asked for.</item>
-/// <item><see cref="IsRecovery"/>: the value is a recorded original going back. Recovery is not held to the
-/// derived-value limits a landed write is checked against afterwards: the original is a state the driver itself
-/// held, and refusing to return to it would keep this program's own change in place, which is the one thing
-/// recovery exists to undo. A path that takes an origin gets the value itself as the origin.</item>
+/// encoding. A path that adjusts a request (a rail offset rounded to the domain's step, a fan point's rpm taken from
+/// its pairing) writes a value equal to the origin as it is: going back to where the hardware stood before this
+/// program touched it is exact. Never a value the user asked for.</item>
+/// <item><see cref="IsRecovery"/>: the value is a recorded original going back: a state the driver itself held, so
+/// what bounds a request does not refuse it (refusing would keep this program's own change in place, which is the one
+/// thing recovery exists to undo). A path that takes an origin gets the value itself as the origin.</item>
 /// </list>
 /// </summary>
 /// <param name="CurveFollows">A P0 offset write whose caller gives the curve back right after it (recovery with the
@@ -68,24 +66,14 @@ public sealed record WritePath(
 /// the set of writable things, their encodings and their limits are stated once. The broker exposes exactly this
 /// list and nothing lower (no slot, no register).
 /// <para>
-/// Two kinds of limit live in two places, and the split is forced by when each can be known. A limit on the value
-/// itself (a clock range from the driver's topology, a watt range from the board, a fan range from the firmware,
-/// the rail ceiling on a requested offset) is checked in the plan, on the fresh snapshot, before any byte reaches
-/// the driver. A limit on what the driver <em>derives</em> from the value (the rail MAX that a boost percentage or
-/// a rail offset moves) can only be read after the write, so it is the cell's
-/// <see cref="TransactionSpec.CheckAfterWrite"/>: the transaction runs it after a matching readback, still inside
-/// the GPU lock, and a veto puts the edited bytes back with the transaction's own restore. That placement is not
-/// a convenience. The restore is rule-free by construction (the previous bytes are a state the driver held), where
-/// a give-back planned through the path's own rules can be refused by them, since those rules bound requests; and
-/// nothing that writes the cell, a user's write, recovery, the broker, can skip a check the cell carries.
-/// Recovery is the one caller for which the registry leaves the derived-limit check off (<see cref="WriteOptions"/>).
-/// </para>
-/// <para>
-/// Both kinds of limit are relative where the hardware's own state can already sit past them: a rail's stock OV on
-/// the RTX 5090 is 1.2 V, above the 1.15 V standard ceiling, and another tool may leave a MAX anywhere. So a rule
-/// refuses what gets worse than both the current state and the origin (the ceiling bounds excursions, not
-/// positions), and the post-write check judges each MAX against the ceiling or where it stood before the write,
-/// whichever is higher. The reachable set is still bounded by max(ceiling, where the hardware already was).
+/// The limits are the hardware's own and structural ones, checked in the plan on the fresh snapshot before any byte
+/// reaches the driver: a clock range from the driver's topology, a watt range from the board, a fan range from the
+/// firmware, a rail's reported domain range and step, an encoding the field can hold, a units slip. No software tuning
+/// envelope sits on top. What the driver <em>derives</em> after a write can only be read afterwards; where a path proves
+/// its write that way (the V/F curve validating again), it is the cell's <see cref="TransactionSpec.CheckAfterWrite"/>:
+/// the transaction runs it after a matching readback, still inside the GPU lock, and a veto puts the edited bytes back
+/// with the transaction's own restore, which is rule-free by construction (the previous bytes are a state the driver
+/// held). The curve's check is a proof of the write, not a limit, so it holds for recovery too.
 /// </para>
 /// </summary>
 public static class WriteRegistry
@@ -126,13 +114,12 @@ public static class WriteRegistry
         new(RailWrites.Kind, "nvvdd | msvdd", "slot=µV[,slot=µV…] over rel, alt, ov, vmin; a write may name some slots, recovery names all",
             (hw, gpu, key, value, o) =>
             {
-                // The plan judges the request against the current state and the origin (the journal's original, or
-                // the value itself when recovery is putting it back); the post-write check is bound to the snapshot
-                // the plan was made on, so MAX and VMIN as the driver derives them are judged relative to it.
-                var (cell, plan, verify) = RailWrites.PrepareVerified(hw, gpu, key, value, o.IsRecovery ? value : o.Original);
-                return Checked(new Prepared(cell, plan), o, verify);
-            },
-            AfterWrite: "every rail's MAX and VMIN, as the driver derives them from the new offsets, are within the standard ceiling or no worse than before the write"),
+                // The plan holds every slot inside the firmware-reported domain range and on its voltage step; the
+                // origin (the journal's original, or the value itself when recovery is putting it back) is written as it
+                // was, never rounded.
+                var (cell, plan) = RailWrites.Prepare(hw, gpu, key, value, o.IsRecovery ? value : o.Original);
+                return new Prepared(cell, plan);
+            }),
 
         new(ClockDomainOffsets.Kind, "xbar | sys | video", "kHz, signed integer; the driver's topology range is the limit",
             (hw, gpu, key, value, o) =>
@@ -141,7 +128,7 @@ public static class WriteRegistry
                 return new Prepared(cell, plan, plan == null ? $"'{value}' is not a number of kilohertz" : null);
             }),
 
-        new(ClockVdemand.Kind, "graphics | xbar | sys | video", "µV, signed integer, the standard range −25000..50000",
+        new(ClockVdemand.Kind, "graphics | xbar | sys | video", "µV, signed integer; past ±1000000 is refused as a units slip, inside it the driver decides",
             (hw, gpu, key, value, o) =>
             {
                 var (cell, plan) = ClockVdemand.Prepare(hw, gpu, key, value);
@@ -152,14 +139,8 @@ public static class WriteRegistry
             (hw, gpu, key, value, o) =>
             {
                 var (cell, plan) = VoltBoost.Prepare(hw, gpu, key, value);
-                var prepared = new Prepared(cell, plan, plan == null ? $"'{value}' is not a boost percentage (0..{VoltBoost.MaxPercent})" : null);
-                if (plan == null || o.IsRecovery) return prepared;
-                // What a percentage does to every rail's MAX is only known after the write, and is judged against
-                // where each MAX stood before it: a MAX another tool left above the ceiling can still be lowered.
-                var before = BoostReader.Observe(hw, gpu);
-                return Checked(prepared, o, (h, g) => BoostReader.Observe(h, g).CeilingViolation(before));
+                return new Prepared(cell, plan, plan == null ? $"'{value}' is not a boost percentage (0..{VoltBoost.MaxPercent})" : null);
             },
-            AfterWrite: "every rail's MAX, as the driver derives it from the percentage, is within the standard ceiling or no higher than before the write",
             ProveEqual: (hw, gpu, sentinel, key) =>
             {
                 var path = key.ToLowerInvariant() switch
@@ -189,7 +170,7 @@ public static class WriteRegistry
                 return new Prepared(cell, plan, cannot);
             }),
 
-        new(FanStopWrites.Kind, "fan policy index (an editable one)", "the zero-RPM band stop:start, °C (43:50 stock on a 5090); only an earlier start",
+        new(FanStopWrites.Kind, "fan policy index (an editable one)", "the zero-RPM band stop:start, °C; stop under start, both within 0..120 °C",
             (hw, gpu, key, value, o) =>
             {
                 var (cell, plan, cannot) = FanStopWrites.Prepare(hw, gpu, key, value, o.IsRecovery);
@@ -203,7 +184,7 @@ public static class WriteRegistry
                 return new Prepared(cell, plan, cannot);
             }),
 
-        new(ClockRatio.Kind, "msvdd", "the XBAR/core ratio, U16.16 (58976 = 0.8999 stock on a 5090) or a decimal, 0.5..1.0",
+        new(ClockRatio.Kind, "msvdd", "the XBAR/core ratio, U16.16 (58976 = 0.8999) or a decimal; above 0, inside that the driver decides",
             (hw, gpu, key, value, o) =>
             {
                 var (cell, plan, cannot) = ClockRatio.Prepare(hw, gpu, key, value);
@@ -234,8 +215,4 @@ public static class WriteRegistry
     /// <summary>The path for a journal kind, or null when this version has none (an older record, a typo).</summary>
     public static WritePath? Find(string? kind) =>
         kind == null ? null : All.FirstOrDefault(p => string.Equals(p.Kind, kind, StringComparison.OrdinalIgnoreCase));
-
-    /// <summary>A derived-limit check on the cell for a write; left off for recovery and for a value that has no plan.</summary>
-    private static Prepared Checked(Prepared p, WriteOptions o, Func<NvClient, GpuSession, string?> check) =>
-        p.Plan == null || o.IsRecovery ? p : p with { Cell = p.Cell with { Spec = p.Cell.Spec with { CheckAfterWrite = check } } };
 }

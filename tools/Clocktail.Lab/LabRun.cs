@@ -15,12 +15,13 @@ namespace Clocktail.Lab;
 /// </summary>
 public enum LabPhase { Burn, Light, Pulse, Memory, Latency, L2, Solo, Leap }
 
-/// <summary>What a run does. MaxTempC: the run stops when the GPU reaches it (two readings in a row), as stress_test does;
+/// <summary>What a run does. MaxTempC: the person's limit, when they gave one (none by default: infinity); the run stops when
+/// the GPU reaches it (two readings in a row), as stress_test does;
 /// TelemetryLostSeconds: it stops when NVML gives no temperature for that long, since a card nobody can watch is not
 /// loaded. Either stop leaves the run inconclusive, not a pass and not a crash, with the reason in
 /// <see cref="LabRunner.Interrupted"/>; every entry point (lab_test, the jobs' measurements) runs through it.</summary>
 public sealed record LabConfig(IReadOnlyList<(LabPhase Kind, double Seconds)> Phases, double TargetW = 0, int LightDiv = 64,
-    uint Seed = 0x5EED, int SampleMs = 100, int ChunkMs = 150, double PulseDuty = 0.6, double MaxTempC = 85, double TelemetryLostSeconds = 10)
+    uint Seed = 0x5EED, int SampleMs = 100, int ChunkMs = 150, double PulseDuty = 0.6, double MaxTempC = double.PositiveInfinity, double TelemetryLostSeconds = 10)
 {
     public static IReadOnlyList<(LabPhase, double)> Parse(string list, double seconds)
     {

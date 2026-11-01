@@ -34,7 +34,7 @@ Rcon requests have fresh markers and monotonic timeouts. Short transition window
 | Interrupted restoration stranded the record | A persisted restoring phase permits only recognized partial progress, including interruption between hardware restoration and session-metadata completion |
 | Lost final reply or missing record misread as success | Durable completion receipt before deletion; replay requires a fresh matching hardware/session snapshot. No baseline/receipt means no verified success |
 | Recovery only on the next manual test | Startup/background recovery takes the card mutex and judge lease, waits for live jobs/processes, records pending resets before daily application, and retains records on every verification failure |
-| Fan safety action undone at the end | Recognized service fan release falls back to verified daily, never reinstates fixed fans and claims the original trial passed |
+| Fan hand-back undone at the end | A recognized service fan hand-back (its agent gone quiet) falls back to verified daily, never reinstates fixed fans and claims the original trial passed |
 
 These paths use the existing ownership journal, write registry, transaction checks and firmware limits. The protocol
 exposes typed operations, not arbitrary driver slots. New brokers must be installed with matching MCP/lab executables;

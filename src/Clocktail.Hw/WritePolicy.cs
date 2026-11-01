@@ -233,7 +233,7 @@ public static class WritePolicies
             new Dword(0x8, 1), new Dword(0xc, 1), new Dword(0x14, 0), new Dword(0x18, 1),   // one pstate (P0), one clock entry
             new DwordIn(0x1c, 0, 4),                     // domain: 0 = core, 4 = memory
             new Dword(0x24, 1),
-            new Int32Range(0x28, -2147483000, 2147483000)), // kHz offset; only int32 extremes are guarded
+            new Int32Range(0x28, int.MinValue, int.MaxValue)), // kHz offset: any int32 here; the plan holds it to the driver's own range
 
         On(Slot.ClientPowerPoliciesSetStatus, "kind 4",
             new ExactSize(0x48), new Dword(0, 0x10048), new DwordNonZero(4)),
@@ -265,7 +265,7 @@ public static class WritePolicies
         // MSVDD; 0 put it back and released the record.
         On(Slot.ClockClkDomainsSetControl, "kind 0xf",
             new ExactSize(0x61a4), new Dword(0, 0x261a4), new SingleBit(8, 0xffffffff),
-            new Custom("the selected entry has a known type, an offset within the gateway bound, voltage demands within the standard −25..+50 mV, zero slots 3/4 after it; every other entry is zero", b =>
+            new Custom("the selected entry has a known type, an offset within the gateway bound, voltage demands within ±1000 mV (a units/typo check, not a tuning range), zero slots 3/4 after it; every other entry is zero", b =>
             {
                 int idx = BitOperations.TrailingZeroCount(BinaryPrimitives.ReadUInt32LittleEndian(b[8..]));
                 int e = 0x124 + idx * 0x304;
@@ -274,11 +274,12 @@ public static class WritePolicies
                 if (f < 0) return $"entry {idx} type {type} has no known layout";
                 int khz = BinaryPrimitives.ReadInt32LittleEndian(b[f..]);
                 if (khz < -0x1f40000 || khz > 0x1f3fc18) return $"+0x{f:x} offset {khz} kHz is outside the gateway bound";
-                // The voltage demands (NVVDD's, MSVDD's): the standard range; no XOC here.
+                // The voltage demands (NVVDD's, MSVDD's): the driver reports no range, so only a whole volt either way is
+                // refused, the size of a µV/mV slip (ClockVdemand.MinUv/MaxUv); what lies inside is the driver's call.
                 for (int s = 4; s <= 8; s += 4)
                 {
                     int uv = BinaryPrimitives.ReadInt32LittleEndian(b[(f + s)..]);
-                    if (uv < -25_000 || uv > 50_000) return $"+0x{f + s:x} voltage demand {uv} µV is outside −25000..50000";
+                    if (uv < -1_000_000 || uv > 1_000_000) return $"+0x{f + s:x} voltage demand {uv} µV is past ±1000000 (a units slip, not a demand)";
                 }
                 if (BinaryPrimitives.ReadUInt32LittleEndian(b[(f + 0xc)..]) != 0 || BinaryPrimitives.ReadUInt32LittleEndian(b[(f + 0x10)..]) != 0)
                     return $"+0x{f + 0xc:x}/+0x{f + 0x10:x} must be zero";
@@ -293,7 +294,7 @@ public static class WritePolicies
         // value 0 releases. Off by default: a clock-limit write enables it for itself.
         Off(Slot.PerfClientLimitsSetStatus, "kind 8", "enabled per write (clocklimit)", complete: true,
             new ExactSize(0x30c), new Dword(0, 0x2030c), new Dword(4, 0), new Dword(8, 1),
-            new Custom("one entry: the max/min clock (0/1, mode 2, at most 5 GHz) or the voltage lock (6, mode 3, 450 mV..1.5 V), or mode 0 with value 0 to release; every other byte zero", b =>
+            new Custom("one entry: the max/min clock (0/1, mode 2) or the voltage lock (6, mode 3), or mode 0 with value 0 to release; every other byte zero", b =>
             {
                 static uint U(ReadOnlySpan<byte> s, int o) => BinaryPrimitives.ReadUInt32LittleEndian(s[o..]);
                 int rest = b[0x24..].IndexOfAnyExcept((byte)0);
@@ -303,15 +304,14 @@ public static class WritePolicies
                 if (dom is not (0 or 1 or 6)) return $"entry {dom} is not a clock limit Clocktail writes";
                 if (mode == 0) return value == 0 ? null : "mode 0 releases an entry, with value 0";
                 if (mode != (dom == 6 ? 3u : 2u)) return $"entry {dom} takes mode {(dom == 6 ? 3 : 2)}, not {mode}";
-                bool inRange = dom == 6 ? value is >= 450_000 and <= 1_500_000 : value is > 0 and <= 5_000_000;
-                return inRange ? null : $"value {value} is outside entry {dom}'s range";
+                return value > 0 ? null : "an active entry needs a non-zero value";
             })),
 
         // The block as read (0x75c r1 in the original's 0x2000 buffer, 14 relations on the 5090) with relation 0's ratio
         // at +0x68 changed; +4 is the relation mask the read asked with. Off by default: a clock-ratio write enables it.
         Off(Slot.ClockClkPropTopRelsSetControl, "kind 9", "enabled per write (clockratio)", complete: true,
             new ExactSize(0x2000), new Dword(0, 0x1075c), new DwordNonZero(4), new DwordMax(4, 0x3fff),
-            new Dword(0x64, 0), new DwordNonZero(0x68), new DwordMax(0x68, 0x10000),
+            new Dword(0x64, 0), new DwordNonZero(0x68),   // relation 0's ratio: 0 is no ratio (an empty block), not a setting
             new Dword(0x170, 0), new Dword(0x278, 0), new Dword(0x380, 0), new Dword(0x488, 0), new Dword(0x590, 0)),
 
         // Fan control (kind 16): the whole 0x5ac block, read-modify-written. These are the structure's invariants. The

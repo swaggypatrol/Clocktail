@@ -151,19 +151,7 @@ public sealed partial class SettingsTools(Card card)
     });
 
     [McpServerTool(Name = "limiter", ReadOnly = true, OpenWorld = false), Description(
-        "What holds the core clock back right now, judged on 5 samples 200 ms apart (the verdict most of them agree on), the " +
-        "instantaneous power watched every 20 ms between them: power_wall (board power within 10 W of the limit in force, or " +
-        "sw_power_cap with instantaneous peaks within 15 W of it: the wall answers short peaks, so a game's average can sit " +
-        "30-60 W under it), current_limit (sw_power_cap with NVVDD or MSVDD drawing within 3 % of its current limit), " +
-        "power_policy (sw_power_cap with none of those: a sub-policy), voltage_limit (NVVDD within 12.5 mV of its MAX; the driver's " +
-        "reliability_voltage reason only when NVVDD is unread, since a 5090 sets it at idle), curve_cap (the clock within 15 MHz of the highest frequency the V/F curve reaches " +
-        "below MAX: the curve's own top), thermal and hardware_slowdown (NVML's own reasons), idle (under 120 W, or gpu_idle " +
-        "at under 10 % utilization) or no_limit (loaded, nothing reached: the load asks for less). Several can hold at once " +
-        "(limiters, the wall first). readings are the medians of the samples behind the verdict, with the margins that " +
-        "decided it. perf_limits is the driver's own arbitration for GPC, XBAR and memory: the ceiling it allows and the " +
-        "floor it holds, each with the limit that set it (a clock lock, the reliability voltage limit at the curve's top, a " +
-        "thermal policy…); the power wall acts below these, so a card at its wall runs under its ceiling. Run it with the " +
-        "game or stress test loaded: at idle the answer is idle.")]
+        "Read what limits this GPU now: its reported board power, rail current, voltage ceilings, clock locks, thermal reasons and active V/F point. Interpret throttle bits alongside actual readings, not a model-specific wattage or default clock.")]
     public string WhatLimits() => Guard(() =>
     {
         // The ceilings do not move in a second: the curve and MAX once, then the light sample five times.

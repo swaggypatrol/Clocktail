@@ -24,12 +24,10 @@ public static class VerifiedOn
     public static string Describe(uint driver, string gpu, string vbios)
     {
         var (d, g, v) = Match(driver, gpu, vbios);
-        string tested = $"driver {string.Join(" / ", Drivers.Select(Driver))} on an RTX 5090 (VBIOS {Vbios})";
-        if (d && g && v) return "the driver, card and VBIOS Clocktail was measured on";
-        var other = new List<string>();
-        if (!d) other.Add($"driver {Driver(driver)}");
-        if (!g) other.Add(gpu);
-        if (!v && g) other.Add($"VBIOS {vbios}");
-        return $"Clocktail was measured on {tested}; this {string.Join(", ", other)} is not one of them yet. Every write still checks each structure it touches and refuses what it does not recognise, so expect a refusal, not a wrong write";
+        string history = d && g && v ? "this combination has recorded hardware validation"
+            : "this combination has no recorded hardware-validation result";
+        return $"RTX 50 series; detected {gpu}, driver {Driver(driver)}, VBIOS {vbios}; {history}. " +
+            "Validation history is not a model whitelist. Available controls and ranges are queried on this GPU; " +
+            "writes require recognized layouts and matching readback. No tuning profile or default daily settings are supplied";
     }
 }

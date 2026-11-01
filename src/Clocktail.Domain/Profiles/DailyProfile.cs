@@ -52,7 +52,7 @@ public sealed record DailyProfile(
 
     public void Save(string path) => AtomicFile.Write(path, JsonSerializer.SerializeToUtf8Bytes(this, Json));
 
-    /// <summary>Power first (a driver reset puts the limit back to 575 W), then the fan curve (it touches nothing else, and
+    /// <summary>Power first (a driver reset may return the limit to this board's firmware default), then the fan curve (it touches nothing else, and
     /// the cooling is on before the clocks are), then P0 offsets, the rails' offsets and the domains' voltage demands
     /// before the XBAR/SYS/Video clock offsets (the voltage before the clock it carries), the V/F curve last: a Pstates20
     /// write resets every V/F point offset.</summary>

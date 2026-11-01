@@ -46,4 +46,19 @@ public class StressThermalStopTests
         Assert.True(Clocktail.Mcp.Nvgwls.TooHot(80, 2, 85));     // the driver says it is about to slow down
         Assert.False(Clocktail.Mcp.Nvgwls.TooHot(null, null, 85)); // nothing read: not a reason to stop
     }
+
+    /// <summary>With no maxTempC the one stop is the margin to NVIDIA's slowdown point, and the reason says which it was.</summary>
+    [Fact]
+    public void With_no_max_temp_only_the_margin_stops_a_run_and_the_reason_names_it()
+    {
+        Assert.False(Clocktail.Mcp.Nvgwls.TooHot(95, 3, null));
+        Assert.True(Clocktail.Mcp.Nvgwls.TooHot(88, 2, null));
+        Assert.False(Clocktail.Mcp.Nvgwls.TooHot(120, null, null));   // no margin read, no limit asked: firmware's call
+        Assert.Equal("within 2 °C of NVIDIA's slowdown point", Clocktail.Mcp.Nvgwls.HotWhy(88, null));
+        Assert.Equal("within 2 °C of NVIDIA's slowdown point", Clocktail.Mcp.Nvgwls.HotWhy(80, 85));
+        Assert.Equal("at the maxTempC of 85 °C asked for", Clocktail.Mcp.Nvgwls.HotWhy(85, 85));
+        Assert.Null(Clocktail.Mcp.TuningTools.MaxTemp(null));
+        Assert.Equal(80, Clocktail.Mcp.TuningTools.MaxTemp(80));
+        Assert.Throws<ArgumentException>(() => Clocktail.Mcp.TuningTools.MaxTemp(2147483647));
+    }
 }

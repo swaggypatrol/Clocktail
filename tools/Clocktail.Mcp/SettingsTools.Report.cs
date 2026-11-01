@@ -15,21 +15,15 @@ namespace Clocktail.Mcp;
 /// <summary>
 /// "How's my card doing": every setting as stock → now with the change and a safety mark, the live readings
 /// with theirs, and one verdict, as rows and as a Markdown table an agent shows as it is. The marks come from fixed rules,
-/// not from the agent: ✅ within NVIDIA's own limits for the card (or the range measured on the reference card), ⚠️
+/// not from the agent: ✅ within NVIDIA's own limits for the card (available firmware-reported ranges), ⚠️
 /// outside them and worth a look, ⛔ act now. Safety, not stability: a ✅ setting can still crash a game, and stress_test
 /// and play decide that. Built from card_settings and limiter, so the numbers are theirs.
 /// </summary>
 public sealed partial class SettingsTools
 {
     public const string Safe = "✅", Look = "⚠️", Act = "⛔", Info = "ℹ️";
-    /// <summary>Hotter than this is worth a look (the stock fan curve holds 83 °C); this hot, act.</summary>
+    /// <summary>Fallback advisory temperatures when driver-specific headroom is unavailable; not write limits.</summary>
     public const double WarmC = 85, HotC = 90;
-    /// <summary>What was measured on the reference card: memory +358 MHz, MSVDD REL up to +20 mV, VMIN +50 mV, XBAR up
-    /// to +400 MHz (above +250 only with +20 mV of voltage demand).</summary>
-    public const double MeasuredMemoryMhz = 358, MeasuredMsvddRelMv = 20, MeasuredVminAboveMv = 50, MeasuredXbarMhz = 400, XbarCliffMhz = 250, XbarCliffDemandMv = 20;
-    /// <summary>The ceiling no rail's MAX may pass.</summary>
-    public const double CeilingMv = 1150;
-
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
     /// <summary>The note on a setting whose stock value only the service knows (its journal of originals).</summary>
@@ -38,17 +32,7 @@ public sealed partial class SettingsTools
     private sealed record ReportRow(string Icon, string Name, string Original, string Now, string Change, string Mark, string Note);
 
     [McpServerTool(Name = "card_report", ReadOnly = true, OpenWorld = true), Description(
-        "How's my card doing: THE call for 'how is my card', 'is this safe', 'what did we change', 'status'. Every setting " +
-        "as stock → now with the change and a safety mark, then live readings (temperature, power, clock and " +
-        "voltage, what holds the clock), then one verdict. A 'Not set by Clocktail' row means another tool (MSI Afterburner, " +
-        "NVIDIA App) left settings on the card: it is NOT at stock; tell the person before any tuning. The marks come from fixed rules: ✅ within NVIDIA's own limits for " +
-        "this card (or the range measured on the reference card), so nothing strains the hardware; ⚠️ outside them, worth a " +
-        "look; ⛔ act now; ℹ️ information. Safety, not stability: whether it holds in every game is what stress_test and play " +
-        "decide. Show 'table' to the person exactly as it is (Markdown with emoji), then add one or two sentences of your own. " +
-        "Between the two tables is the V/F curve drawn in Braille dots like btop (a code block, monochrome): the curve now " +
-        "solid, stock dotted, ● where the card runs now; show it as it is too. " +
-        "Run it with a game or stress test loaded for meaningful live rows; idle is fine for the settings. Its last row is " +
-        "Clocktail's own version: when a newer one is out (update_available), tell the person and how to update.")]
+        "Summarize this RTX 50 GPU's actual settings, known stock values and user-kept daily profile when present, plus live readings and a V/F chart. Show the returned table and chart, then explain uncertainty. Report marks are advisory, not hardware-safety guarantees or extra tuning vetoes. Missing capabilities are not zero; another utility's settings are not stock.")]
     public string CardReport() => Guard(() =>
     {
         using var settingsDoc = JsonDocument.Parse(CardSettings());
@@ -181,13 +165,15 @@ public sealed partial class SettingsTools
             if (key == "core" && (now ?? 0) == stock) continue;
             bool inRange = now is { } n && (min is not { } a || n >= a) && (max is not { } b || n <= b);
             string note = key == "memory"
-                ? now > MeasuredMemoryMhz ? $"above the reference's +{F(MeasuredMemoryMhz)}: this card's own tests decide" : "NVML shows it doubled"
+                ? "compare clocks in the units reported by each interface"
                 : "the V/F curve is the better tool for the core";
             rows.Add(new(icon, name, $"{Sg(stock)} MHz", $"{Sg(now)} MHz", Change(now, stock, "MHz"), inRange ? Safe : Look,
                 Join(By($"pstates20/{key}"), inRange ? note : "outside the driver's range")));
         }
 
-        // The rails: REL/ALT above 0 is past NVIDIA's own reliability limit; no MAX past the 1150 mV ceiling.
+        // The rails, against this card's own stock offsets (NVIDIA's reliability limit as this board ships it): an upper
+        // limit or VMIN raised past stock is a look, as a current limit above the VBIOS default is; lowered is an undervolt.
+        // No fixed voltage is a mark.
         foreach (var (key, icon, name) in new[] { ("nvvdd", "🔌", "NVVDD rail (core)"), ("msvdd", "🔌", "MSVDD rail (L2, crossbar)") })
         {
             var r = Obj(s, "rails", key);
@@ -198,17 +184,9 @@ public sealed partial class SettingsTools
             double? max = Num(r, "limits_mv", "max");
             var notes = new List<string?>();
             string mark = Safe;
-            if (max > CeilingMv) { mark = Look; notes.Add($"MAX {F(max)} mV is past the {F(CeilingMv)} mV ceiling"); }
-            if (rel > 0 || alt > Math.Max(0, altS ?? 0))
-            {
-                mark = Look;
-                notes.Add(key == "msvdd" && rel <= MeasuredMsvddRelMv
-                    ? $"REL {Sg(rel)} mV is past NVIDIA's own limit (+{F(MeasuredMsvddRelMv)} measured on the reference)"
-                    : "raised past NVIDIA's own reliability limit");
-            }
-            else if (key == "msvdd" && rel == 0 && relS < 0) notes.Add("REL 0 is NVIDIA's own reliability limit");
-            else if (rel < relS) notes.Add("undervolted");
-            if (vmin - (vminS ?? 0) > MeasuredVminAboveMv) { mark = Look; notes.Add($"VMIN more than +{F(MeasuredVminAboveMv)} mV over stock"); }
+            if (rel > relS || alt > altS) { mark = Look; notes.Add("an upper limit raised past this card's stock (NVIDIA's own reliability limit)"); }
+            else if (rel < relS || alt < altS) notes.Add("undervolted");
+            if (vmin > vminS) { mark = Look; notes.Add("VMIN raised over this card's stock: the rail runs higher at every load"); }
             notes.Add(max is { } m ? $"MAX {F(m)} mV" : null);
             bool stockKnown = relS != null && vminS != null;
             if (!stockKnown) notes.Insert(0, StockUnknown);
@@ -217,7 +195,7 @@ public sealed partial class SettingsTools
             rows.Add(new(icon, name, stockKnown ? $"REL {Sg(relS)}, VMIN {Sg(vminS)} mV" : "?", $"REL {Sg(rel)}, VMIN {Sg(vmin)} mV", change, mark, Join([.. notes])));
         }
 
-        // XBAR/SYS/Video: XBAR measured to +400, above +250 only with +20 mV of demand (the cliff); SYS and Video unmeasured.
+        // Compare domain offsets with this GPU's reported range, never another card's tuning results.
         foreach (var (key, name) in new[] { ("xbar", "XBAR (crossbar)"), ("sys", "SYS clock"), ("video", "Video clock") })
         {
             var d = Obj(s, "clock_domains", key);
@@ -228,11 +206,11 @@ public sealed partial class SettingsTools
                 continue;
             }
             if (key != "xbar" && off == offS && dem == demS) continue;
-            string mark = Safe, note;
-            if (key != "xbar") { mark = Look; note = "not measured on the reference card"; }
-            else if (off > MeasuredXbarMhz) { mark = Look; note = $"past the +{F(MeasuredXbarMhz)} MHz measured; +450 without voltage gave a grey screen elsewhere"; }
-            else if (off is { } o && TuningTools.XbarDemandNeededMv(o) is { } need && dem < need) { mark = Look; note = $"the cliff: at {Sg(o)} MHz it needs +{need} mV of voltage demand (+{TuningTools.XbarCliffDemandMv} above +{TuningTools.XbarCliffMhz}, +{TuningTools.XbarHighDemandMv} above +{TuningTools.XbarHighMhz})"; }
-            else note = off > XbarCliffMhz ? $"+{F(dem)} mV keeps MSVDD off its floor" : off > 0 ? "within the measured range" : "stock";
+            double? min = Num(d, "min_mhz"), max = Num(d, "max_mhz");
+            bool inRange = off is { } o && (min is not { } lo || o >= lo) && (max is not { } hi || o <= hi);
+            string mark = inRange ? Safe : Look;
+            string note = inRange ? "within this GPU's reported offset range; stability requires workload testing"
+                : off == null ? "offset unreadable" : "outside this GPU's reported offset range";
             string change = Join(off != offS ? $"{Arrow(off - offS)} {Sg(off - offS)} MHz" : null, dem != demS ? $"{Arrow(dem - demS)} {Sg(dem - demS)} mV" : null) is { Length: > 0 } c ? c : "—";
             rows.Add(new("🔀", name, $"{Sg(offS)} MHz, {Sg(demS)} mV", $"{Sg(off)} MHz, {Sg(dem)} mV", change, mark,
                 Join(By($"clockdomain/{key}", $"vdemand/{key}"), note, clk is { } k && k > 0 ? $"running {F(k)} MHz now" : null)));
@@ -242,7 +220,7 @@ public sealed partial class SettingsTools
         var vb = Obj(s, "voltage_boost");
         if (Num(vb, "independent_pct") is { } ib && ib != (Num(vb, "stock_independent_pct") ?? 0))
             rows.Add(new("🔋", "Voltage boost", $"{F(Num(vb, "stock_independent_pct") ?? 0)} %", $"{F(ib)} %", Change(ib, Num(vb, "stock_independent_pct") ?? 0, "%"), Safe,
-                Join(By("boost/independent", "boost/legacy"), "every rail's REL limit +5 mV per 25 %")));
+                Join(By("boost/independent", "boost/legacy"), "driver-reported boost; voltage effect depends on this GPU and driver")));
 
         // The fan curve: full speed no later than stock's.
         var curve = Arr(s, "fans", "curves").FirstOrDefault(c => Bool(c, "editable") == true);
@@ -325,7 +303,7 @@ public sealed partial class SettingsTools
         if (Obj(s, "current_limits", "input") is { } input && Num(input, "connector_w") is { } cw)
             rows.Add(new("🔌", "16-pin input", "", Num(input, "input_a") is { } ia ? $"{F(cw)} W, {F(ia)} A" : $"{F(cw)} W", "",
                 Str(input, "concern") != null ? Look : Safe,
-                Str(input, "concern") ?? Join(Num(input, "input_limit_a") is { } il ? $"input limit {F(il)} A" : null, "rated 600 W")));
+                Str(input, "concern") ?? Join(Num(input, "input_limit_a") is { } il ? $"input limit {F(il)} A" : null, "connector capabilities are board-specific")));
         if (Obj(s, "tdr") is { } tdr && Str(tdr, "what") is { } what)
             rows.Add(new("⏱️", "Driver timeout (TDR)", "", Num(tdr, "delay_s") is { } d ? $"{F(d)} s, level {F(Num(tdr, "level"))}" : "?", "",
                 Bool(tdr, "safe_to_map") == false ? Act : Info,
@@ -526,7 +504,7 @@ public sealed partial class SettingsTools
         b.AppendLine();
         b.AppendLine($"**{verdict}**");
         b.AppendLine();
-        b.Append("_✅ = within NVIDIA's own limits for this card (or the range measured on the reference card): nothing here strains the hardware. " +
+        b.Append("_✅ = no issue detected against the available limits reported for this GPU; not a hardware-safety guarantee. " +
                  "Whether it holds in every game is a separate question: stress tests and play answer that._");
         return b.ToString();
     }

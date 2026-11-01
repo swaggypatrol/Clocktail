@@ -320,7 +320,8 @@ public class BrokerDispatcherTests : IDisposable
         var d = Power();
         var paths = d.Dispatch(new BrokerRequest(BrokerRequest.OpPing)).Result!.Value.GetProperty("paths");
         Assert.Equal(13, paths.GetArrayLength());
-        Assert.Contains(paths.EnumerateArray(), p => p.GetProperty("kind").GetString() == "rails" && p.GetProperty("checks_after_write").GetString()!.Contains("MAX"));
+        Assert.Contains(paths.EnumerateArray(), p => p.GetProperty("kind").GetString() == "vf" && p.GetProperty("checks_after_write").GetString()!.Contains("curve"));
+        Assert.Contains(paths.EnumerateArray(), p => p.GetProperty("kind").GetString() == "rails" && p.GetProperty("checks_after_write").ValueKind == JsonValueKind.Null);
         Assert.Contains(paths.EnumerateArray(), p => p.GetProperty("kind").GetString() == "fan" && p.GetProperty("checks_after_write").ValueKind == JsonValueKind.Null);
     }
 
@@ -427,16 +428,21 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Single(CrashLog.ReadLast(CrashLog.PathBeside(_sentinel.Path), 5));
     }
 
-    /// <summary>A preset is named, never sent: an unknown name or another card model writes nothing and keeps no profile.</summary>
+    /// <summary>A profile is named, never sent: an unknown name, the removed built-in's included, writes nothing and keeps no profile.</summary>
     [Fact]
-    public void A_preset_for_another_card_or_an_unknown_name_writes_nothing()
+    public void A_missing_profile_including_the_removed_builtin_never_writes_or_creates_a_daily()
     {
         var d = Power();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "fresh startup")).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "resume", Value: "fresh wake")).Ok);
+        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "load")).Ok);
+        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preset", Value: "nonexistent")).Ok);
+        Assert.Empty(_journal.Inspect().Items);
         var other = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preset", Value: "founders"));
         Assert.False(other.Ok);
-        Assert.Contains("this card is fake", other.Error);
-        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preset", Value: "nonexistent")).Ok);
+        Assert.Contains("no saved profile named 'founders' (none is saved yet", other.Error);
         Assert.False(File.Exists(DailyProfile.PathBeside(_journal.Path)));
+        Assert.Equal(0, FakeDriver.Sets);
         Assert.Empty(_journal.Inspect().Items);
     }
 
@@ -705,7 +711,8 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(saved.Ok, saved.Error);
         Assert.Equal("Quiet", saved.Result!.Value.GetProperty("name").GetString());
         Assert.False(saved.Result!.Value.GetProperty("replaced").GetBoolean());
-        Assert.False(d.Dispatch(P("save", "founders")).Ok);                       // a preset's name
+        Assert.True(d.Dispatch(P("save", "founders")).Ok);                        // no built-in names are reserved
+        Assert.True(d.Dispatch(P("forget", "founders")).Ok);
         Assert.False(d.Dispatch(P("save", "  ")).Ok);                             // no name
         Assert.False(d.Dispatch(P("save", "two\nlines")).Ok);
         const string Odd = "CS2 / late night: <quiet> 安静 \U0001F319";   // any name at all, never a file name
@@ -1039,32 +1046,19 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("Trial off the record, not all off the card", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
-    /// <summary>The fan guard's fans back to the curve pass a measurement's judge.lock (the service's own safety action, a
-    /// card too hot under a fixed fan duty); every other write still waits for it.</summary>
+    /// <summary>The service's recoveries after a driver reset are its own: a client sending one is refused. There is no
+    /// service lease that passes a measurement: "clocktail-safety" (the old fan guard's) is a lease like any other, and
+    /// "fans-back" is no request at all.</summary>
     [Fact]
-    public void The_fan_guards_safety_writes_pass_a_measurement_and_nothing_else_does()
+    public void A_client_cannot_send_the_service_s_own_requests_or_pass_a_measurement()
     {
         var d = Power(judge: () => "stress_test (pid 4242)");
-        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000)).Code);
-        BrokerDispatcher.CurrentLease.Value = BrokerDispatcher.SafetyLease;
-        try { Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000)).Ok); }
-        finally { BrokerDispatcher.CurrentLease.Value = null; }
-        Assert.Equal(450_000u, _requests[0xfe]);
-    }
-
-    /// <summary>The fan guard's request and its lease are the service's own, and so are its recoveries after a driver reset:
-    /// a client sending any of them is refused, and a request carrying the lease does not pass the lock with it in-process
-    /// either.</summary>
-    [Fact]
-    public void A_client_cannot_pass_a_measurement_with_the_service_s_safety_lease()
-    {
-        var d = Power(judge: () => "stress_test (pid 4242)");
-        Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000, Lease: BrokerDispatcher.SafetyLease)).Code);
-        Assert.Equal(BrokerCode.BadRequest, d.FromClient(Exp("fans-back", "a client")).Code);
         Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset)).Code);
         Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverResetAgain)).Code);
         Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "a client")).Code);
-        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000, Lease: BrokerDispatcher.SafetyLease)).Code);
+        Assert.Equal(BrokerCode.BadRequest, d.FromClient(Exp("fans-back", "a client")).Code);
+        Assert.Equal(BrokerCode.JudgeBusy, d.FromClient(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000, Lease: "clocktail-safety")).Code);
+        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000, Lease: "clocktail-safety")).Code);
         Assert.Equal(BrokerCode.JudgeBusy, d.FromClient(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000)).Code);   // an ordinary one meets the judge
         Assert.Equal(575_000u, _requests[0xfe]);
         Assert.Equal(0, FakeDriver.Sets);
@@ -1187,10 +1181,9 @@ public class BrokerDispatcherTests : IDisposable
         Assert.NotNull(TrialNow());
     }
 
-    /// <summary>The service's judge: free with no run; the run's reason otherwise, but for the run's own writes (its lease)
-    /// and the fan guard's.</summary>
+    /// <summary>The service's judge: free with no run; the run's reason otherwise, but for the run's own writes (its lease).</summary>
     [Fact]
-    public void The_judge_lets_through_a_run_s_own_writes_and_the_fan_guard_s()
+    public void The_judge_lets_through_a_run_s_own_writes_and_nothing_else()
     {
         JudgeLock.Info? run = null;
         var judge = BrokerDispatcher.Judge(() => run);
@@ -1203,8 +1196,8 @@ public class BrokerDispatcherTests : IDisposable
             Assert.Null(judge());
             BrokerDispatcher.CurrentLease.Value = "lab-2";
             Assert.NotNull(judge());
-            BrokerDispatcher.CurrentLease.Value = BrokerDispatcher.SafetyLease;
-            Assert.Null(judge());
+            BrokerDispatcher.CurrentLease.Value = "clocktail-safety";
+            Assert.NotNull(judge());
         }
         finally { BrokerDispatcher.CurrentLease.Value = null; }
     }
@@ -1604,23 +1597,7 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("trial-only", p.Result!.Value.GetProperty("not_kept")[0].GetString());
         Assert.Equal(sets, FakeDriver.Sets);
         Assert.False(File.Exists(DailyProfile.PathBeside(_journal.Path)));
-        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preview", Value: "founders")).Ok);   // another model
-    }
-
-    /// <summary>The fan guard's "fans-back" hands back a fixed fan duty only: a lowered current limit lowers power, so it
-    /// stays, and with no fan duty held nothing is written or recorded.</summary>
-    [Fact]
-    public void Fans_back_leaves_a_current_limit_alone()
-    {
-        var d = Power();
-        CurrentLimitsFixture.Install();
-        Assert.True(d.Dispatch(Exp("begin", """{"game":"sweep"}""")).Ok);
-        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "NVVDD 350 A", nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
-        var r = d.Dispatch(Exp("fans-back", "the fan guard: 87 °C"));
-        Assert.True(r.Ok, r.Error);
-        Assert.Equal(0, r.Result!.Value.GetProperty("released").GetArrayLength());
-        Assert.Equal(350_000u, CurrentLimitsFixture.Limit(13));
-        Assert.Empty(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10));
+        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preview", Value: "founders")).Ok); // no built-in profiles
     }
 
     /// <summary>A new session while a trial is in force ends that trial as end_session does: its wall goes back to the daily
@@ -1757,7 +1734,7 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("MSVDD REL offset -75 mV", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
-    /// <summary>A trial may carry any other registry write in "writes" (here NVVDD's REL offset, under the fixture's 1.15 V ceiling). It goes through the
+    /// <summary>A trial may carry any other registry write in "writes" (here NVVDD's REL offset, inside the fixture's voltage domain). It goes through the
     /// path's rules, is on the data point, and goes back with the daily profile; the wall and the curve keep their own
     /// fields.</summary>
     [Fact]
@@ -2066,7 +2043,7 @@ public class BrokerDispatcherTests : IDisposable
         Assert.False(r.Result!.Value.GetProperty("journal_cleared").GetBoolean());
     }
 
-    /// <summary>A dispatcher on the 5090-shaped rails with NVVDD's REL at 1.2 V stock, above the 1.15 V ceiling; the
+    /// <summary>A dispatcher on the 5090-shaped rails with NVVDD's REL at 1.2 V stock, the domain maximum itself; the
     /// status follows the control offsets so a write moves what the next read sees.</summary>
     private BrokerDispatcher Rails()
     {
@@ -2171,9 +2148,8 @@ public class BrokerDispatcherTests : IDisposable
     }
 
     /// <summary>
-    /// The write verb hands the path the journal's original for the cell, so a user can put a lowered slot back to a
-    /// stock value above the ceiling (the hardware held it before this program did anything) and the record is
-    /// released; the request itself never supplies an origin.
+    /// The write verb hands the path the journal's original for the cell, so a user can put a lowered slot back to
+    /// stock exactly (the hardware held it before this program did anything) and the record is released; the request itself never supplies an origin.
     /// </summary>
     [Fact]
     public void The_write_verb_hands_the_path_the_journal_origin_so_a_user_restore_lands_and_releases()
@@ -2185,7 +2161,7 @@ public class BrokerDispatcherTests : IDisposable
         Assert.StartsWith("held: original rel=0,alt=0,ov=0,vmin=0", OwnedBy(down));
         Assert.Equal(JsonValueKind.Null, down.Result!.Value.GetProperty("applied")[0].GetProperty("origin").ValueKind);
 
-        var back = d.Dispatch(Write("rails", "NVVDD", "rel=0"));     // 1.2 V again: above the ceiling, but where the hardware stood
+        var back = d.Dispatch(Write("rails", "NVVDD", "rel=0"));     // 1.2 V again: where the hardware stood
         Assert.True(back.Ok, back.Error);
         Assert.Equal("Applied", Outcome(back));
         Assert.StartsWith("released", OwnedBy(back));

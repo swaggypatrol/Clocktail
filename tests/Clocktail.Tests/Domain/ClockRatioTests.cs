@@ -69,7 +69,23 @@ public class ClockRatioTests : IDisposable
 
         var (cell2, back, _) = ClockRatio.Prepare(hw, Gpu, "msvdd", "58976");
         Assert.StartsWith("released", writer.Apply(Gpu, cell2, back!).Ownership);
-        Assert.Equal(TxOutcome.Aborted, writer.Apply(Gpu, cell2, ClockRatio.Plan(0x11000)).Tx.Outcome);   // above 1.0
+        Assert.Equal(TxOutcome.Applied, writer.Apply(Gpu, cell2, ClockRatio.Plan(0x11000)).Tx.Outcome); // Above 1.0 is NVIDIA's decision.
+    }
+
+    /// <summary>0 is no ratio and what an empty block reads as: a validity check, not a tuning bound.</summary>
+    [Fact]
+    public void A_zero_ratio_and_an_empty_block_are_refused()
+    {
+        var hw = Install();
+        var writer = new OwnedWriter(hw, _journal, _sentinel, _host);
+        var (cell, plan, _) = ClockRatio.Prepare(hw, Gpu, "msvdd", "0");
+        Assert.Equal(TxOutcome.Aborted, writer.Apply(Gpu, cell, plan!).Tx.Outcome);
+        Assert.Equal(0, FakeDriver.Sets);
+
+        W(FakeDriver.State[ControlWord], 0x68, 0);   // the driver hands back an empty control block
+        Assert.Throws<InvalidDataException>(() => ClockRatio.Read(hw, Gpu));
+        Assert.Equal(TxOutcome.Aborted, writer.Apply(Gpu, cell, ClockRatio.Plan(0xe660)).Tx.Outcome);
+        Assert.Equal(0, FakeDriver.Sets);
     }
 
     [Fact]
@@ -80,8 +96,10 @@ public class ClockRatioTests : IDisposable
         var block = (byte[])FakeDriver.State[ControlWord].Clone();
         Assert.Null(p.Check(Slot.ClockClkPropTopRelsSetControl, block));
         Assert.NotNull(p.Check(Slot.ClockClkPropTopRelsSetControl, block.AsSpan(0, 0x75c).ToArray()));
+        W(block, 0x68, 0x11000);
+        Assert.Null(p.Check(Slot.ClockClkPropTopRelsSetControl, block));      // above 1.0: the driver's call
         W(block, 0x68, 0);
-        Assert.NotNull(p.Check(Slot.ClockClkPropTopRelsSetControl, block));
+        Assert.NotNull(p.Check(Slot.ClockClkPropTopRelsSetControl, block));   // 0: no ratio
         Assert.Equal(PolicyState.Disabled, WritePolicySet.Default.Get(Slot.ClockClkPropTopRelsSetControl)!.State);
     }
 }

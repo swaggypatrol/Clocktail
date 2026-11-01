@@ -26,11 +26,6 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     // profile at 825 mV: no cap could tell that from a reckless one, and the person makes that call.
     /// <summary>The longest stress_test run (CLOCKTAIL_MCP_MAX_STRESS_S): the call blocks for the whole run.</summary>
     public static readonly int MaxStressSeconds = Env("CLOCKTAIL_MCP_MAX_STRESS_S", 300);
-    /// <summary>stress_test stops the run at this temperature by default (CLOCKTAIL_MCP_STRESS_MAX_C): the agent cannot see
-    /// the card while the call blocks, and a fixed low fan duty at the wall passed 85 °C in 40 s on the reference card.</summary>
-    public static readonly int StressMaxC = Env("CLOCKTAIL_MCP_STRESS_MAX_C", 85);
-    /// <summary>The highest maxTempC a run may ask for: under NVIDIA's own slowdown (90 °C on the reference card).</summary>
-    public const int StressMaxCeilingC = 88;
     /// <summary>The default window around the operating point: further below than above, because under a wall a raised
     /// curve moves the operating point down (the card runs the same clock a point lower).</summary>
     public const int WindowBelowMv = 20, WindowAboveMv = 10;
@@ -45,8 +40,13 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     public const uint BusyUtilPct = 15;
 
     /// <summary>The warning for a curve written while the GPU is busy, or null.</summary>
+    /// <summary>A run's maxTempC: null when none was asked for; refused when it is no temperature a GPU can have (a typo,
+    /// not a tuning bound: 1..120 °C).</summary>
+    public static int? MaxTemp(int? maxTempC) => maxTempC is not { } c ? null
+        : c is >= 1 and <= 120 ? c : throw new ArgumentException($"maxTempC is a GPU temperature, 1..120 °C, not {c}");
+
     public static string? Busy(Card.Look look) => look.Telemetry?.GpuUtilPercent is { } u && u > BusyUtilPct
-        ? $"written while the GPU was {u} % busy: on the reference card two of three hangs began with a curve written under full load; at idle is safer"
+        ? $"written while the GPU was {u} % busy: concurrent workload and temperature changes can affect the result; verify readback and compare repeatable runs"
         : null;
 
     /// <summary>Why a board power limit is outside the range the driver reports for this board, or null.</summary>
@@ -69,13 +69,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     private static readonly JsonSerializerOptions Json = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     [McpServerTool(Name = "gpu_status", ReadOnly = true, OpenWorld = false), Description(
-        "Where the card runs right now: NVVDD/MSVDD, core clock, the V/F point it sits on (stock, current and daily offset), " +
-        "power, temperature and its margin, the memory temperature (memory_c), utilization, VRAM, NVML limit reasons, each " +
-        "rail's amps and watts against its current limit, the 16-pin input (connector and slot watts, input current against " +
-        "its limit, with a concern near it), the PCIe link (pcie: generation and width now and the most the slot allows, " +
-        "replays since boot), what each GPC measures, and the experiment session. NVML on this card sets gpu_idle at " +
-        "full load when the clock sits at the top of a curve cut flat, and sw_power_cap at ~340 W far under the 598 W wall: " +
-        "read power against power_limit_w, not the reason bits.")]
+        "Read this GPU's operating clocks, voltages, V/F point, power, temperature/headroom, utilization, memory, input power and available sensors. Compare readings with this board's own limits. Daily offsets refer only to a user-kept profile; report when none exists.")]
     public string GpuStatus() => Guard(() =>
     {
         var look = card.Read();
@@ -127,8 +121,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     });
 
     [McpServerTool(Name = "curve_around", ReadOnly = true, OpenWorld = false), Description(
-        "The Core V/F points around a voltage (default: where the card runs now): index, mV, stock MHz, effective MHz now, " +
-        "offset now, the daily profile's offset, and how far above the daily profile each point is.")]
+        "Read this GPU's core V/F points around a voltage, with stock/current offsets and the user's daily offsets when a profile exists. No universal voltage bands or default curve are supplied.")]
     public string CurveAround(
         [Description("Centre voltage in mV; omit for the present NVVDD.")] double? mv = null,
         [Description("How many mV each side of the centre (default 40).")] double spanMv = 40) => Guard(() =>
@@ -146,20 +139,22 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     });
 
     [McpServerTool(Name = "begin_session", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Start an experiment session for a game. Every write after this (adjust_curve, set_fan_curve, set_clock_lock...) is a trial; its outcome becomes a data point " +
-        "(stable, survived until replaced, or crash). A crash during a trial does not step the daily profile down. A trial " +
-        "still in force from an earlier session ends first and the daily profile goes back on, as end_session does. " +
-        "unattended=true when the person is away (an overnight stress mapping): after maxCrashes crashes (default 2) no " +
-        "new trial is written until a new session, so the card is not hung over and over with nobody there; the daily " +
-        "profile stays on and nothing steps down. warnings: another tool's settings on the card (not stock: every trial starts " +
-        "from them) or another overclocking program running; tell the person before the first trial.")]
-    public string BeginSession(
+        "Start an explicitly approved tuning session on the current RTX 50 GPU. Trials are recorded and recoverable. First inspect this card's current settings; no tuning preset or default daily profile is supplied. Optional unattended/crash-budget parameters are user-selected stop conditions." + " " + AsksItself)]
+    public Task<string> BeginSession(
+        McpServer server,
         [Description("The game being played.")] string game,
         [Description("Anything worth keeping with the data (settings, scene).")] string? note = null,
         [Description("The person is away: stop writing new trials after maxCrashes crashes.")] bool unattended = false,
-        [Description("With unattended: the crashes allowed before trials stop, 1..10 (default 2).")] int maxCrashes = 2)
+        [Description("With unattended: the user-selected crash budget, a positive count (default 2).")] int maxCrashes = 2,
+        [Description(ConfirmCode)] string? confirm = null, CancellationToken cancellationToken = default) =>
+        Asked(server, $"Allow overclocking trials for '{game}' in this session ({note ?? "no additional scope specified"}). " +
+            $"NVIDIA decides which settings it accepts; Clocktail imposes no extra tuning envelope. Unattended: {unattended}, crash budget: {maxCrashes}. " +
+            "Trials are recorded and can be undone; making them daily still requires separate approval.",
+            confirm, cancellationToken, () => BeginApprovedSession(game, note, unattended, maxCrashes));
+
+    private string BeginApprovedSession(string game, string? note, bool unattended, int maxCrashes)
     {
-        if (maxCrashes is < 1 or > 10) return Out(new { success = false, error = "maxCrashes is 1..10" });
+        if (maxCrashes < 1) return Out(new { success = false, error = "maxCrashes must be a positive count" });
         var r = card.Broker(BrokerRequest.OpExperiment, "begin", JsonSerializer.Serialize(new { game, note, unattended, max_crashes = maxCrashes }));
         if (!r.Ok) return Reply(r);
         var warnings = new List<string>();
@@ -176,16 +171,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     [McpServerTool(Name = "adjust_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Raise or lower the Core V/F points around where the card runs now, as a new trial of the session. Any step within " +
-        "the driver's and the firmware's own range, which the broker holds; the method's step is 15 MHz. The operating point " +
-        "is the median NVVDD under load over the last 3 s (or the last 10 s of a load that ended within 2 minutes, such as a " +
-        "stress run; an idle card needs fromMv/toMv); the default window is 20 mV below it to 10 mV above, and any point above " +
-        "the window that the raise would overtake is lifted just enough to keep the curve rising. Points under NVVDD's VMIN " +
-        "(800 mV on a 5090; the card runs none of them) are never touched. Under a power wall a raise shows as the same " +
-        "clock at a lower voltage: the points the card then runs on are the ones tested (mark_stable records them). " +
-        "The curve lands on a 7.5 MHz grid. Writing under full " +
-        "load is how 2 of 3 hangs on 2026-10-18 began (the answer warns when the GPU was busy): prefer one small step, then " +
-        "several minutes of play before the next, and call mark_stable or back_to_daily before moving on.")]
+        "Move core V/F point offsets in a selected voltage band as a trial. Use this GPU's curve, reported offset budget and actual operating point, not a model-specific template. Readback and measured workload results decide the outcome.")]
     public string AdjustCurve(
         [Description("MHz to add to each point in the window (negative lowers).")] double deltaMhz,
         [Description("Lowest voltage of the window, mV; omit for the operating point minus 20 mV.")] double? fromMv = null,
@@ -267,11 +253,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     [McpServerTool(Name = "flatten_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Make the curve flat from a voltage up, as a new trial: every point from fromMv up runs at most the clock the point at " +
-        "fromMv runs now (less marginMhz), or at most ceilingMhz. Only ever lowers, so it cannot push the card past what " +
-        "it held; it is method step 4's 'flat where the chip stops scaling' in one call instead of many 15 MHz steps. Points " +
-        "under NVVDD's VMIN are never touched. Write it at idle (the answer warns when the GPU was over 15 % busy). " +
-        "back_to_daily undoes it; keep_as_daily keeps it.")]
+        "Lower the core curve to a flat top from a user-selected voltage, as a trial. Uses this GPU's actual curve; no stock voltage, knee or stable target clock is assumed.")]
     public string FlattenCurve(
         [Description("Voltage the flat top starts at, mV.")] double fromMv,
         [Description("MHz under that point's clock to flatten to (default 0).")] double marginMhz = 0,
@@ -310,11 +292,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     });
 
     [McpServerTool(Name = "set_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Write a whole V/F curve as a new trial: every editable point's offset in kHz, in card_settings' encoding (runs as " +
-        "offset*count, e.g. '0*60,30000*67'; '0*127' is the stock curve), as the CLI's --vf-offsets does. For loading a " +
-        "curve worked out elsewhere, or putting back one a data point recorded; a band is adjust_curve's. Any curve within " +
-        "the driver's range: the write path holds the firmware's offset range and budget, nothing narrower. Write it at idle " +
-        "(the answer warns when the GPU was over 15 % busy). back_to_daily undoes it; keep_as_daily keeps it.")]
+        "Set the whole core V/F curve as per-point offsets for this GPU, as one trial. The point count and representable offsets must match the current driver layout. No reference curve or default daily curve is shipped.")]
     public string SetCurve(
         [Description("Every editable point's offset, kHz, as runs offset*count.")] string curve,
         [Description("Why this curve (where it came from).")] string? reason = null) => Guard(() =>
@@ -327,13 +305,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     });
 
     [McpServerTool(Name = "shift_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Move the curve on the card left by mv as a new trial: from the knee up each point runs the clock the current curve " +
-        "runs mv above it, never past what it runs at NVVDD's MAX; below the knee nothing moves. The same clocks at less " +
-        "voltage, so on a power-limited load more clock under the same wall. This is not the CLI's --vf-undervolt, which " +
-        "moves the stock curve (on the reference card that put 895 mV at 2407 MHz where the daily curve ran 2797). It is a " +
-        "raise at every voltage, so test it as a raise: stress_test across the loads, then games. Any shift within the " +
-        "driver's range; small ones first (25 mV held on the reference card, and a 250 mV shift at 600 W bugchecked it). " +
-        "Write it at idle (the answer warns when the GPU was over 15 % busy). back_to_daily undoes it; keep_as_daily keeps it.")]
+        "Shift this GPU's current curve left by a user-selected mV amount as a trial, using the reported curve and offset budget. Evaluate the resulting clocks and stability on the actual GPU.")]
     public string ShiftCurve(
         [Description("mV to move the curve left by.")] double mv,
         [Description("Why (what the last pass showed).")] string? reason = null) => Guard(() =>
@@ -372,12 +344,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     [McpServerTool(Name = "set_power_limit", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Set the board power limit for the session, as a new trial with the curve left as it is. A lower wall makes the card " +
-        "run lower down the curve, so adjust_curve can then sample points it never reaches at the full wall (and find where " +
-        "the curve's slope bends). Later adjust_curve trials run under this wall until back_to_daily, end_session or a crash " +
-        "puts the daily profile's wall back. This wall is never kept (keep_as_daily puts the daily wall back on); " +
-        "set_daily_power_limit changes the daily one. Allowed: the board's range as the driver reports it (400-600 W on a 5090). " +
-        "For points lower down than 400 W reaches, cap the frame rate in the game instead: a lighter load runs lower on the curve.")]
+        "Set this board's ordinary power request for a trial, within its driver-reported range. Stock power and useful power targets vary by GPU, board vendor and VBIOS. Trial power is not automatically made daily.")]
     public string SetPowerLimit(
         [Description("The board power limit, W.")] double watts,
         [Description("Why this wall (which part of the curve it is meant to reach).")] string? reason = null) => Guard(() =>
@@ -411,13 +378,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     });
 
     [McpServerTool(Name = "set_current_limit", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Set a rail's current limit (OCP, in amps) for the session, as a new trial with the curve left as it " +
-        "is. The firmware caps the rail's current at it, so a lower NVVDD limit caps the core's power (P = V x I) and moves " +
-        "the card down the curve below where the 400 W board wall stops; gpu_status shows each rail's amps and watts to " +
-        "pick it from. Up to the driver's maximum (5001 A on a 5090), above the VBIOS default (NVVDD 600 A, MSVDD 180 A) " +
-        "too; at the 600 W wall NVVDD peaks near 430 A on the reference card, so the board power limit binds first and a " +
-        "raise changes nothing there. 'default' as amps puts the default back. Never kept: back_to_daily, end_session, " +
-        "keep_as_daily, a crash and the agent disconnecting all put the default back.")]
+        "Set a rail's current limit for a trial, using the current GPU's reported range; 'default' requests that board's own default. Read back and compare actual current, power and performance. This control is temporary.")]
     public string SetCurrentLimit(
         [Description("nvvdd or msvdd.")] string rail,
         [Description("The limit in amps, or 'default'.")] string amps,
@@ -456,25 +417,15 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     });
 
     [McpServerTool(Name = "stress_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Run the driver's own golden stressor (nvgwls.exe, what NVIDIA App's auto-tune runs) on what is on the card now, " +
-        "sampling the operating point twice a second; no game and no person needed, so it is the way to test while the " +
-        "person is away. It compares every graphics, compute and ray-tracing result bit for bit with the first, so it " +
-        "catches silent errors a game never shows. load 100 runs flat out (on this card it pins the board wall: 598 W, " +
-        "~2900 MHz on the daily curve); under 100 it is a 250 Hz square wave at that duty (load 50: ~385 W, ~3055 MHz, " +
-        "the curve's top). Combine with set_power_limit / set_current_limit to pin it lower down the curve. If it fails " +
-        "(TDR, Xid, data error, crash, hang, or a driver reset in the System log during the run) while a trial is in force, " +
-        "the trial is recorded as a crash (after a driver reset by the service itself, with the voltage it hung at) and the " +
-        "daily profile goes back on. It holds the card while it runs, as the lab does: no other write lands under it, and " +
-        "another run must finish first. The result goes into the tuning log. Blocks for the run's length.")]
+        "Run NVIDIA's nvgwls stress tester on the current settings, sampling the actual operating point. Check failures against the trial that ran and record confirmed failures. The test holds a measurement lease. It stops within 2 °C of NVIDIA's slowdown point, and at maxTempC when one is given. No pass or fixed MHz margin guarantees stability in every workload.")]
     public string StressTest(
         [Description("0..100; 100 = continuous full load (default).")] int load = 100,
         [Description("Run length in seconds, 10..300 (default 60).")] int seconds = 60,
         [Description("What this run is meant to show, for the log.")] string? note = null,
-        [Description("Stop the run if the GPU reaches this temperature, °C (default 85, at most 88); a stop is neither a pass nor a crash.")] int? maxTempC = null) => Guard(() =>
+        [Description("Also stop the run if the GPU reaches this temperature, °C. Omitted: it stops only within 2 °C of NVIDIA's slowdown point. A stop is neither a pass nor a crash.")] int? maxTempC = null) => Guard(() =>
     {
         if (load is < 0 or > 100) throw new ArgumentException("load is 0..100");
-        int maxC = maxTempC ?? StressMaxC;
-        if (maxC is < 50 or > StressMaxCeilingC) throw new ArgumentException($"maxTempC is 50..{StressMaxCeilingC}");
+        int? maxC = MaxTemp(maxTempC);
         if (seconds < 10 || seconds > MaxStressSeconds) throw new ArgumentException($"seconds is 10..{MaxStressSeconds} (CLOCKTAIL_MCP_MAX_STRESS_S)");
         string exe = Nvgwls.Find() ?? throw new InvalidOperationException("nvgwls.exe was not found beside the loaded driver");
         var samples = new List<Card.Sample>();
@@ -482,6 +433,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         bool tooHot = false;
         int hotRun = 0;
         double? stopC = null;
+        string? hotWhy = null;
         bool Sample()
         {
             try
@@ -489,7 +441,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
                 var s = card.ReadSample();
                 samples.Add(s);
                 hotRun = Nvgwls.TooHot(s.Telemetry?.TemperatureC, s.Telemetry?.TempMarginC, maxC) ? hotRun + 1 : 0;
-                if (hotRun >= 2) { stopC = s.Telemetry?.TemperatureC; return true; }
+                if (hotRun >= 2) { stopC = s.Telemetry?.TemperatureC; hotWhy = Nvgwls.HotWhy(stopC, maxC); return true; }
             }
             catch (DriverBusyException) { }
             return false;
@@ -513,7 +465,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         int? resets = tooHot ? Nvgwls.DriverResets(started, 0) : Nvgwls.DriverResets(started, code);
         double ranS = Math.Round((DateTime.UtcNow - started).TotalSeconds);
         string verdict = tooHot && resets is not > 0
-            ? string.Create(CultureInfo.InvariantCulture, $"thermal stop at {stopC:0} °C after {ranS:0} s (maxTempC {maxC}): stopped by stress_test, not a pass or a crash")
+            ? string.Create(CultureInfo.InvariantCulture, $"thermal stop at {stopC:0} °C after {ranS:0} s ({hotWhy}): stopped by stress_test, not a pass or a crash")
             : Nvgwls.Verdict(code, resets);
         bool failed = tooHot ? resets > 0 : Nvgwls.Failed(code, resets);
 
@@ -579,26 +531,16 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             samples_csv = csv,
             trial_in_force = trial,
             crash_recorded = crashRecorded,
-            thermal_stop = tooHot && !failed ? new { at_c = stopC, after_s = ranS, max_temp_c = maxC } : null,
+            thermal_stop = tooHot && !failed ? new { at_c = stopC, after_s = ranS, why = hotWhy, max_temp_c = maxC } : null,
             next = failed ? "the card failed: read data_points / read_log before the next step"
                 : tooHot ? "too hot to test this way: a steeper fan curve (set_fan_curve), fans back to auto, or a lower wall, then run again" : null,
         });
     });
 
     [McpServerTool(Name = "mark_stable", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Record the trial in force as stable in this game, with a note (minutes played, scene, anything seen). The curve stays on. " +
-        "The curve points the card ran on under load during the trial (from the once-a-second residency samples) go into " +
-        "the note: those are the points this trial proved, not the whole window.")]
+        "Record the active trial's observed stable outcome and the workload that was actually tested. Do not infer stability from another GPU or from an interrupted or inconclusive run.")]
     public string MarkStable([Description("What was played and seen.")] string note) => Guard(() =>
         Reply(card.Broker(BrokerRequest.OpExperiment, "stable", note + TrialStays(out _))));
-
-    /// <summary>The driver's temperature-compensation steps on the reference card (warming: ~57/62/72/82 °C; at 82 °C the
-    /// curve dropped 8-15 MHz at 940-990 mV, re/tuning-results §26). Two runs either side of one are not comparable.</summary>
-    public static readonly double[] ThermalStepsC = [57, 62, 72, 82];
-
-    /// <summary>The step a temperature sits within 2 °C of, or null.</summary>
-    public static double? NearThermalStep(double? tempC) =>
-        tempC is { } t && ThermalStepsC.FirstOrDefault(s => Math.Abs(s - t) <= 2) is var s && s > 0 ? s : null;
 
     /// <summary>How far the curve moved at the point a run held, between the read before it and the read after (the card
     /// still warm), with the temperatures it ran between: an A B B A comparison is only fair at one temperature.</summary>
@@ -611,13 +553,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         var temps = samples.Select(s => s.Telemetry?.TemperatureC).OfType<double>().ToList();
         double? start = temps.Count > 0 ? temps[0] : null, end = temps.Count > 0 ? temps[^1] : null;
         double shift = (a.EffectiveKhz - (double)b.EffectiveKhz) / 1000.0;
-        double? step = NearThermalStep(end);
         return new
         {
             point = i, before_mhz = b.EffectiveKhz / 1000.0, after_mhz = a.EffectiveKhz / 1000.0, shift_mhz = shift,
             temp_start_c = start, temp_end_c = end,
             note = shift != 0 ? $"the curve moved {shift:+0.#;-0.#} MHz at this point as the card warmed: compare runs at the same temperature"
-                : step is { } st ? $"ended within 2 °C of the {st:0} °C compensation step: a degree either way moves the curve" : null,
+                : null,
         };
     }
 
@@ -690,7 +631,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// The settings the trial in force runs, from a "show" or "quiet" answer: every field but when and why it was written
     /// and what a hand-back of trial-only cells takes off it, and its writes but the trial-only ones (a clock floor or lock,
     /// the F8 request). A run's crash goes to the trial in force at its end only when these are the ones it measured: the
-    /// fan guard handing the fans back mid-run writes the trial again (a new "At") with the same settings. Null when no trial
+    /// service handing the fans back mid-run (its agent gone quiet) writes the trial again (a new "At") with the same settings. Null when no trial
     /// is in force or the answer cannot be read.
     /// </summary>
     public static string? TrialSettings(BrokerAnswer show)
@@ -737,9 +678,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     [McpServerTool(Name = "mark_crash", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "The game crashed to the desktop (or froze) with no driver reset: record the trial in force as a crash, with what " +
-        "the player saw, and put the daily profile back at once. A driver reset is recorded by the broker by itself; use " +
-        "this for the crashes it cannot see. Afterwards, read data_points before the next step.")]
+        "Record a crash of the trial that ran, then restore the user's kept daily profile or the captured original baseline when none exists. Driver resets are also recorded by the service; avoid attributing a failure twice.")]
     public string MarkCrash([Description("What happened and where (scene, loading, alt-tab).")] string note)
     {
         // The crash is recorded and the daily profile put back whatever the residency can say.
@@ -753,31 +692,23 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     [McpServerTool(Name = "back_to_daily", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
-        "Put the daily profile back on at once (artefacts, stutter, a doubt). The trial in force ends as survived; the session stays open.")]
+        "Restore this user's kept daily settings. If no daily profile exists, return Clocktail-owned changes to their recorded baseline; no bundled settings are applied and another utility's settings are not implicitly cleared.")]
     public string BackToDaily([Description("Why, for the tuning log.")] string? reason = null) =>
         Applied(card.Broker(BrokerRequest.OpProfile, "apply", reason ?? "back_to_daily (agent)"), null);
 
     [McpServerTool(Name = "stock", ReadOnly = false, Destructive = true, Idempotent = true, OpenWorld = false), Description(
-        "Put the card to stock, NVIDIA's own settings, and keep it there: every setting Clocktail wrote goes back, then every " +
-        "setting another tool left (card_report's 'Not set by Clocktail': an MSI Afterburner curve, a memory offset, a power " +
-        "limit, fixed fans, a clock lock) is written to NVIDIA's default (cleared lists them). The daily profile is suspended " +
-        "(kept, not deleted), so nothing puts it back at the next start or driver reset until load_daily; what another tool set " +
-        "is not kept anywhere, and only that tool can put it back, so then Clocktail asks the person itself, in the chat: that " +
-        "first call changes nothing and answers with the question and a confirm code (code confirm_in_chat); put the question to " +
-        "the person word for word and only after their yes call again with confirm set to that code. The trial in force (if any) " +
-        "ends as survived. Another tool still running may write its settings back (card_report says), and NVIDIA App's " +
-        "automatic tuning comes back after every restart until it is turned off in NVIDIA App. Tell the person before calling this.")]
+        "Explicitly return the GPU to its own known NVIDIA/board stock values, clearing known settings left by other utilities as well. Some originals are available only from recorded snapshots. Suspend the user's daily profile without deleting it; no default profile is installed." + " " + AsksItself)]
     public async Task<string> Stock(McpServer server, [Description(ConfirmCode)] string? confirm = null, CancellationToken cancellationToken = default)
     {
         // Another tool's settings cleared are gone for good (the broker lets go of them): the person says yes to that.
         IReadOnlyList<Clocktail.Domain.FactoryCell> others;
         try { others = new SettingsTools(card).NotStock(); }
         catch (Exception e) when (e is InvalidOperationException or InvalidDataException or IOException or Clocktail.Hw.NvApiException) { others = []; }
-        if (others.Count == 0) return Stock();
-        return await Asked(server,
-            $"Put your graphics card to NVIDIA's stock settings. This clears what another tool set ({string.Join(", ", others.Select(o => $"{o.Name} {o.Describe(o.Found)}"))}); " +
-            "Clocktail keeps no copy of it, so only that tool can put it back. Your daily profile is kept and load_daily puts it back.",
-            confirm, cancellationToken, Stock);
+        string question = others.Count == 0
+            ? "Put your graphics card to NVIDIA's stock settings: what Clocktail set goes back. Your daily profile is kept, not applied, until load_daily puts it back."
+            : $"Put your graphics card to NVIDIA's stock settings. This clears what another tool set ({string.Join(", ", others.Select(o => $"{o.Name} {o.Describe(o.Found)}"))}); " +
+              "Clocktail keeps no copy of it, so only that tool can put it back. Your daily profile is kept and load_daily puts it back.";
+        return await Asked(server, question, confirm, cancellationToken, Stock);
     }
 
     private string Stock()
@@ -809,17 +740,13 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     [McpServerTool(Name = "load_daily", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
-        "End a suspension (after stock) and put the kept daily profile on the card now; it goes on at every start and after " +
-        "every driver reset again. A profile kept on another VBIOS goes on too and is bound to this one: stress_test it right after (load 100 and 50). " +
-        "Fails when no daily profile is kept (a fresh install: offer a preset instead).")]
-    public string LoadDaily() => Applied(card.Broker(BrokerRequest.OpProfile, "load"), null);
+        "Apply a daily profile this user previously kept for this GPU, with explicit approval, and enable its automatic reapplication. If no profile exists, fail without writing; there is no supplied starter profile." + " " + AsksItself)]
+    public Task<string> LoadDaily(McpServer server, [Description(ConfirmCode)] string? confirm = null, CancellationToken cancellationToken = default) =>
+        Asked(server, "Put your kept daily profile on the graphics card now and enable automatic reapplication after starts and driver resets.",
+            confirm, cancellationToken, () => Applied(card.Broker(BrokerRequest.OpProfile, "load"), null));
 
     [McpServerTool(Name = "preview_daily", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description(
-        "What the daily profile would become, before asking the person: with no name, what keep_as_daily would keep (every " +
-        "cell on the card this trial and the ones before it touched, not only the last step), and what it would not keep and " +
-        "why; adopt=true, what keep_as_daily adopt=true would keep (another tool's settings too); with a preset's or saved " +
-        "profile's name, what load_preset would load. Each change is daily now → becomes, with " +
-        "the card's value now. Writes nothing. Show it, then ask.")]
+        "Read-only preview of what keep_as_daily would retain, including exclusions, or what a named user-saved profile would load. adopt=true previews eligible settings left by another utility. No built-in tuning profile exists.")]
     public string PreviewDaily(
         [Description("A preset's or saved profile's name; omit for keep_as_daily.")] string? name = null,
         [Description("Preview keep_as_daily adopt=true: another tool's settings kept too.")] bool adopt = false) =>
@@ -831,18 +758,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         : Reply(r);
 
     [McpServerTool(Name = "keep_as_daily", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
-        "Make what the trials set on the card the new daily profile, permanently: it goes on at every start and after " +
-        "every driver reset from then on. Show preview_daily first: it lists exactly what would be kept. Kept from the card: the V/F curve, the core and memory P0 " +
-        "offsets, NVVDD's and MSVDD's offsets, the XBAR/SYS/Video clock offsets and voltage demands and the core's voltage " +
-        "demand, the XBAR/core clock ratio, the voltage boost, a clock cap (release one set only for a test first), the fan " +
-        "curve and the fans' zero-RPM band. Not kept: the power limit (it stays the daily profile's; set_daily_power_limit " +
-        "changes it), the F8 power request, current limits, fixed fan duties, and a clock floor, point lock or Boost Lock; a trial's lowered wall, limit, fixed fans or lock go back at once. " +
-        "Everything a trial set is kept, not just the last change: call back_to_daily first if only the curve should be. " +
-        "The curve kept is the one on the card: if the trial ran under a lowered wall or limit, the curve is what matters, " +
-        "not the wall it was found under. The trial in force (if any) " +
-        "is recorded as stable. adopt=true also keeps what another tool left on the card and Clocktail never wrote (card_report's " +
-        "'Not set by Clocktail': an MSI Afterburner curve, offsets, voltage demands, the boost), so the service puts it back after every " +
-        "boot and the person can close that tool; its power limit and fans are not kept. The old and the new profile go into the tuning log. " + AsksItself)]
+        "After explicit approval, make eligible settings measured on this GPU the user's own daily profile. Show preview_daily first. Temporary trial controls are excluded as shown in that preview. adopt=true can include eligible settings left by another utility. Service startup and reset recovery reapply only this user-kept profile." + " " + AsksItself)]
     public async Task<string> KeepAsDaily(
         McpServer server,
         [Description("Why this becomes the daily profile (games and minutes it survived).")] string note,
@@ -903,51 +819,37 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     };
 
     [McpServerTool(Name = "list_presets", ReadOnly = true, OpenWorld = false), Description(
-        "The daily profiles that ship with Clocktail, each with the card model it was tuned on and whether this card is that " +
-        "model, and the profiles the person saved under a name (save_profile). A fresh install writes nothing (the card is what " +
-        "Clocktail found; card_report says whether that is stock); a preset is a starting point the person may choose instead. " +
-        "load_preset loads either kind by name.")]
+        "List profiles this user saved for the current GPU. The compatible 'presets' field is empty: Clocktail ships no tuning preset or default daily profile. 'saved' contains user-owned named profiles; load_preset loads one after approval.")]
     public string ListPresets() => Guard(() =>
     {
         var saved = card.Broker(BrokerRequest.OpProfile, "saved");
         return Out(new
         {
             gpu = card.Name,
-            presets = Presets.All.Select(p => new
-            {
-                p.Name, p.Title, tuned_on = p.Gpu, fits_this_card = p.Fits(card.Name), p.Note,
-                writes = p.Writes.Select(w => $"{w.Kind}/{w.Key} = {w.Value}"),
-            }),
+            presets = Array.Empty<object>(),   // the field stays for clients that read it: nothing ships
             saved = saved.Ok && saved.Result is { } res && res.TryGetProperty("profiles", out var list) ? list : (JsonElement?)null,
             saved_error = saved.Ok ? null : saved.Error,
         });
     });
 
     [McpServerTool(Name = "save_profile", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Save the daily profile under a name (\"quiet\", \"games\", \"benchmark\"), so the person can keep several and switch " +
-        "with load_preset and that name. It saves what is kept, not a trial on the card: keep_as_daily first when the person " +
-        "wants the card's current settings saved. A name already used is replaced (say so). The daily profile itself does not " +
-        "change. Any name the person likes, in any language (not a preset's name; case does not matter).")]
+        "Save this GPU's existing user-kept daily profile under a chosen name. No daily profile is manufactured when none exists. A reused name is replaced; names are case-insensitive.")]
     public string SaveProfile([Description("The name to save it under.")] string name) =>
         Guard(() => Reply(card.Broker(BrokerRequest.OpProfile, "save", name)));
 
     [McpServerTool(Name = "delete_profile", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
-        "Delete a profile saved with save_profile. The daily profile on the card and the presets are not affected. " + AsksItself)]
+        "Delete a named profile this user saved, after explicit approval. The daily profile already kept on the card is not deleted. There are no bundled profiles." + " " + AsksItself)]
     public Task<string> DeleteProfile(McpServer server, [Description("The saved profile's name, from list_presets.")] string name,
         [Description(ConfirmCode)] string? confirm = null, CancellationToken cancellationToken = default) =>
         Asked(server, $"Delete the profile saved as '{name}'. It cannot be undone; the settings on your graphics card do not change.", confirm, cancellationToken,
             () => Reply(card.Broker(BrokerRequest.OpProfile, "forget", name)));
 
     [McpServerTool(Name = "load_preset", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
-        "Make a preset, or a profile saved with save_profile, the daily profile and put it on the card now: it replaces the " +
-        "daily profile (the old one goes into the tuning log; save_profile it first if the person may want it back) and goes on " +
-        "at every start from then on. A preset only loads on the card model it was tuned on, and another card of that model " +
-        "is still other silicon: after loading one, run stress_test before trusting it. Show preview_daily with the name " +
-        "first. " + AsksItself)]
-    public async Task<string> LoadPreset(McpServer server, [Description("The preset's or saved profile's name, from list_presets.")] string name,
+        "Compatible tool name for loading a profile this user saved for the current GPU and making it daily after approval. Show preview_daily with the name first. Missing names write nothing; no starter preset is supplied." + " " + AsksItself)]
+    public async Task<string> LoadPreset(McpServer server, [Description("The user-saved profile's name, from list_presets.")] string name,
         [Description(ConfirmCode)] string? confirm = null, CancellationToken cancellationToken = default)
     {
-        // The preview refuses an unknown name and another model's preset: then nobody is asked about a load that cannot happen.
+        // Validate a user-saved name before asking; there are no built-in tuning profiles.
         var preview = card.Broker(BrokerRequest.OpProfile, "preview", name);
         if (!preview.Ok) return Reply(preview);
         return await Asked(server, $"Load '{name}' as your daily profile and put it on your graphics card now ({Changes(preview)}); Clocktail puts it back after every start.",
@@ -955,9 +857,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     [McpServerTool(Name = "install_service", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
-        "Install (or update) the Clocktail service, the one elevated process that does every write and puts the daily " +
-        "profile back after each boot and driver reset. Every other write tool needs it. Windows asks the person to " +
-        "approve once (a UAC prompt). Tell the person before calling this.")]
+        "Install or update the service that performs writes, owns recovery records and reapplies only the user's existing daily profile. Obtain approval; Windows may request elevation. Installing does not create a tuning profile or write tuning defaults.")]
     public string InstallService() => Guard(() =>
     {
         var exe = Path.Combine(AppContext.BaseDirectory, "Clocktail.Broker.exe");
@@ -991,7 +891,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     });
 
     [McpServerTool(Name = "end_session", ReadOnly = false, Destructive = false, Idempotent = true, OpenWorld = false), Description(
-        "End the session: the trial in force ends as survived and the daily profile goes back on (stock when none is kept).")]
+        "End the tuning session and restore the user's kept daily profile, or return Clocktail's changes to the captured baseline when no daily exists. Nothing is kept automatically.")]
     public string EndSession()
     {
         var r = card.Broker(BrokerRequest.OpExperiment, "end");
@@ -1002,14 +902,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     [McpServerTool(Name = "data_points", ReadOnly = true, OpenWorld = false), Description(
-        "The last data points across sessions and games, oldest first: game, outcome (stable / survived / crash), minutes, " +
-        "the change, the operating point when it was written, and for a crash the voltage the flight recorder found at the hang. " +
-        "by_point sums every data point up per curve point, from the points the card actually ran on under load (at least " +
-        "10% of the trial; for a crash, of its last 30 s): the highest offset proved stable (and for how many seconds), the " +
-        "highest that survived, and the lowest that crashed; and the clock it actually ran there (P90). Under a wall a point " +
-        "runs anywhere between the point below's frequency and its own, so stable_clock_mhz against curve_mhz_now says how " +
-        "much of the point was proved: a point is proved only when the card ran at (or near) its curve frequency. Offsets " +
-        "are absolute, as in curve_around. Read it before the next step.")]
+        "Read recorded trials, tested curve points, workloads and outcomes for this GPU. Results are evidence about this GPU, not stable defaults for the RTX 50 series.")]
     public string DataPoints() => Guard(() =>
     {
         var r = card.Broker(BrokerRequest.OpExperiment, "show");
