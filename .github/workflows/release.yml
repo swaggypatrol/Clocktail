@@ -1,0 +1,81 @@
+# A tag v1.2.3 pushed: the tests, build/release.sh, the GitHub release (notes from docs/releases/v1.2.3.md, the zip and
+# the npm package attached) and npm publish. npm takes it through Trusted Publishing (OIDC): no token, no 2FA prompt,
+# and the package page shows the commit it was built from.
+#
+# To release:
+#   1. Set the version in npm/package.json and write docs/releases/vX.Y.Z.md. Commit and push.
+#   2. git tag vX.Y.Z && git push origin vX.Y.Z
+#
+# Run it by hand (Actions > Release > Run workflow, with the tag) to redo a release half done: a GitHub release that
+# already exists is left as it is, and a version npm already has is not published again.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release, e.g. v0.6.0'
+        required: true
+
+permissions:
+  contents: write   # the GitHub release
+  id-token: write   # npm Trusted Publishing
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: npm new enough for Trusted Publishing
+        run: npm install -g npm@^11.5.1 && npm --version
+
+      - name: What this run will do
+        id: plan
+        run: |
+          ver="${TAG#v}"
+          pkg="$(node -p "require('./npm/package.json').version")"
+          [ "$ver" = "$pkg" ] || { echo "::error::tag $TAG but npm/package.json says $pkg"; exit 1; }
+          if gh release view "$TAG" >/dev/null 2>&1; then gh_release=exists; else gh_release=create; fi
+          if [ "$gh_release" = create ] && [ ! -s "docs/releases/$TAG.md" ]; then
+            echo "::error::docs/releases/$TAG.md is missing: the release needs its notes"; exit 1
+          fi
+          if [ "$(npm view "clocktail@$ver" version 2>/dev/null)" = "$ver" ]; then npm=published; else npm=publish; fi
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "gh_release=$gh_release" >> "$GITHUB_OUTPUT"
+          echo "npm=$npm" >> "$GITHUB_OUTPUT"
+          echo "version $ver: GitHub release $gh_release, npm $npm"
+
+      - name: Build (tests first)
+        run: bash build/release.sh "${{ steps.plan.outputs.ver }}"
+
+      - name: GitHub release
+        if: steps.plan.outputs.gh_release == 'create'
+        run: |
+          ver="${{ steps.plan.outputs.ver }}"
+          gh release create "$TAG" "out/Clocktail-$ver-win-x64.zip" "out/clocktail-$ver.tgz" \
+            --title "Clocktail $ver" --notes-file "docs/releases/$TAG.md" --verify-tag
+
+      - name: npm publish
+        if: steps.plan.outputs.npm == 'publish'
+        run: npm publish "out/clocktail-${{ steps.plan.outputs.ver }}.tgz" --access public
