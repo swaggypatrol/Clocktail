@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using Clocktail.Domain.Platform;
 using Clocktail.Mcp;
 
 namespace Clocktail.Tests.Mcp;
@@ -60,5 +62,102 @@ public class StressThermalStopTests
         Assert.Null(Clocktail.Mcp.TuningTools.MaxTemp(null));
         Assert.Equal(80, Clocktail.Mcp.TuningTools.MaxTemp(80));
         Assert.Throws<ArgumentException>(() => Clocktail.Mcp.TuningTools.MaxTemp(2147483647));
+    }
+}
+
+/// <summary>stress_test's run is over only when its process is: on every way out (an exit, a stop, an overrun, a sampling
+/// error) the process is gone by the time Run returns, and what it started dies with the job it sits in.</summary>
+public class NvgwlsRunTests
+{
+    private static ProcessStartInfo Hidden(string exe, string args) =>
+        new(exe, args) { UseShellExecute = false, CreateNoWindow = true };
+
+    private static ProcessStartInfo LongRunning() => Hidden("ping", "-n 60 127.0.0.1");
+
+    /// <summary>A handle of our own on the process Run starts: Run disposes its own before it returns.</summary>
+    private static Action<Process> Keep(List<Process> into) => p => into.Add(Process.GetProcessById(p.Id));
+
+    [Fact]
+    public void A_normal_exit_returns_its_code()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        int? code = Nvgwls.Run(Hidden("cmd", "/c exit 3"), 30, () => false, out bool stopped, out bool exited);
+        Assert.Equal(3, code);
+        Assert.False(stopped);
+        Assert.True(exited);
+    }
+
+    [Fact]
+    public void A_stop_ends_the_process_before_run_returns()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var kept = new List<Process>();
+        try
+        {
+            int? code = Nvgwls.Run(LongRunning(), 60, () => true, out bool stopped, out bool exited, started: Keep(kept));
+            Assert.Null(code);
+            Assert.True(stopped);
+            Assert.True(exited);
+            Assert.True(kept.Single().HasExited);
+        }
+        finally { foreach (var p in kept) { ChildProcess.Stop(p); p.Dispose(); } }
+    }
+
+    [Fact]
+    public void An_overrun_ends_the_process_before_run_returns()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var kept = new List<Process>();
+        try
+        {
+            int? code = Nvgwls.Run(LongRunning(), 1, () => false, out bool stopped, out bool exited, graceS: 0, started: Keep(kept));
+            Assert.Null(code);
+            Assert.False(stopped);
+            Assert.True(exited);
+            Assert.True(kept.Single().HasExited);
+        }
+        finally { foreach (var p in kept) { ChildProcess.Stop(p); p.Dispose(); } }
+    }
+
+    [Fact]
+    public void A_sampling_error_ends_the_process_before_it_reaches_the_caller()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var kept = new List<Process>();
+        try
+        {
+            var e = Assert.Throws<InvalidOperationException>(() =>
+                Nvgwls.Run(LongRunning(), 60, () => throw new InvalidOperationException("the card went away"), out _, out _, started: Keep(kept)));
+            Assert.Equal("the card went away", e.Message);   // it exited: nothing added to the message
+            Assert.True(kept.Single().HasExited);
+        }
+        finally { foreach (var p in kept) { ChildProcess.Stop(p); p.Dispose(); } }
+    }
+
+    /// <summary>A process the stressor started and left behind (the tree Kill walks is gone once its root exits) dies with
+    /// the kill-on-close job when Run returns, as it would if this server ended mid-run.</summary>
+    [Fact]
+    public void What_the_process_started_dies_with_its_job()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        string signal = "ClocktailNvgwlsRun" + Guid.NewGuid().ToString("N")[..12];
+        var before = Process.GetProcessesByName("waitfor").Select(p => p.Id).ToHashSet();
+        var left = new Dictionary<int, Process>();
+        bool Watch()
+        {
+            foreach (var p in Process.GetProcessesByName("waitfor"))
+                if (before.Contains(p.Id) || !left.TryAdd(p.Id, p)) p.Dispose();
+            return false;
+        }
+        try
+        {
+            int? code = Nvgwls.Run(Hidden("cmd", $"/c \"start /b waitfor /t 60 {signal} >nul 2>&1 & ping -n 4 127.0.0.1 >nul\""),
+                                   30, Watch, out _, out bool exited);
+            Assert.Equal(0, code);
+            Assert.True(exited);
+            Assert.NotEmpty(left);
+            Assert.All(left.Values, p => Assert.True(p.WaitForExit(5_000), $"waitfor {p.Id} outlived the run"));
+        }
+        finally { foreach (var p in left.Values) { ChildProcess.Stop(p); p.Dispose(); } }
     }
 }

@@ -437,7 +437,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         string exe = Nvgwls.Find() ?? throw new InvalidOperationException("nvgwls.exe was not found beside the loaded driver");
         var samples = new List<Card.Sample>();
         int? code;
-        bool tooHot = false;
+        bool tooHot = false, exited = true;
         int hotRun = 0;
         double? stopC = null;
         string? hotWhy = null;
@@ -468,7 +468,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             started = DateTime.UtcNow;
             // A sample the driver does not answer in time is a missing one (a hang is what this run is looking for).
             residency.StressUntil(DateTimeOffset.Now.AddSeconds(seconds + 30));   // light load counts as load for this run
-            code = Nvgwls.Run(exe, load, seconds, Sample, out tooHot, grace);
+            code = Nvgwls.Run(exe, load, seconds, Sample, out tooHot, out exited, grace);
         }
         finally { residency.StressUntil(DateTimeOffset.MinValue); hold.Dispose(); }
         int? resets = tooHot ? Nvgwls.DriverResets(started, 0) : Nvgwls.DriverResets(started, code);
@@ -519,7 +519,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         bool trial = hold.Trial != null;   // in force when the run began: the trial it measured
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Stress nvgwls -l {load}, {seconds} s: {verdict} (exit code {(code?.ToString(CultureInfo.InvariantCulture) ?? "none")}). P50 {p50Mhz} MHz @ NVVDD {p50Mv} mV (curve point {pointIndex}), XBAR {P(held.Select(s => s.Mhz(AllClocksLayout.Xbar)), 0.5)} / SYS {P(held.Select(s => s.Mhz(AllClocksLayout.Sys)), 0.5)} MHz, board {p50W} W, NVVDD {p50NvW} W, MSVDD {p50MsMv} mV / {p50MsW} W; max {held.Max(s => s.Telemetry?.TemperatureC)} °C; limit reasons [{string.Join(", ", reasons)}]; {held.Count} samples; per sample {csv}")
-            + LocksWords(locksMet) + LocksUnreadWords(locks) + (note != null ? $". Purpose: {note}" : "");
+            + LocksWords(locksMet) + LocksUnreadWords(locks) + (exited ? "" : ". nvgwls did not exit after being stopped") + (note != null ? $". Purpose: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
         bool crashRecorded = failed && RecordCrash(hold, resets, $"nvgwls -l {load} {seconds} s: {verdict}");
         return Out(new
@@ -544,6 +544,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             samples_csv = csv,
             trial_in_force = trial,
             crash_recorded = crashRecorded,
+            warning = exited ? null : $"nvgwls did not exit within {Clocktail.Domain.Platform.ChildProcess.ExitWait.TotalSeconds:0} s of being stopped: its load may still be on the card. Check for nvgwls.exe in Task Manager before the next step",
             thermal_stop = tooHot && !failed ? new { at_c = stopC, after_s = ranS, why = hotWhy, max_temp_c = maxC } : null,
             next = failed ? "the card failed: read data_points / read_log before the next step"
                 : tooHot ? "too hot to test this way: a steeper fan curve (set_fan_curve), fans back to auto, or a lower wall, then run again" : null,
