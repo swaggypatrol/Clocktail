@@ -6,10 +6,12 @@ namespace Clocktail.Domain.Clocks;
 /// <param name="What">The limit in words (<see cref="ClientLimit.Describe"/>).</param>
 /// <param name="Kind">"max", "min" or "pinned" (a V/F point lock or Boost Lock); "unknown" for an entry not decoded.</param>
 /// <param name="TargetMhz">The clock the limit names: the cap, the floor, or the locked point's clock on the curve.</param>
-/// <param name="OffPct">Share of the samples that ran on the wrong side of it: over a cap, under a floor or a pinned point.</param>
+/// <param name="OffPct">Share of the samples that ran on the wrong side of it (over a cap, under a floor or a pinned point),
+/// to 0.1 %, for display: <paramref name="OffSamples"/> decides whether it held.</param>
+/// <param name="OffSamples">How many samples ran on the wrong side of it; held only when none did.</param>
 /// <param name="Words">What that means, for the agent and the log.</param>
 public sealed record ClockLockOutcome(string What, string Kind, double? TargetMhz, double? P10Mhz, double? P50Mhz, double? P90Mhz,
-    double? OffPct, string Words);
+    double? OffPct, int? OffSamples, string Words);
 
 /// <summary>
 /// Whether the client clock limits in force (<see cref="ClientLimitsLayout"/>) were what a run actually ran at. The record is
@@ -34,7 +36,6 @@ public static class ClockLockCheck
     {
         var sorted = clocksMhz.Order().ToList();
         double? Q(double q) => sorted.Count == 0 ? null : Math.Round(sorted[(int)Math.Clamp(Math.Round(q * (sorted.Count - 1)), 0, sorted.Count - 1)], 1);
-        double? Share(Func<double, bool> off) => sorted.Count == 0 ? null : Math.Round(100.0 * sorted.Count(off) / sorted.Count);
         var list = new List<ClockLockOutcome>();
         foreach (var l in held)
         {
@@ -48,25 +49,27 @@ public static class ClockLockCheck
             };
             if (target is not { } t)
             {
-                list.Add(new ClockLockOutcome(what, kind, null, Q(0.1), Q(0.5), Q(0.9), null,
+                list.Add(new ClockLockOutcome(what, kind, null, Q(0.1), Q(0.5), Q(0.9), null, null,
                     kind == "unknown" ? "not decoded: compare the clocks by hand" : "the locked point's clock is unknown (curve unreadable)"));
                 continue;
             }
-            double? off = kind == "max" ? Share(c => c > t + SlackMhz) : Share(c => c < t - SlackMhz);
-            list.Add(new ClockLockOutcome(what, kind, Math.Round(t, 1), Q(0.1), Q(0.5), Q(0.9), off, Words(kind, t, off, Q(0.1), Q(0.9))));
+            int? off = sorted.Count == 0 ? null : kind == "max" ? sorted.Count(c => c > t + SlackMhz) : sorted.Count(c => c < t - SlackMhz);
+            double? pct = off is { } n ? Math.Round(100.0 * n / sorted.Count, 1) : null;
+            list.Add(new ClockLockOutcome(what, kind, Math.Round(t, 1), Q(0.1), Q(0.5), Q(0.9), pct, off, Words(kind, t, off, sorted.Count, pct, Q(0.1), Q(0.9))));
         }
         return list;
     }
 
-    private static string Words(string kind, double target, double? off, double? p10, double? p90)
+    private static string Words(string kind, double target, int? off, int count, double? pct, double? p10, double? p90)
     {
-        if (off is not { } o) return "no samples under load: nothing to compare the lock with";
+        if (off is not { } n) return "no samples under load: nothing to compare the lock with";
         string I(FormattableString s) => s.ToString(CultureInfo.InvariantCulture);
+        string share = I($"{n} of {count} samples ({pct:0.#} %)");
         if (kind == "max")
-            return o == 0 ? I($"held: no sample over {target:0} MHz (p90 {p90:0})")
-                : I($"{o:0} % of the samples ran over the {target:0} MHz cap (p90 {p90:0}): the cap was not what held the clock; read card_settings' clock_locks again");
+            return n == 0 ? I($"held: no sample over {target:0} MHz (p90 {p90:0})")
+                : I($"{share} ran over the {target:0} MHz cap (p90 {p90:0}): the cap was not what held the clock; read card_settings' clock_locks again");
         string side = kind == "min" ? "floor" : "locked point";
-        return o == 0 ? I($"held: no sample under the {side}'s {target:0} MHz (p10 {p10:0})")
-            : I($"{o:0} % of the samples ran under the {side}'s {target:0} MHz (p10 {p10:0}): the driver derated under the lock (power, temperature or voltage; see limit reasons), so the run did not test {target:0} MHz throughout");
+        return n == 0 ? I($"held: no sample under the {side}'s {target:0} MHz (p10 {p10:0})")
+            : I($"{share} ran under the {side}'s {target:0} MHz (p10 {p10:0}): the driver derated under the lock (power, temperature or voltage; see limit reasons), so the run did not test {target:0} MHz throughout");
     }
 }
