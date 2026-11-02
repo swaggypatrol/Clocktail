@@ -937,6 +937,11 @@ public sealed partial class BrokerDispatcher
                 {
                     var exp = Experiment.Load(path);
                     if (exp is not { Trial: { } t }) return Fail("no trial is in force; nothing to mark", BrokerCode.CannotWrite);
+                    // Key: the identity of the trial a run measured (tune_memory's step), checked as "crash" checks it, so a
+                    // trial written after the run let go of the card does not take its result. Without one (mark_stable), the
+                    // trial in force. Until 0.8.3 "stable" took no identity and a sweep's pass could land on the next trial.
+                    if (req.Key is { Length: > 0 } measured && t.Id != measured)
+                        return Fail("the trial in force is not the one the run measured (another trial was written since): nothing marked", BrokerCode.CannotWrite);
                     // Ended already (back_to_daily or a crash the card held off): its ending is its data point, and a stable
                     // mark after it would be a second one (a lab step's, or the agent's).
                     if (t.Ending is { } ended)

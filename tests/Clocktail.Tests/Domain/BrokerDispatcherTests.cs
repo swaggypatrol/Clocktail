@@ -1175,6 +1175,36 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal("+15 MHz", Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1].Change);
     }
 
+    /// <summary>A sweep's pass names the trial it measured too: tune_memory lets go of the card before it marks the step
+    /// stable, and a trial written in between (another agent's) was marked with the step's pass. "stable" checks the
+    /// identity as "crash" does; mark_stable, which names none, marks the trial in force as before.</summary>
+    [Fact]
+    public void A_run_s_pass_goes_only_to_the_trial_it_names()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"lab"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W", power_mw = 450_000u, keep_curve = true }))).Ok);
+        var measured = TrialNow()!;
+        _host.Now += TimeSpan.FromMinutes(1);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "460 W", power_mw = 460_000u, keep_curve = true }))).Ok);
+        var next = TrialNow()!;
+        int points = Outcomes().Count;
+
+        var refused = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "stable", Key: measured.Id, Value: "tune_memory: +1000 MHz pass"));
+        Assert.Equal(BrokerCode.CannotWrite, refused.Code);
+        Assert.Contains("not the one the run measured", refused.Error);
+        Assert.Equal(points, Outcomes().Count);                 // nothing recorded
+        Assert.False(TrialNow()!.Marked);                       // and the trial written since is not marked
+
+        var named = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "stable", Key: next.Id, Value: "tune_memory: +1000 MHz pass"));
+        Assert.True(named.Ok, named.Error);
+        var pass = Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1];
+        Assert.Equal((Experiment.Stable, "460 W"), (pass.Outcome, pass.Change));
+
+        Assert.True(d.Dispatch(Exp("stable", "played an hour")).Ok);   // mark_stable names no trial
+    }
+
     /// <summary>A worker that starts with a trial in force gives its cells back (the service's own recovery, which leaves the
     /// trial in force until the daily profile goes on once the GPU is idle): a stable mark then is refused, the card is not
     /// running it. The start's daily profile ("start") ends that trial, and leaves alone one the agent wrote while it waited.

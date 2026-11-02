@@ -72,10 +72,12 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     }, null, TimeSpan.Zero, TimeSpan.FromMinutes(1));
 
     /// <summary>A request to the service, carrying this job's measurement lease: while the job holds judge.lock its own
-    /// writes go through and nobody else's do.</summary>
-    protected BrokerResponse? Broker(string kind, string? value = null, string op = BrokerRequest.OpExperiment)
+    /// writes go through and nobody else's do.
+    /// <paramref name="key"/>: for a result ("stable", "crash"), the identity of the trial it measured (<see cref="TrialAt(out bool, out string?)"/>),
+    /// which the service checks against the trial in force when it records it: the job may have let go of the card by then.</summary>
+    protected BrokerResponse? Broker(string kind, string? value = null, string op = BrokerRequest.OpExperiment, string? key = null)
     {
-        try { return BrokerClient.TryCall(new BrokerRequest(op, stableId, Kind: kind, Value: value, Lease: RunId)); }
+        try { return BrokerClient.TryCall(new BrokerRequest(op, stableId, Kind: kind, Value: value, Lease: RunId, Key: key)); }
         catch (Exception e) when (e is IOException or InvalidDataException or ObjectDisposedException or TimeoutException) { return null; }
     }
 
@@ -148,13 +150,26 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     protected string? TrialAt() => TrialAt(out _);
 
     /// <summary><see cref="TrialAt()"/>, and whether the service answered at all: null is also what no answer gives.</summary>
-    protected string? TrialAt(out bool answered)
+    protected string? TrialAt(out bool answered) => TrialAt(out answered, out _);
+
+    /// <summary><see cref="TrialAt()"/>, with the trial's identity (<paramref name="id"/>; null for none in force, or one
+    /// from a service before 0.8.2): what the job's results name, so the service records them only against that trial.</summary>
+    protected string? TrialAt(out bool answered, out string? id)
     {
         var r = Broker("show");
         answered = r is { Ok: true };
-        return r is { Ok: true, Result: { } res } && res.TryGetProperty("experiment", out var exp) && exp.ValueKind == JsonValueKind.Object
-            && exp.TryGetProperty("Trial", out var t) && t.ValueKind == JsonValueKind.Object && t.TryGetProperty("At", out var at)
-            ? at.ToString() + (t.TryGetProperty("Ending", out var end) && end.ValueKind == JsonValueKind.String ? $" ({end.GetString()})" : "") : null;
+        (string? at, id) = TrialOf(r);
+        return at;
+    }
+
+    /// <summary>The trial in force in a "show" answer: <see cref="TrialAt()"/>'s stamp, and its identity.</summary>
+    public static (string? At, string? Id) TrialOf(BrokerResponse? r)
+    {
+        if (r is not { Ok: true, Result: { } res } || !res.TryGetProperty("experiment", out var exp) || exp.ValueKind != JsonValueKind.Object
+            || !exp.TryGetProperty("Trial", out var t) || t.ValueKind != JsonValueKind.Object || !t.TryGetProperty("At", out var at))
+            return (null, null);
+        string stamp = at.ToString() + (t.TryGetProperty("Ending", out var end) && end.ValueKind == JsonValueKind.String ? $" ({end.GetString()})" : "");
+        return (stamp, t.TryGetProperty("Id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null);
     }
 
     /// <summary>What <see cref="TrialAt()"/> adds when the service has the trial's crash on record while its give-back waits

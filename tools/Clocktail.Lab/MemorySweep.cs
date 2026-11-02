@@ -175,6 +175,10 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     /// edge's side: when it ended the sweep (its last step, not for the trend), that a lab_test memory at the best offset as
     /// slow as the stopping step's means heat; for the trend, which runs on past a slowdown, where it began. Empty when no
     /// slowdown came first, or when a slowdown did not end a sweep that is not for the trend.</summary>
+    /// <summary>Why the service did not record a step's result, or null when it did (or did not answer: a lost answer says
+    /// nothing either way, as before). A refusal is the service's word that the trial in force is not the step's.</summary>
+    public static string? Refused(BrokerResponse? r) => r is { Ok: false } ? r.Error ?? r.Code ?? "refused" : null;
+
     public static string SlowdownWords(IReadOnlyList<SweepStep> steps, bool trend, int best)
     {
         for (int i = 0; i < steps.Count; i++)
@@ -233,7 +237,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 bool trial = offset != spec.DailyMhz || _steps.Count > 0;
                 LabResult r;
                 DateTime started;
-                string? stamp;
+                string? stamp, trialId;
                 // The step's write and its measurement under this job's measurement lease: no other write lands between
                 // them, and the trial on the card must still be the one written when the run ends.
                 using (var lease = Hold(log))
@@ -250,7 +254,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                                 : $"the service did not write {offset:+0;-0;0} MHz: {w.Error}", offset);
                         Thread.Sleep(3000);
                     }
-                    stamp = TrialAt();
+                    stamp = TrialAt(out _, out trialId);
                     // A step that writes nothing measures the daily profile: no trial may be in force then (one another
                     // agent wrote during the warm-up would be measured as this offset).
                     if (!trial && stamp != null)
@@ -278,8 +282,11 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 {
                     // A driver reset is the service's to record, and the daily offset goes back once it has; a bad bit with the
                     // GPU alive is recorded here.
-                    if (trial && step.DriverResets is not > 0) Broker("crash", $"tune_memory {offset:+0;-0;0} MHz: {step.Detail}");
-                    else if (trial) CrashRecorded(stamp);
+                    // The job has let go of the card by now: the crash names the trial it measured, and the service records it
+                    // only against that one (until 0.8.3 it went to whatever trial was in force, one written since too).
+                    if (trial && step.DriverResets is not > 0 && Refused(Broker("crash", $"tune_memory {offset:+0;-0;0} MHz: {step.Detail}", key: trialId)) is { } nc)
+                        return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz failed: {step.Detail} (not recorded against a trial: {nc})", offset);
+                    if (trial && step.DriverResets is > 0) CrashRecorded(stamp);
                     return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz failed: {step.Detail}", offset);
                 }
                 // Too hot, telemetry lost, the runner failing, a shared GPU, an offset not in force: the step says nothing
@@ -288,7 +295,10 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                     return Finish(SweepStatus.Failed, step.Verdict != LabResult.Pass
                         ? $"{offset:+0;-0;0} MHz could not be judged ({step.Detail}): nothing said about the memory"
                         : $"{offset:+0;-0;0} MHz: {signal}", offset);
-                if (trial) Broker("stable", $"tune_memory: {line}");
+                // The same for a pass: a trial someone wrote since is not marked stable with it, and the sweep stops rather
+                // than write its next step over that trial.
+                if (trial && Refused(Broker("stable", $"tune_memory: {line}", key: trialId)) is { } ns)
+                    return Finish(SweepStatus.Failed, $"{offset:+0;-0;0} MHz passed, but it was not marked stable: {ns}", offset);
                 if (end == StepEnd.StableThenStop) return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz: {signal}", offset);
             }
             return Finish(SweepStatus.Done, _steps.Any(s => s.Signal != null)

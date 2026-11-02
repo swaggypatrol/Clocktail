@@ -297,7 +297,10 @@ public class JudgeLockTests : IDisposable
         });
     }
 
-    /// <summary>The earlier run waits for the later one to give its lock back, and keeps the lease once it has.</summary>
+    /// <summary>The earlier run waits for the later one to give its lock back, and keeps the lease once it has. The later
+    /// run lets go at a set point (the host's liveness question after Settle has read the later lock), not after a delay,
+    /// so the order is fixed: Settle sees the later lock, waits, and finds it gone on its next look. With a background
+    /// thread and a timer the test failed now and then on a loaded runner.</summary>
     [Fact]
     public void The_earlier_run_keeps_the_lease_once_the_later_gives_its_lock_back()
     {
@@ -306,20 +309,16 @@ public class JudgeLockTests : IDisposable
             var mine = new JudgeLock.Info(100, "run-a", "burn", T0);
             Write(real, mine);
             Write(cached, new JudgeLock.Info(100, "run-b", "lab_test", T0.AddSeconds(1)));
-            // The delete is tried again while the file is open for a read (Settle's look, a scanner): one refused delete
-            // left the later run's lock in place and the test failed now and then.
-            var later = Task.Run(async () =>
+            int looks = 0;
+            var host = new HookedHost(() => { }, onEvery: () =>
             {
-                await Task.Delay(100);
-                for (int i = 0; ; i++)
-                {
-                    try { File.Delete(cached); return; }
-                    catch (IOException) when (i < 50) { await Task.Delay(20); }
-                }
+                // Settle reads ours, then the later run's: once it has read that, the later run gives its lock back.
+                if (++looks == 2) JudgeLock.Release(cached, "run-b");
             });
-            Assert.True(JudgeLock.Settle(real, mine, _host, local, out var by, TimeSpan.FromSeconds(5)));
-            later.Wait();
+            Assert.True(JudgeLock.Settle(real, mine, host, local, out var by, TimeSpan.FromSeconds(30)), by);
             Assert.Null(by);
+            Assert.True(looks > 2);                // it looked again after the later lock was gone
+            Assert.False(File.Exists(cached));
             Assert.True(File.Exists(real));
         });
     }
@@ -341,8 +340,8 @@ public class JudgeLockTests : IDisposable
     }
 
     /// <summary>A host whose first liveness question runs <paramref name="first"/>: the moment between a taker's first look
-    /// and its create.</summary>
-    private sealed class HookedHost(Action first) : IHost
+    /// and its create; and every one runs <paramref name="onEvery"/>.</summary>
+    private sealed class HookedHost(Action first, Action? onEvery = null) : IHost
     {
         private readonly FakeHost _inner = new();
         private Action? _first = first;
@@ -352,6 +351,7 @@ public class JudgeLockTests : IDisposable
         public bool IsProcessAlive(int pid, DateTimeOffset? startedBy = null)
         {
             Interlocked.Exchange(ref _first, null)?.Invoke();
+            onEvery?.Invoke();
             return _inner.IsProcessAlive(pid, startedBy);
         }
     }

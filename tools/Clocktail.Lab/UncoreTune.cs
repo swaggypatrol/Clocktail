@@ -381,7 +381,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         _stage = stage;
         Save(SweepStatus.Running, null, $"{stage}: {b} against {a}");
         var runs = new List<UncoreRun>();
-        string? stamp = null;
+        string? stamp = null, candidateId = null;
         UncoreRun Run(UncoreSetting s)
         {
             var started = DateTime.UtcNow;
@@ -423,7 +423,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
             if (Moved() is { } m1) return m1;
             if (a1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the incumbent's own run did not pass: " + (a1.Detail ?? a1.Verdict));
             if (Write(b) is { } wb) return Done(Comparison.Failed, $"the service refused the candidate: {wb}");
-            stamp = TrialAt();
+            stamp = TrialAt(out _, out candidateId);
             var b1 = Run(b);
             if (b1.DriverResets > 0) return Reset(b1, candidate: true);
             if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
@@ -467,7 +467,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         // A bad bit with the GPU alive: recorded here, against the candidate.
         Comparison Crash(UncoreRun r)
         {
-            Broker("crash", $"tune_uncore {b}: {r.Detail}");
+            Broker("crash", $"tune_uncore {b}: {r.Detail}", key: candidateId);   // the candidate's trial, and no other
             Thread.Sleep(5000);
             return Done(Comparison.Failed, r.Detail ?? "the candidate's run failed");
         }
