@@ -11,7 +11,7 @@ English | [简体中文](README.zh-CN.md)
 So you want to overclock a card that's already this fast. We get it. We won't ask.
 
 - **The agent does the tuning.** The V/F curve, core and memory offsets, XBAR and the other clock domains, the voltage boost, clock locks, power and current limits, the fans. Every control, no "expert mode", no caps of Clocktail's on top of the card's own.
-- **Or draw the curve yourself.** Ask for the V/F curve editor and a window opens with your curve, every crash pinned to the point it happened at, how high each point has proven stable, and where the card actually runs. Drag, then save.
+- **Or draw the curve yourself.** Ask for the V/F curve editor and a window opens with your curve, every crash pinned to the point it happened at, past stability tests and the clocks the card actually sampled. Drag, then save.
 - **Something other than the agent decides if it's stable.** NVIDIA's stress tester, Clocktail's own lab, and your games, with the frame times to prove it.
 - **Nothing sticks unless you say so.** No preset, no default profile. A fresh install writes nothing to your card until you say so.
 

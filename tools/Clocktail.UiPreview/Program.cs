@@ -70,8 +70,12 @@ internal static class Program
                 float y = (float)typeof(CurveEditorForm).GetMethod("Y", Private)!.Invoke(form, [mhz])!;
                 Call(form, "OnMouseDown", new MouseEventArgs(MouseButtons.Left, 1, (int)x, (int)y, 0));
                 Call(form, "OnMouseMove", new MouseEventArgs(MouseButtons.Left, 0, (int)x, (int)y - 20, 0));
-                Call(form, "CancelGesture");
+                Call(form, "ProcessCmdKey", Message.Create(form.Handle, 0x100, IntPtr.Zero, IntPtr.Zero), Keys.Escape);
                 Check(Field<int[]>(form, "_off").SequenceEqual(smooth), "Esc / capture cancellation must restore the pre-drag draft.");
+                Call(form, "ProcessCmdKey", Message.Create(form.Handle, 0x100, IntPtr.Zero, IntPtr.Zero), Keys.Up);
+                Check(!Field<int[]>(form, "_off").SequenceEqual(smooth), "The selected canvas point must accept arrow-key edits after a click.");
+                Call(form, "ProcessCmdKey", Message.Create(form.Handle, 0x100, IntPtr.Zero, IntPtr.Zero), Keys.Control | Keys.Z);
+                Check(Field<int[]>(form, "_off").SequenceEqual(smooth), "Keyboard undo must restore an arrow-key edit.");
                 var history = Control<CheckBox>(form, "ShowHistory");
                 history.Checked = false;
                 Check(Field<Bitmap?>(form, "_layer") == null, "Hiding residency must invalidate its cached drawing.");
@@ -86,7 +90,7 @@ internal static class Program
                 decimal typed = input.Value + 15;
                 int expectedOffset = CurveModel.Snap((double)typed * 1000);
                 input.Focus(); input.Text = typed.ToString(System.Globalization.CultureInfo.CurrentCulture);
-                Control<Button>(form, "SaveAsDaily").PerformClick();
+                Call(form, "ProcessCmdKey", Message.Create(form.Handle, 0x100, IntPtr.Zero, IntPtr.Zero), Keys.Control | Keys.S);
                 PumpUntil(() => !Field<bool>(form, "_busy"));
                 Check(saved != null && saved.Offsets.SequenceEqual(Field<int[]>(form, "_off")), "Save must copy the committed draft.");
                 Check(saved!.Offsets[66] == expectedOffset, "Save must include the numeric text that was still being edited.");

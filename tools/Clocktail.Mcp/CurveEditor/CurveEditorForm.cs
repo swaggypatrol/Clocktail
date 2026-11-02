@@ -1049,8 +1049,9 @@ public sealed partial class CurveEditorForm : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _controlTips.Dispose(); _historyMenu?.Dispose(); _body?.Dispose(); _small?.Dispose(); _title?.Dispose(); _bold?.Dispose(); _layer?.Dispose(); }
+        if (disposing) { _controlTips.Dispose(); _historyMenu?.Dispose(); }
         base.Dispose(disposing);
+        if (disposing) { _body?.Dispose(); _small?.Dispose(); _title?.Dispose(); _bold?.Dispose(); _layer?.Dispose(); }
     }
 
     // ---- the window's own thread ----

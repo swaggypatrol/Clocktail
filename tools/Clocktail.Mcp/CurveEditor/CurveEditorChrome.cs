@@ -146,8 +146,8 @@ public sealed partial class CurveEditorForm
         {
             Place(box, x, 136, size, 28); x += size + 8;
         }
-        Place(_previousButton, 186, height - 132, 28, 28);
-        Place(_nextButton, 220, height - 132, 28, 28);
+        Place(_previousButton, 186, height - 117, 28, 28);
+        Place(_nextButton, 220, height - 117, 28, 28);
         Place(_offsetInput, width - 198, height - 117, 150, 30);
         Place(_saveButton, width - 212, height - 58, 188, 36);
         Place(_closeButton, width - 310, height - 58, 86, 36);
@@ -209,6 +209,11 @@ public sealed partial class CurveEditorForm
         using (var path = Round(new(24 * s, top, w - 48 * s, 80 * s), 8 * s))
         using (var brush = new SolidBrush(PanelC))
         using (var pen = new Pen(PanelBorder, s)) { g.FillPath(brush, path); g.DrawPath(pen, path); }
+        using (var divider = new Pen(PanelBorder, s))
+        {
+            g.DrawLine(divider, 262 * s, top + 16 * s, 262 * s, top + 64 * s);
+            g.DrawLine(divider, w - 222 * s, top + 16 * s, w - 222 * s, top + 64 * s);
+        }
         if (_sel is not { } i) return;
         string mode = i >= _d.Writable ? "Read only" : InBand(i) ? "Transition · automatic" : i < _top ? "Below band · preserved" : "Editable point";
         TextLine(g, $"POINT {i} · {mode}", _small, AxisText, new(40 * s, top + 10 * s, 210 * s, 20 * s));
