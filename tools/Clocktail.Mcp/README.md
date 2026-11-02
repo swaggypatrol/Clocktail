@@ -2,7 +2,7 @@
 
 MCP tools for the NVIDIA RTX 50 series, across models and board vendors. Each change is a **trial**; only settings the user explicitly approves become their own daily profile. Clocktail ships no tuning preset or default daily profile, and a fresh install writes no tuning settings.
 
-`npx -y clocktail setup` installs it and connects your agents. By hand: it is a stdio MCP server, so point any MCP client at `clocktail-mcp.exe` (`%LocalAppData%\Programs\Clocktail` after setup, or `tools\Clocktail.Mcp\bin\Release\net10.0` after `dotnet build -c Release tools/Clocktail.Mcp`). The service must be installed: it does every write, and `install_service` installs it.
+`npx -y clocktail setup` installs it and connects your agents. By hand: it is a stdio MCP server, so point any MCP client at `clocktail-mcp.exe` (`%LocalAppData%\Programs\Clocktail` after setup, or `tools\Clocktail.Mcp\bin\Release\net10.0-windows` after `dotnet build -c Release tools/Clocktail.Mcp`). The service must be installed: it does every write, and `install_service` installs it.
 
 `--lite` (or `CLOCKTAIL_TOOLS=lite`) lists 22 tools and short instructions (Manual/instructions-lite.md) instead of the full catalogue and instructions, for small local models; a tool left out still answers when called by name. `CLOCKTAIL_CONFIRM` sets how the tools that need the person's yes (`begin_session`, `stock`, `load_daily`, `keep_as_daily`, `load_preset`, `set_daily_power_limit`, `set_power_cap`, `delete_profile`) ask the person themselves: `chat` (the default: the first call changes nothing and answers with the question and a one-time code, and the agent calls again with `confirm` set to the code after the person's yes in chat), `form` (an MCP elicitation where the client offers it, else a Windows dialog; `auto` still means this), or `dialog` (always the Windows dialog). The legacy `off` asks in chat too: nothing bypasses the question.
 
@@ -34,6 +34,7 @@ Only explicit user consent and NVIDIA driver/firmware acceptance authorize tunin
 | `adjust_curve` | Raise or lower the V/F points in a voltage band around the working point (one trial). |
 | `flatten_curve` | The curve flat from a voltage up; only lowers (one trial). |
 | `set_curve` | The whole V/F curve at once, every point's offset (one trial). |
+| `curve_editor` | Open the V/F curve window on the person's desktop (dark, crisp at any DPI): drag points by hand; crashes marked on the points they happened at (solid: in a curve trial), the highest setting each point was marked stable at, and where the card actually ran as a heat of dots. The low-voltage cliff is reshaped as a smooth transition band between two draggable lines that lifts nothing under its foot; above it the clock never falls (the driver's own rule) and one button smooths. The person's click on its save button writes the curve as a trial, checks the readback, keeps it as the daily profile and closes the window. Windows build only. |
 | `shift_curve` | The curve on the card moved left by N mV: the same clocks at less voltage (one trial). |
 | `set_core_offset` | The core P0 offset, every point at once; the curve is written back right after (one trial). |
 | `set_clock_lock` | A core clock cap, floor, V/F point lock or Boost Lock (the record `nvidia-smi -lgc` sets; one trial). |

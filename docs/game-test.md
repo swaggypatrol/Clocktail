@@ -35,7 +35,8 @@ lab is not enough. `npx clocktail setup` installs the *published* release, so us
 
 1. Build the bundle (the four exes land in `out\game-test`):
    `dotnet publish <project> -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -p:Version=0.6.0 -o out\game-test`
-   for `src\Clocktail.Broker`, `tools\Clocktail.Mcp`, `tools\Clocktail.Lab` and `src\Clocktail.Cli`.
+   for `src\Clocktail.Broker`, `tools\Clocktail.Mcp`, `tools\Clocktail.Lab` and `src\Clocktail.Cli`; for `tools\Clocktail.Mcp` add
+   `-f net10.0-windows` (it is built twice: `net10.0` for the tests, `net10.0-windows` with the `curve_editor` window).
 2. Stop any lab job and close Quake II RTX. Agents may stay open (their old server is moved aside and keeps running).
 3. `powershell -ExecutionPolicy Bypass -File build\install-local.ps1 -Plan` shows what would change and changes nothing.
 4. `powershell -ExecutionPolicy Bypass -File build\install-local.ps1` backs up what it replaces to

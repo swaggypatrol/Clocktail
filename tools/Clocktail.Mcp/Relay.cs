@@ -45,10 +45,11 @@ public sealed class RelayCore(
     /// puts the daily profile back as it ends), install_service (the service starts again and puts the daily profile on).
     /// A tool added later counts as one of those until it is listed here: the safe side. Until 0.3.4 the relay listed the
     /// writers instead, and the ones added after the list (shift_curve among them, which moves the curve on the card from
-    /// where it is) were answered as if they had written nothing.</summary>
+    /// where it is) were answered as if they had written nothing. curve_editor's call only opens the window (it reads the
+    /// card and the records); what the person saves there later is written by the window's own thread, not by the call.</summary>
     public static readonly IReadOnlySet<string> RecordOnly = new HashSet<string>
     {
-        "mark_stable", "log_note", "save_profile", "delete_profile", "live_start", "live_stop", "watch",
+        "mark_stable", "log_note", "save_profile", "delete_profile", "live_start", "live_stop", "watch", "curve_editor",
     };
 
     /// <summary>The tools that say they only read (their McpServerTool's ReadOnly), read from the tools themselves: one of

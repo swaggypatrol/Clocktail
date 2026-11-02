@@ -1,6 +1,6 @@
 {
   "name": "clocktail",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Agent-assisted overclocking for NVIDIA RTX 50 (Blackwell), served over MCP. `npx -y clocktail setup` installs it and connects your agent.",
   "license": "MIT",
   "author": "swaggypatrol",

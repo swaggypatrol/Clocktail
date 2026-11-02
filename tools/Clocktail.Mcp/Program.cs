@@ -32,5 +32,9 @@ if (lite)
         return list;
     }));
 _ = Task.Run(UpdateCheck.Latest);   // ask npm once at start, so the first card_report need not wait
-await builder.Build().RunAsync();
+var host = builder.Build();
+// A save from the curve editor window still in flight (its curve on the card, the keep not done) gets up to 30 s to finish
+// before the worker stops under the window (the agent disconnected, the relay ended it).
+host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.Register(() => Clocktail.Mcp.CurveEditor.EditorState.WaitForSave(TimeSpan.FromSeconds(30)));
+await host.RunAsync();
 return 0;

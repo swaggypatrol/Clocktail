@@ -32,13 +32,14 @@ By default `stress_test` and `lab_test` stop only when the card comes within 2 Â
 |---|---|
 | Read the current GPU | `card_report`, `card_settings`, `gpu_status`, `limiter`, `curve_around`, `diagnostic_report` |
 | Sessions and records | `begin_session`, `end_session`, `data_points`, `read_log`, `log_note`, `mark_stable`, `mark_crash` |
-| Core curve and clocks | `adjust_curve`, `flatten_curve`, `set_curve`, `shift_curve`, `set_core_offset`, `set_clock_lock` |
+| Core curve and clocks | `adjust_curve`, `flatten_curve`, `set_curve`, `shift_curve`, `set_core_offset`, `set_clock_lock`, `curve_editor` |
 | Memory and clock domains | `set_memory_offset`, `adjust_xbar`, `adjust_clock_domain`, `set_clock_ratio`, `set_voltage_boost` |
 | Power and cooling | `set_power_limit`, `set_daily_power_limit`, `set_power_cap`, `set_current_limit`, `set_fan_curve`, `set_fan_start`, `set_fan_speed` |
 | Measurements | `stress_test`, `lab_test`, `watch`, `live_start`, `live_read`, `live_stop`, `tune_memory`, `tune_uncore`, `game_test`, `lab_status`, `lab_stop` |
 | User-owned profiles | `preview_daily`, `keep_as_daily`, `back_to_daily`, `stock`, `load_daily`, `list_presets`, `save_profile`, `load_preset`, `delete_profile` |
 | Setup and help | `install_service`, `manual` |
 
+When the person asks for the curve editor (the V/F window, "open the curve"), call `curve_editor`: it opens a window on their desktop and returns at once; they drag the curve there (the window smooths the low-voltage cliff itself and shows crashes and evidence on the points), and their click on its save button is their own approval to keep it as daily, so do not ask again in chat. Call it again to read how it ended.
 For "how is my card" call `card_report`, show its table and curve as returned, then explain the readings. Marks are advisory, not hardware-safety or stability guarantees.
 Read `manual start`, `manual method` and `manual controls` before tuning; other topics explain status, tests and user-owned profiles.
 If the service does not answer, explain it before `install_service`. Never claim a missing reading, interrupted measurement or failed readback is success.

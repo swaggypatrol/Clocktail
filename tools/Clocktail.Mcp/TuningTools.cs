@@ -925,48 +925,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         if (all.Count == 0) return Array.Empty<object>();
         var look = card.Read();
         var daily = DailyOffsets(out _);
-        var ticks = residency.Between(all.Min(d => d.At - TimeSpan.FromMinutes(d.Minutes)), DateTimeOffset.Now);
-        var records = new SortedDictionary<int, PointRecord>();
-        foreach (var d in all)
-        {
-            var start = d.At - TimeSpan.FromMinutes(d.Minutes);
-            var during = ticks.Where(t => t.At >= start && t.At <= d.At).ToList();
-            if (during.Count < 10) continue;   // before the sampler, or too short to say anything
-            int[] offsets;
-            try { offsets = VfOffsets.Decode(d.Curve); } catch (FormatException) { continue; }
-            // A crash belongs to where the card was when it fell over, not to the whole trial.
-            if (d.Outcome == Experiment.Crash)
-            {
-                foreach (var (index, clock) in CrashAt(during, d.CrashUv, look.Curve))
-                {
-                    int off = offsets.ElementAtOrDefault(index);
-                    if (!records.TryGetValue(index, out var rec)) records[index] = rec = new PointRecord();
-                    rec.Crashes++;
-                    if (rec.CrashKhz is not { } kc || off < kc) rec.CrashKhz = off;
-                    if (clock is { } c && (rec.CrashMhz is not { } cm || c < cm)) rec.CrashMhz = c;
-                }
-                continue;
-            }
-            foreach (var s in Stays(during, look.Curve).Where(s => s.Share >= 0.1))
-            {
-                int off = offsets.ElementAtOrDefault(s.Index);
-                if (!records.TryGetValue(s.Index, out var rec)) records[s.Index] = rec = new PointRecord();
-                switch (d.Outcome)
-                {
-                    case Experiment.Stable:
-                        if (rec.StableMhz is not { } sm || s.ClockMhz > sm) rec.StableMhz = s.ClockMhz;
-                        if (rec.StableKhz is not { } k || off >= k)
-                        {
-                            rec.StableSeconds = rec.StableKhz == off ? rec.StableSeconds + s.Samples : s.Samples;
-                            rec.StableKhz = off;
-                        }
-                        break;
-                    case Experiment.Survived when rec.SurvivedKhz is not { } ks || off > ks:
-                        rec.SurvivedKhz = off;
-                        break;
-                }
-            }
-        }
+        var records = PointRecords(all, look.Curve);
         return records.Select(kv =>
         {
             var p = look.Curve.Points.FirstOrDefault(p => p.Index == kv.Key);
@@ -987,6 +946,56 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
                 crashes = v.Crashes,
             };
         }).ToList();
+    }
+
+    /// <summary>Every curve point's record across the data points the residency samples cover: the highest offset a stable
+    /// or survived trial ran it at, the lowest a crash found it at (the curve editor draws these beside its points).</summary>
+    private SortedDictionary<int, PointRecord> PointRecords(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve)
+    {
+        var records = new SortedDictionary<int, PointRecord>();
+        if (all.Count == 0) return records;
+        var ticks = residency.Between(all.Min(d => d.At - TimeSpan.FromMinutes(d.Minutes)), DateTimeOffset.Now);
+        foreach (var d in all)
+        {
+            var start = d.At - TimeSpan.FromMinutes(d.Minutes);
+            var during = ticks.Where(t => t.At >= start && t.At <= d.At).ToList();
+            if (during.Count < 10) continue;   // before the sampler, or too short to say anything
+            int[] offsets;
+            try { offsets = VfOffsets.Decode(d.Curve); } catch (FormatException) { continue; }
+            // A crash belongs to where the card was when it fell over, not to the whole trial.
+            if (d.Outcome == Experiment.Crash)
+            {
+                foreach (var (index, clock) in CrashAt(during, d.CrashUv, curve))
+                {
+                    int off = offsets.ElementAtOrDefault(index);
+                    if (!records.TryGetValue(index, out var rec)) records[index] = rec = new PointRecord();
+                    rec.Crashes++;
+                    if (rec.CrashKhz is not { } kc || off < kc) rec.CrashKhz = off;
+                    if (clock is { } c && (rec.CrashMhz is not { } cm || c < cm)) rec.CrashMhz = c;
+                }
+                continue;
+            }
+            foreach (var s in Stays(during, curve).Where(s => s.Share >= 0.1))
+            {
+                int off = offsets.ElementAtOrDefault(s.Index);
+                if (!records.TryGetValue(s.Index, out var rec)) records[s.Index] = rec = new PointRecord();
+                switch (d.Outcome)
+                {
+                    case Experiment.Stable:
+                        if (rec.StableMhz is not { } sm || s.ClockMhz > sm) rec.StableMhz = s.ClockMhz;
+                        if (rec.StableKhz is not { } k || off >= k)
+                        {
+                            rec.StableSeconds = rec.StableKhz == off ? rec.StableSeconds + s.Samples : s.Samples;
+                            rec.StableKhz = off;
+                        }
+                        break;
+                    case Experiment.Survived when rec.SurvivedKhz is not { } ks || off > ks:
+                        rec.SurvivedKhz = off;
+                        break;
+                }
+            }
+        }
+        return records;
     }
 
     /// <summary>
