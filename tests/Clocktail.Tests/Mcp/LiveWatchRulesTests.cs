@@ -101,9 +101,10 @@ public class LiveWatchRulesTests
     public void A_released_lock_keeps_its_result()
     {
         var spans = LiveWatch.Track([], [Cap], null, null, T0);
-        spans = LiveWatch.Track(spans, [], null, null, T0.AddMinutes(5));
+        spans = LiveWatch.Track(spans, [Cap], null, null, T0.AddMinutes(5));
+        spans = LiveWatch.Track(spans, [], null, null, T0.AddMinutes(5).AddSeconds(10));
         var released = Assert.Single(spans);
-        Assert.Equal(T0.AddMinutes(5), released.To);
+        Assert.Equal(T0.AddMinutes(5), released.To);   // the last read that saw it, not the one that found it gone
 
         var loaded = Enumerable.Range(0, 10).Select(i => P(i, i < 3 ? 2500u : 2390u, 400, span: 1))
             .Concat(Enumerable.Range(0, 10).Select(i => P(400 + i, 2900, 450))).ToList();
@@ -120,7 +121,8 @@ public class LiveWatchRulesTests
     public void A_changed_lock_keeps_both()
     {
         var spans = LiveWatch.Track([], [Cap], null, null, T0);
-        spans = LiveWatch.Track(spans, [Floor], null, null, T0.AddMinutes(5));
+        spans = LiveWatch.Track(spans, [Cap], null, null, T0.AddMinutes(5));
+        spans = LiveWatch.Track(spans, [Floor], null, null, T0.AddMinutes(5).AddSeconds(10));
         Assert.Equal(2, spans.Count);
         Assert.Equal(T0.AddMinutes(5), spans[0].To);
         Assert.Null(spans[1].To);
@@ -133,6 +135,69 @@ public class LiveWatchRulesTests
         string words = LiveWatch.SpanWords(met);
         Assert.Contains("; clock lock 20:00-20:05: maximum clock 2400 MHz: held", words);
         Assert.Contains("; clock lock 20:05-now: ", words);
+    }
+
+    [Fact]
+    public void Samples_after_the_last_read_that_saw_a_released_lock_do_not_count_against_it()
+    {
+        // A 2400 MHz cap seen at 20:00:00 and 20:05:00, released at 20:05:01, found gone at 20:05:10: the samples in
+        // between were tagged with its period but ran at 2900 MHz without it.
+        var spans = LiveWatch.Track([], [Cap], null, null, T0);
+        spans = LiveWatch.Track(spans, [Cap], null, null, T0.AddMinutes(5));
+        spans = LiveWatch.Track(spans, [], null, null, T0.AddMinutes(5).AddSeconds(10));
+        var loaded = Enumerable.Range(0, 10).Select(i => P(290 + i, 2390, 400, span: 1))
+            .Concat(Enumerable.Range(0, 18).Select(i => P(301 + i * 0.5, 2900, 450, span: 1))).ToList();
+        var o = Assert.Single(LiveWatch.LocksBySpan(spans, loaded)!);
+        Assert.Equal(10, o.Samples);
+        Assert.Equal(0, Assert.Single(o.Outcomes).OffSamples);
+        Assert.Contains("held", LiveWatch.SpanWords([o]));
+        Assert.Equal(T0.AddMinutes(5), o.To);
+    }
+
+    [Fact]
+    public void A_changed_lock_closes_at_the_last_read_that_saw_it()
+    {
+        var spans = LiveWatch.Track([], [Cap], null, null, T0);
+        spans = LiveWatch.Track(spans, [Cap], null, null, T0.AddSeconds(10));
+        spans = LiveWatch.Track(spans, [Floor], null, null, T0.AddSeconds(20));
+        Assert.Equal(T0.AddSeconds(10), spans[0].To);
+        Assert.Equal(T0.AddSeconds(20), spans[1].From);
+        var met = LiveWatch.LocksBySpan(spans, [P(5, 2390, 400, span: 1), P(15, 2700, 400, span: 1), P(25, 2700, 400, span: 2)])!;
+        Assert.Equal(1, met[0].Samples);   // the one at 15 s may have run under the floor already
+        Assert.Equal(0, met[0].Outcomes[0].OffSamples);
+        Assert.Equal(1, met[1].Samples);
+    }
+
+    [Fact]
+    public void An_unreadable_read_does_not_count_as_seeing_the_lock()
+    {
+        var spans = LiveWatch.Track([], [Cap], null, null, T0);
+        spans = LiveWatch.Track(spans, null, null, null, T0.AddSeconds(10));
+        spans = LiveWatch.Track(spans, [], null, null, T0.AddSeconds(20));
+        Assert.Equal(T0, Assert.Single(spans).To);
+    }
+
+    [Fact]
+    public void A_curve_change_under_a_point_lock_closes_at_the_last_read_with_the_old_curve()
+    {
+        var spans = LiveWatch.Track([], [Pin], Curve(2_800_000, 0), null, T0);
+        spans = LiveWatch.Track(spans, [Pin], Curve(2_800_000, 0), null, T0.AddSeconds(10));
+        spans = LiveWatch.Track(spans, [Pin], Curve(2_900_000, 100_000), null, T0.AddSeconds(20));
+        Assert.Equal(T0.AddSeconds(10), spans[0].To);
+        var met = LiveWatch.LocksBySpan(spans, [P(5, 2800, 400, span: 1), P(15, 2900, 400, span: 1), P(25, 2900, 400, span: 2)])!;
+        Assert.Equal(1, met[0].Samples);   // 2900 MHz at 15 s ran on the new curve: not a miss of the old point
+        Assert.Equal(0, met[0].Outcomes[0].OffSamples);
+    }
+
+    [Fact]
+    public void The_end_of_the_watch_closes_at_the_last_read_that_saw_the_lock()
+    {
+        var spans = LiveWatch.Track([], [Cap], null, null, T0);
+        spans = LiveWatch.Track(spans, [Cap], null, null, T0.AddSeconds(10));
+        Assert.Equal(T0.AddSeconds(15), Assert.Single(LiveWatch.End(spans, [Cap], T0.AddSeconds(15))).To);   // still in force
+        Assert.Equal(T0.AddSeconds(10), Assert.Single(LiveWatch.End(spans, [], T0.AddSeconds(15))).To);      // released since
+        Assert.Equal(T0.AddSeconds(10), Assert.Single(LiveWatch.End(spans, null, T0.AddSeconds(15))).To);    // unreadable
+        Assert.Empty(LiveWatch.End([], [Cap], T0));
     }
 
     [Fact]

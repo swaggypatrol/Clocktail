@@ -57,10 +57,12 @@ public sealed class LiveWatch(Card card) : IDisposable
     }
 
     /// <summary>One stretch of the watch under one clock lock: its locks in words (<see cref="Key"/>), and the curve and
-    /// NVVDD MAX last read while it was in force (a point lock's or Boost Lock's target is a point on that curve). To is
-    /// null while it is in force.</summary>
+    /// NVVDD MAX last read while it was in force (a point lock's or Boost Lock's target is a point on that curve). LastSeen:
+    /// the last read of the record that still found this lock (and, for a point lock, the same curve). To is null while it
+    /// is in force; once it is not, To is LastSeen: what ran between that read and the one that found it gone is not known
+    /// to have run under it.</summary>
     public sealed record LockSpan(int Id, string Key, IReadOnlyList<ClientLimit> Locks, VfCurveSnapshot? Curve, uint? MaxUv,
-        DateTimeOffset From, DateTimeOffset? To = null);
+        DateTimeOffset From, DateTimeOffset LastSeen, DateTimeOffset? To = null);
 
     /// <summary>A lock period's samples under load (<see cref="Point.LockSpan"/>) against its locks.</summary>
     public sealed record LockSpanOutcome(string Locks, DateTimeOffset From, DateTimeOffset? To, int Samples, IReadOnlyList<ClockLockOutcome> Outcomes);
@@ -404,7 +406,13 @@ public sealed class LiveWatch(Card card) : IDisposable
     private void Finish(Run run)
     {
         run.EndReason ??= "live_stop";
-        lock (run) if (OpenSpan(run.Spans) is { } open) run.Spans = [.. run.Spans.SkipLast(1), open with { To = DateTimeOffset.Now }];
+        // One last read of the lock record: a lock released since the last window's read does not own the samples after it.
+        IReadOnlyList<ClientLimit>? locks = null;
+        bool open;
+        lock (run) open = OpenSpan(run.Spans) != null;
+        if (open)
+            try { locks = card.ClockLocks(); } catch (Exception) { }
+        lock (run) run.Spans = End(run.Spans, locks, DateTimeOffset.Now);
         string summary = SummaryLine(run);   // before the capture is stopped: one that ended by itself says so, this one does not
         run.Frames?.Stop();
         Emit(run, $"⏹️ live watch ended ({run.EndReason}). {summary}");
@@ -464,11 +472,12 @@ public sealed class LiveWatch(Card card) : IDisposable
     public static string? Key(IReadOnlyList<ClientLimit> locks) => locks.Count > 0 ? string.Join(", ", locks.Select(l => l.Describe())) : null;
 
     /// <summary>
-    /// The lock periods after one read of the clock-lock record (<paramref name="locks"/>; null when it was unreadable, and
-    /// then the last reading stands). A different lock, or none, closes the open period at <paramref name="now"/>, and a
-    /// lock opens the next. A point lock or Boost Lock is checked against a point on the curve, so a change of the curve's
-    /// offsets, its voltage demand or NVVDD MAX under one closes its period too. Otherwise the open period keeps the
-    /// newest curve (its clocks move with temperature).
+    /// The lock periods after one read of the clock-lock record at <paramref name="now"/> (<paramref name="locks"/>; null
+    /// when it was unreadable, and then the last reading stands, though it does not count as seeing the lock). A different
+    /// lock, or none, closes the open period at the last read that still saw its lock (<see cref="LockSpan.LastSeen"/>), and
+    /// a lock opens the next at <paramref name="now"/>. A point lock or Boost Lock is checked against a point on the curve,
+    /// so a change of the curve's offsets, its voltage demand or NVVDD MAX under one closes its period too. Otherwise the
+    /// open period keeps the newest curve (its clocks move with temperature).
     /// </summary>
     public static IReadOnlyList<LockSpan> Track(IReadOnlyList<LockSpan> spans, IReadOnlyList<ClientLimit>? locks, VfCurveSnapshot? curve,
         uint? maxUv, DateTimeOffset now)
@@ -483,13 +492,23 @@ public sealed class LiveWatch(Card card) : IDisposable
             bool moved = open.Locks.Any(l => l is { Domain: 6, Mode: 3 }) && (!SameShape(open.Curve, curve) || open.MaxUv != maxUv);
             if (key == open.Key && !moved)
             {
-                list[^1] = open with { Curve = curve, MaxUv = maxUv };
+                list[^1] = open with { Curve = curve, MaxUv = maxUv, LastSeen = locks != null ? now : open.LastSeen };
                 return list;
             }
-            list[^1] = open with { To = now };
+            list[^1] = open with { To = open.LastSeen };
         }
-        if (key != null) list.Add(new LockSpan(list.Count + 1, key, locks ?? open!.Locks, curve, maxUv, now));
+        if (key != null) list.Add(new LockSpan(list.Count + 1, key, locks ?? open!.Locks, curve, maxUv, now, now));
         return list;
+    }
+
+    /// <summary>The lock periods when the watch ends, after one last read of the record (<paramref name="locks"/>, null when
+    /// unreadable): the open period closes at <paramref name="now"/> if that read still finds its lock, otherwise at the
+    /// last read that did. No period opens at the end.</summary>
+    public static IReadOnlyList<LockSpan> End(IReadOnlyList<LockSpan> spans, IReadOnlyList<ClientLimit>? locks, DateTimeOffset now)
+    {
+        if (OpenSpan(spans) is not { } open) return spans;
+        var to = locks != null && Key(locks) == open.Key ? now : open.LastSeen;
+        return [.. spans.SkipLast(1), open with { LastSeen = to, To = to }];
     }
 
     /// <summary>Same offsets and voltage demand on every point (temperature moves only the effective clocks); an unread
@@ -497,13 +516,15 @@ public sealed class LiveWatch(Card card) : IDisposable
     private static bool SameShape(VfCurveSnapshot? a, VfCurveSnapshot? b) => a == null || b == null
         || (a.DemandShiftUv == b.DemandShiftUv && a.Points.Select(x => x.OffsetKhz).SequenceEqual(b.Points.Select(x => x.OffsetKhz)));
 
-    /// <summary>Each lock period against the samples under load taken in it; null when no lock was in force at any read.</summary>
+    /// <summary>Each lock period against the samples under load taken in it; null when no lock was in force at any read. A
+    /// closed period counts only its samples up to the last read that saw its lock (<see cref="LockSpan.LastSeen"/>): the
+    /// ones after it may have run with the lock already gone.</summary>
     public static IReadOnlyList<LockSpanOutcome>? LocksBySpan(IReadOnlyList<LockSpan> spans, IReadOnlyList<Point> loaded)
     {
         if (spans.Count == 0) return null;
         return spans.Select(s =>
         {
-            var mine = loaded.Where(p => p.LockSpan == s.Id).ToList();
+            var mine = loaded.Where(p => p.LockSpan == s.Id && (s.To == null || p.At <= s.LastSeen)).ToList();
             return new LockSpanOutcome(s.Key, s.From, s.To, mine.Count,
                 TuningTools.LocksMet(s.Locks, mine.Select(p => (double?)p.ClockMhz), s.Curve, s.MaxUv) ?? []);
         }).ToList();

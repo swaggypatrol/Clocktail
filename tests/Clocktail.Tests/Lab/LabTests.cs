@@ -282,6 +282,27 @@ public class LabTests
         var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(50, 1505, 499, 13851), S(100, 1510, 498, 13901, LabResult.Fail) };
         Assert.False(MemorySweep.SlowedDown(steps));
         Assert.False(MemorySweep.SlowedDown(steps.Take(2).ToList()));
+        Assert.Equal("", MemorySweep.SlowdownWords(steps, trend: false, 50));
+    }
+
+    /// <summary>The words say a slowdown stopped the sweep only when it did: its last step, not for the trend. The trend runs
+    /// on past a slowdown (to the end of the range, or to a failure later), so there they say where it began, and name no
+    /// stopping step.</summary>
+    [Fact]
+    public void A_slowdown_is_said_to_stop_the_sweep_only_when_it_did()
+    {
+        var slowed = new List<SweepStep> { S(0, 1000, 500, 13801), S(100, 990, 499, 13901), S(200, 989, 498, 14001) };
+        Assert.Contains("A slowdown stopped it", MemorySweep.SlowdownWords(slowed, trend: false, 0));
+
+        var trend = slowed.Concat([S(300, 1001, 497, 14101), S(400, 1002, 496, 14201)]).ToList();
+        string words = MemorySweep.SlowdownWords(trend, trend: true, 0);
+        Assert.DoesNotContain("stopped it", words);
+        Assert.DoesNotContain("stopping step", words);
+        Assert.Contains("began at +100 MHz", words);
+
+        var failedLater = slowed.Concat([S(300, 1001, 497, 14101, LabResult.Fail)]).ToList();
+        Assert.DoesNotContain("stopped it", MemorySweep.SlowdownWords(failedLater, trend: true, 0));
+        Assert.DoesNotContain("stopped it", MemorySweep.SlowdownWords(failedLater, trend: false, 0));
     }
 
     /// <summary>A timing change and then retrying: latency jumps, and instead of falling with the clock it rises again.</summary>

@@ -171,6 +171,25 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
         return false;
     }
 
+    /// <summary>What the next words say of a slowdown that lasted (the two-step rules), with <paramref name="best"/> the
+    /// edge's side: when it ended the sweep (its last step, not for the trend), that a lab_test memory at the best offset as
+    /// slow as the stopping step's means heat; for the trend, which runs on past a slowdown, where it began. Empty when no
+    /// slowdown came first, or when a slowdown did not end a sweep that is not for the trend.</summary>
+    public static string SlowdownWords(IReadOnlyList<SweepStep> steps, bool trend, int best)
+    {
+        for (int i = 0; i < steps.Count; i++)
+            if (Edge(steps.Take(i + 1).ToList()) is { } e)
+            {
+                if (!e.BeganAtStepBefore) return "";
+                if (trend)
+                    return Inv($"A slowdown that lasted began at {steps[i - 1].OffsetMhz:+0;-0;0} MHz (the trend ran on past it), and a warmer card slows the memory as error retries do: the steps ran back to back, so read their temperatures beside their speed. ");
+                return i == steps.Count - 1
+                    ? Inv($"A slowdown stopped it, and a warmer card slows the memory as error retries do: at {best:+0;-0;0} MHz, a lab_test memory as slow as the stopping step's means heat, not the edge. ")
+                    : "";
+            }
+        return "";
+    }
+
     public static SweepStep Step(int offsetMhz, LabResult r, int? resets)
     {
         var mem = r.Phases.FirstOrDefault(p => p.Kind == LabPhase.Memory);
@@ -305,9 +324,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
         if (_wrote && DailyBack("tune_memory finished") is { } notBack) why += "; " + notBack;
         int? best = Best(_steps);
         string? next = state == SweepStatus.Done && best is { } b
-            ? Inv($"the edge's side is {b:+0;-0;0} MHz (the step before any slowdown that lasted). ") + (SlowedDown(_steps)
-                ? Inv($"A slowdown stopped it, and a warmer card slows the memory as error retries do: at {b:+0;-0;0} MHz, a lab_test memory as slow as the stopping step's means heat, not the edge. ")
-                : "") + ("Read the steps for where bandwidth stops rising: past that an offset buys latency only, which frames may not feel: judge it in frames, not in the lab's numbers. Tell the person; set_memory_offset there in steps of at most 250 MHz, judge it against the daily offset with a memory-sensitive benchmark A B B A (a ray-traced one, as Speedway), their games have the last word, keep_as_daily (ask); if a game fails, step down")
+            ? Inv($"the edge's side is {b:+0;-0;0} MHz (the step before any slowdown that lasted). ") + SlowdownWords(_steps, spec.Trend, b) + ("Read the steps for where bandwidth stops rising: past that an offset buys latency only, which frames may not feel: judge it in frames, not in the lab's numbers. Tell the person; set_memory_offset there in steps of at most 250 MHz, judge it against the daily offset with a memory-sensitive benchmark A B B A (a ray-traced one, as Speedway), their games have the last word, keep_as_daily (ask); if a game fails, step down")
             : null;
         Save(state, at, why, next, best);
         log?.Invoke($"{state}: {why}");

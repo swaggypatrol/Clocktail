@@ -2462,4 +2462,16 @@ public class BrokerDispatcherTests : IDisposable
         Assert.False(Clocktail.Domain.Fps.IFrameCapture.StopsIt("C:\\fps\\a.csv", "C:\\fps\\b.csv"));   // another's: left alone
         Assert.True(Clocktail.Domain.Fps.IFrameCapture.StopsIt(null, "C:\\fps\\b.csv"));
     }
+
+    /// <summary>After a restart of the service it knows of no capture: a stop with a path still runs, so the ETW session the
+    /// old capture left goes, and is not refused as another's.</summary>
+    [Fact]
+    public void A_frame_capture_stop_is_refused_only_while_another_capture_runs()
+    {
+        Assert.False(Clocktail.Domain.Fps.IFrameCapture.LeavesIt("C:\\fps\\a.csv", null, runs: false));                // restarted: nothing known
+        Assert.False(Clocktail.Domain.Fps.IFrameCapture.LeavesIt("C:\\fps\\a.csv", "C:\\fps\\b.csv", runs: false)); // b ended by itself
+        Assert.True(Clocktail.Domain.Fps.IFrameCapture.LeavesIt("C:\\fps\\a.csv", "C:\\fps\\b.csv", runs: true));   // b runs: left alone
+        Assert.False(Clocktail.Domain.Fps.IFrameCapture.LeavesIt("C:\\fps\\a.csv", "C:\\fps\\a.csv", runs: true));
+        Assert.False(Clocktail.Domain.Fps.IFrameCapture.LeavesIt(null, "C:\\fps\\b.csv", runs: true));
+    }
 }

@@ -190,4 +190,9 @@ public interface IFrameCapture
 
     /// <summary>A stop for <paramref name="path"/> is for the capture writing <paramref name="running"/>.</summary>
     static bool StopsIt(string? path, string? running) => path == null || string.Equals(path, running, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A stop for <paramref name="path"/> is refused only while another capture runs (<paramref name="runs"/>, one
+    /// writing <paramref name="running"/>). With none running (it ended, or the service restarted and knows of none) the
+    /// stop goes ahead, so the ETW session a capture left behind is still ended.</summary>
+    static bool LeavesIt(string? path, string? running, bool runs) => runs && !StopsIt(path, running);
 }

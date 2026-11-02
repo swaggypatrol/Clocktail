@@ -78,9 +78,10 @@ internal sealed class FrameCapture : IFrameCapture
         lock (_gate)
         {
             // A client stops its own capture only: one a later Start began for someone else (another watch, another
-            // server) is not its to end.
-            if (!IFrameCapture.StopsIt(path, _path)) return new { success = true, stopped = false, path = _path, why = "another capture runs now; it was left alone" };
+            // server) is not its to end. With none running, the stop still clears the session (one a hard kill or a
+            // restart of the service left behind).
             bool was = _running is { HasExited: false };
+            if (IFrameCapture.LeavesIt(path, _path, was)) return new { success = true, stopped = false, path = _path, why = "another capture runs now; it was left alone" };
             StopLocked();
             return new { success = true, stopped = was, path = _path };
         }
