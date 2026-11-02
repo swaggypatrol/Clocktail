@@ -317,8 +317,8 @@ Done. ${card.done}
 ${stale.length ? `\n${agentList(stale)} still run${stale.length === 1 ? 's' : ''} the old version: restart ${stale.length === 1 ? 'it' : 'them'} to load ${VERSION} (in Claude Code, /mcp and reconnecting clocktail also does it).\n` : ''}
 Restart your agent, then tell it something like:
   "How's my card doing?"
-  "Let's tune my GPU. Start from the founders preset."   (RTX 5090 only)
-  "Let's tune my GPU from stock."
+  "Read my GPU's capabilities and current settings, then propose a tuning plan."
+  "Let's tune my GPU from its own stock settings. Ask me before making changes."
 
 Uninstall any time:  npx -y clocktail uninstall
 `);

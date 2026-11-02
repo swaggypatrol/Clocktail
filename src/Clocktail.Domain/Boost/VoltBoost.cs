@@ -24,7 +24,7 @@ public sealed record BoostObservation(
     uint? IndependentPercent,
     byte LegacyPercent,
     uint NvvddKind,
-    IReadOnlyList<(Rail Rail, uint MaxUv, uint CeilingUv)> Rails,
+    IReadOnlyList<(Rail Rail, uint MaxUv)> Rails,
     byte[]? IndependentRaw,
     byte[] RailsControlRaw,
     byte[] RailsStatusRaw)
@@ -32,27 +32,6 @@ public sealed record BoostObservation(
     /// <summary>The default path: independent only when its getter works and NVVDD is not kind 3.</summary>
     public BoostPath? DefaultRule(bool railsWritable) =>
         IndependentPercent != null && NvvddKind != 3 ? BoostPath.Independent : railsWritable ? BoostPath.Legacy : null;
-
-    public string? CeilingViolation() =>
-        Rails.Where(r => r.MaxUv > r.CeilingUv).Select(r => $"{r.Rail} MAX {r.MaxUv} µV is above the {r.CeilingUv} µV ceiling").FirstOrDefault();
-
-    /// <summary>
-    /// The post-write form: a rail's MAX is a violation only when it is above the ceiling <em>and</em> above where it
-    /// stood in <paramref name="before"/>, the observation the write was planned on. The ceiling bounds what a write
-    /// may raise, not where another tool already left a rail: a MAX found above the ceiling can still be lowered, or
-    /// left alone by a write to the other rail, without the write being undone. A rail absent from
-    /// <paramref name="before"/> is judged against the ceiling alone.
-    /// </summary>
-    public string? CeilingViolation(BoostObservation before)
-    {
-        foreach (var r in Rails)
-        {
-            uint? was = before.Rails.Where(b => b.Rail == r.Rail).Select(b => (uint?)b.MaxUv).FirstOrDefault();
-            if (r.MaxUv > r.CeilingUv && (was == null || r.MaxUv > was))
-                return $"{r.Rail} MAX {r.MaxUv} µV is above the {r.CeilingUv} µV ceiling" + (was is { } w ? $" (was {w} µV)" : "");
-        }
-        return null;
-    }
 }
 
 /// <summary>What one write through one path did to the other path and to the rails.</summary>
@@ -72,7 +51,7 @@ public enum BoostVerdict
 
 public static class BoostReader
 {
-    public static BoostObservation Observe(NvClient hw, GpuSession gpu, bool xoc = false)
+    public static BoostObservation Observe(NvClient hw, GpuSession gpu)
     {
         uint? indep = null;
         byte[]? indepRaw = null;
@@ -87,7 +66,7 @@ public static class BoostReader
         var rails = RailsReader.Read(hw, gpu);
         var nvvdd = rails.Get(Rail.Nvvdd) ?? throw new InvalidDataException("NVVDD is missing");
         return new BoostObservation(indep, rails.LegacyBoostPercent, nvvdd.Kind,
-            rails.Rails.Select(r => (r.Rail, r.Limits.MaxUv, RailRules.Ceiling(r, xoc))).ToList(),
+            rails.Rails.Select(r => (r.Rail, r.Limits.MaxUv)).ToList(),
             indepRaw, rails.RawControl, rails.RawStatus);
     }
 
@@ -112,21 +91,18 @@ public sealed record BoostApplyResult(
     BoostObservation? After,
     TxResult Tx,
     string Ownership,
-    /// <summary>Set when the post-check (every rail MAX under its ceiling) failed and the old value was put back.</summary>
-    string? CeilingRollback,
     bool SentinelCleared,
     /// <summary>A rail-control byte other than the boost byte changed across the write. Nobody owns that change, so it is
     /// reported, not hidden behind "Restored" (the transaction only reverts the fields it edited).</summary>
     string? SideEffect = null)
 {
-    public bool Succeeded => Tx.Succeeded && CeilingRollback == null && SideEffect == null;
+    public bool Succeeded => Tx.Succeeded && SideEffect == null;
     public BoostVerdict? Verdict => After == null || Tx.Outcome != TxOutcome.Applied ? null : BoostReader.Classify(Path, RequestedPercent, Before, After);
 }
 
 /// <summary>
-/// Voltage boost through either path as one owned cell each, with a post-check: after the write every
-/// rail's MAX must sit under its ceiling, otherwise the previous percentage goes back (or 0 % when the previous
-/// state was itself above the ceiling).
+/// Voltage boost through either path as one owned cell each. The percentage is read back exactly; what it does to every
+/// rail's MAX is the driver's to derive and is shown (<see cref="BoostApplyResult.After"/>), not judged against a ceiling.
 /// </summary>
 public sealed class VoltBoost(NvClient hw, OwnershipJournal journal, ApplySentinel sentinel, IHost host)
 {
@@ -162,10 +138,7 @@ public sealed class VoltBoost(NvClient hw, OwnershipJournal journal, ApplySentin
 
     /// <summary>
     /// The write-path registry's entry: the cell for <paramref name="key"/> (independent | legacy) and the plan that
-    /// sets it to <paramref name="value"/> percent; null plan when the value is not 0..100. The plan alone cannot hold
-    /// the rail ceiling, because what a percent does to MAX is only known after the write: a write that raises boost
-    /// belongs in <see cref="Apply"/>, which re-reads the rails and puts it back. Recovery (back to the original) is
-    /// safe through the bare plan.
+    /// sets it to <paramref name="value"/> percent; null plan when the value is not 0..100 (the field's own range).
     /// </summary>
     public static (OwnedCell Cell, Func<ReadOnlyMemory<byte>, Mutation>? Plan) Prepare(NvClient hw, GpuSession gpu, string key, string value)
     {
@@ -180,33 +153,22 @@ public sealed class VoltBoost(NvClient hw, OwnershipJournal journal, ApplySentin
         return (Cell(path, mask), plan);
     }
 
-    public BoostApplyResult Apply(GpuSession gpu, BoostPath path, uint percent, bool takeOver = false, bool xoc = false)
+    public BoostApplyResult Apply(GpuSession gpu, BoostPath path, uint percent, bool takeOver = false)
     {
-        var before = BoostReader.Observe(hw, gpu, xoc);
+        var before = BoostReader.Observe(hw, gpu);
         uint mask = BinaryPrimitives.ReadUInt32LittleEndian(before.RailsControlRaw.AsSpan(4));
         var cell = Cell(path, mask);
         var writer = new OwnedWriter(hw, journal, sentinel, host);
         var r = writer.Apply(gpu, cell, Plan(path, percent), takeOver);
         if (r.Tx.Outcome is TxOutcome.Aborted or TxOutcome.NoChange)
-            return new BoostApplyResult(path, percent, before, before, r.Tx, r.Ownership, null, r.SentinelCleared);
+            return new BoostApplyResult(path, percent, before, before, r.Tx, r.Ownership, r.SentinelCleared);
 
+        // The percentage itself was read back by the transaction; the rails are read again to show what it moved (null
+        // when they could not be read: MAX unverified, the boost stays as written).
         BoostObservation? after;
-        try { after = BoostReader.Observe(hw, gpu, xoc); }
+        try { after = BoostReader.Observe(hw, gpu); }
         catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { after = null; }
-
-        string? side = after == null ? null : SideEffect(before, after);
-        string? violation = after == null ? "the rails could not be read after the write" : after.CeilingViolation();
-        if (violation == null || r.Tx.Outcome != TxOutcome.Applied)
-            return new BoostApplyResult(path, percent, before, after, r.Tx, r.Ownership, null, r.SentinelCleared, side);
-
-        // Post-check failed: put the old percentage back, or 0 % when the old state already broke the ceiling.
-        uint old = uint.Parse(cell.StateIn(r.Tx.Before) ?? "0", CultureInfo.InvariantCulture);
-        uint back = before.CeilingViolation() == null ? old : 0;
-        var undo = writer.Apply(gpu, cell, Plan(path, back), takeOver: true);
-        BoostObservation? final = null;
-        try { final = BoostReader.Observe(hw, gpu, xoc); } catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
-        string rollback = $"{violation}; boost set back to {back} % ({undo.Tx.Outcome}, {undo.Ownership})";
-        return new BoostApplyResult(path, percent, before, final, r.Tx, undo.Ownership, rollback, undo.SentinelCleared, final == null ? null : SideEffect(before, final));
+        return new BoostApplyResult(path, percent, before, after, r.Tx, r.Ownership, r.SentinelCleared, after == null ? null : SideEffect(before, after));
     }
 
     /// <summary>Rail offsets and every other control field must not move when only the boost percentage was asked to.</summary>

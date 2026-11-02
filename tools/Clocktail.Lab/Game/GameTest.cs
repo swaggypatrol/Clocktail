@@ -11,14 +11,14 @@ namespace Clocktail.Lab.Game;
 /// <summary>Job options only. Actual settings and restoration values are captured by the card host under the lease.</summary>
 public sealed record GameSpec(string StableId, string Pci, string Exe, int Seconds, int Seed,
     IReadOnlyList<string> Patterns, IReadOnlyList<string> Levers, int WindowPct = 90, int? MaxScale = null,
-    int MaxTempC = 85, int GraceSeconds = 45, string? Note = null,
+    int? MaxTempC = null, int GraceSeconds = 45, string? Note = null,
     DateTimeOffset? TrialAt = null, DateTimeOffset? SessionAt = null)
 {
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(StableId) || VulkanDevices.Address(Pci) == null || string.IsNullOrWhiteSpace(Exe) || SessionAt == null)
             throw new ArgumentException("the game spec must identify the card, PCI address, game executable and session");
-        if (Seconds is < 60 or > 240 * 60 || WindowPct is < 90 or > 100 || MaxScale is < 100 or > 200 || MaxTempC is < 50 or > 88 || GraceSeconds < 0)
+        if (Seconds is < 60 or > 240 * 60 || WindowPct is < 90 or > 100 || MaxScale is < 100 or > 200 || MaxTempC is < 1 or > 120 || GraceSeconds < 0)
             throw new ArgumentException("the game spec has an out-of-range duration, window, scale, temperature or reset grace");
         if (Patterns == null || Patterns.Count == 0 || Patterns.Any(p => !GameCatalog.AllPatterns.Contains(p))
             || Levers == null || Levers.Any(l => !GameCatalog.AllLevers.Contains(l)))
@@ -193,7 +193,7 @@ public sealed class GameTest(GameSpec spec, string jobDir, string lab, Action<st
             {
                 _plan = GameScript.Plan(new GamePlanOptions(spec.Seconds, spec.Seed, spec.Patterns, maps,
                     spec.MaxScale ?? QuakeLocator.MaxScaleFor(_baseline.VramBytes), spec.Levers, _baseline.PowerMw, _baseline.MinPowerMw,
-                    hz, WarmC: Math.Min(76, spec.MaxTempC - 6)));
+                    hz, WarmC: spec.MaxTempC is { } m ? Math.Min(76, m - 6) : 76));
                 File.WriteAllText(Path.Combine(JobDir, "baseline.json"), b.GetRawText());
                 File.WriteAllText(Path.Combine(JobDir, "plan.json"), JsonSerializer.Serialize(_plan, StatusJson));
                 return RunHeld(lease, demo);

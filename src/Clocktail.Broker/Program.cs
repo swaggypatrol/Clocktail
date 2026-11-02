@@ -26,7 +26,7 @@ const string Usage = """
 
     The broker is the one process that performs GPU writes. Clients (the CLI, agents) send it one of a fixed set
     of operations over a named pipe only this user can open. It keeps one write window open at a time, holds the
-    firmware-reported limits as a ceiling no request can lift, and stands down while a stability run is measuring.
+    firmware-reported limits no request can pass, and stands down while a stability run is measuring.
     """;
 const string NotElevated = "broker: must run elevated (the private setters answer -137 otherwise); the logon task does so, or run from an elevated terminal";
 
@@ -103,8 +103,8 @@ static int Run()
     var host = new SystemHost();
     var hw = new NvClient(mgr.NvApi);                       // the default write whitelist: exactly what the CLI would use
     var judgePath = BrokerPaths.JudgeLockPath();
-    // The run holding judge.lock, if any; BrokerDispatcher.Judge lets through its own writes (its lease), the fan guard's
-    // (SafetyLease), and the rest of an operation the run waits for.
+    // The run holding judge.lock, if any; BrokerDispatcher.Judge lets through its own writes (its lease) and the rest of
+    // an operation the run waits for.
     string trace = "";
     var decide = BrokerDispatcher.Judge(() => JudgeLock.Live(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out trace));
     Func<string?> judge = () =>
@@ -166,20 +166,13 @@ static int Run()
     {
         var target = targets.Resolve(targets.Ids.Single())!;
         string recovery = Clocktail.Domain.Game.GameSession.PathBeside(target.Journal.Path);
-        bool initialized = false;
+        // The start runs once, whether or not a game recovery it ran inside then landed.
+        var start = new StartupRecovery(() => responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList()));
         while (!cts.IsCancellationRequested)
         {
-            if (File.Exists(recovery) || File.Exists(AtomicFile.BackupPath(recovery)))
-            {
-                // A live job holds the card mutex, including while it waits for reset recovery. Never race it.
-                Action startup = initialized ? () => { } : () => responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList());
-                if (RecoverGame(dispatcher, target.StableId, host, Log, startup)) initialized = true;
-            }
-            else if (!initialized)
-            {
-                responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList());
-                initialized = true;
-            }
+            // A live job holds the card mutex, including while it waits for reset recovery. Never race it.
+            start.Pass(File.Exists(recovery) || File.Exists(AtomicFile.BackupPath(recovery)),
+                startup => RecoverGame(dispatcher, target.StableId, host, Log, startup));
             try { await Task.Delay(TimeSpan.FromSeconds(5), cts.Token).ConfigureAwait(false); }
             catch (OperationCanceledException) { return; }
         }
@@ -199,23 +192,8 @@ static int Run()
             catch (OperationCanceledException) { return; }
         }
     });
-    // A fixed fan duty is the agent's to watch; when the card gets too hot under one anyway, the fans go back to the curve.
-    var fanGuard = new FanGuard(dispatcher.Dispatch, Log);
-    KeepRunning("the fan guard", async () =>
-    {
-        while (!cts.IsCancellationRequested)
-        {
-            var now = DateTimeOffset.Now;
-            foreach (var (id, recorder) in sampler.Recorders)
-            {
-                var window = recorder.Freeze();
-                var last = window.Count > 0 ? window[^1] : null;
-                fanGuard.Look(id, last != null && now - last.At < TimeSpan.FromSeconds(3) ? last.TempC : null, now);
-            }
-            try { await Task.Delay(TimeSpan.FromSeconds(1), cts.Token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { return; }
-        }
-    });
+    // A fixed fan duty stays as the trial set it: the service does not watch the temperature and take it back. It goes
+    // back with the trial (back_to_daily, end_session, a crash) and when the agent goes quiet (the trial lease above).
     // The driver this process opened can go away under it (a device restart, a driver update), and nothing it holds can be
     // rebound safely after that: once a session or NVML says so, the broker hands over to a fresh worker, which puts the
     // daily profile back on as at any start.

@@ -27,6 +27,10 @@ public sealed record ClientLimit(int Domain, uint Mode, uint Value)
 /// changes what a stress run or a curve test measures. Layout from the original's reader [observed]: +0 version word,
 /// +4 0, +8 7 entries, each 0x18 bytes from +0xc: {+0 domain == its index, +4 0, +8 mode, +0xc 0, +0x10 value, +0x14 0}.
 /// Read on the reference card (617.42): all seven entries 0 with no lock in force.
+/// The interface pair (0xe440b867 / 0x39442cfb) is NvAPI_GPU_PerfClientLimitsGet/SetStatus, NVAPI's partner group rather
+/// than its private one (identified by Afterburner's author, LACT issue #1177): a "Client" wrapper over the driver's
+/// PERF_LIMITS_SET_STATUS, kept stable across architectures, where the private clones change with each one. A limit set
+/// here is a request: the driver still derates under it for power, temperature and voltage (<see cref="ClockLockCheck"/>).
 /// </summary>
 public static class ClientLimitsLayout
 {

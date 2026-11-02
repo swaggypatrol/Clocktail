@@ -98,8 +98,8 @@ public class WriteRegistryTests : IDisposable
         Assert.NotNull(WriteRegistry.Find("POWER"));
         Assert.Null(WriteRegistry.Find("register"));
         Assert.Null(WriteRegistry.Find(null));
-        // What is only visible after the write: the two derived rail limits, and the V/F curve's own validation.
-        Assert.Equal(["rails", "boost", "vf"], WriteRegistry.All.Where(p => p.AfterWrite != null).Select(p => p.Kind));
+        // What is only visible after the write: the V/F curve's own validation (a proof of the write, not a limit).
+        Assert.Equal(["vf"], WriteRegistry.All.Where(p => p.AfterWrite != null).Select(p => p.Kind));
         Assert.Equal(["boost"], WriteRegistry.All.Where(p => p.ProveEqual != null).Select(p => p.Kind));
     }
 
@@ -257,73 +257,9 @@ public class WriteRegistryTests : IDisposable
         Assert.Equal("auto", FanParser.ControlFor(FakeDriver.Current(Slot.ClientFanCoolersGetControl), 1)!.State.ToString());
     }
 
-    /// <summary>The 5090-shaped rails plus an all-zero independent boost structure, as VoltBoostTests seeds them.</summary>
-    private static NvClient RailsAndBoostFake()
-    {
-        RailsFixture.SeedDriver();
-        FakeDriver.Seed(Slot.ClientVoltRailsGetControl);
-        return new NvClient(FakeDriver.ApiFor(
-            [Slot.VoltVoltRailsGetInfo, Slot.VoltVoltRailsGetControl, Slot.VoltVoltRailsGetStatus, Slot.VoltVoltDevicesGetInfo, Slot.ClientVoltRailsGetControl],
-            [Slot.VoltVoltRailsSetControl, Slot.ClientVoltRailsSetControl]));
-    }
-
-    [Fact]
-    public void The_derived_limit_check_rides_on_the_cell_for_a_write_and_is_left_off_for_recovery()
-    {
-        var hw = RailsAndBoostFake();
-        var rails = WriteRegistry.Find(RailWrites.Kind)!;
-        var boost = WriteRegistry.Find(VoltBoost.Kind)!;
-        Assert.NotNull(rails.Prepare(hw, _gpu, "nvvdd", "rel=-5000", WriteOptions.None).Cell.Spec.CheckAfterWrite);
-        Assert.NotNull(boost.Prepare(hw, _gpu, "independent", "10", WriteOptions.None).Cell.Spec.CheckAfterWrite);
-        // Recovery returns to a state the driver itself held; the check that bounds requests is not applied to it.
-        Assert.Null(rails.Prepare(hw, _gpu, "nvvdd", "rel=0,alt=0,ov=0,vmin=0", WriteOptions.Recovery).Cell.Spec.CheckAfterWrite);
-        Assert.Null(boost.Prepare(hw, _gpu, "independent", "0", WriteOptions.Recovery).Cell.Spec.CheckAfterWrite);
-        // A value with no plan has nothing to check.
-        var refused = boost.Prepare(hw, _gpu, "legacy", "200", WriteOptions.None);
-        Assert.Null(refused.Plan);
-        Assert.Null(refused.Cell.Spec.CheckAfterWrite);
-    }
-
-    [Fact]
-    public void The_rail_and_boost_checks_name_a_MAX_above_the_standard_ceiling()
-    {
-        var hw = RailsAndBoostFake();
-        var rails = WriteRegistry.Find(RailWrites.Kind)!.Prepare(hw, _gpu, "nvvdd", "rel=-5000", WriteOptions.None).Cell.Spec.CheckAfterWrite!;
-        var boost = WriteRegistry.Find(VoltBoost.Kind)!.Prepare(hw, _gpu, "independent", "10", WriteOptions.None).Cell.Spec.CheckAfterWrite!;
-        Assert.Null(rails(hw, _gpu));    // NVVDD MAX 1.100 V, ceiling min(1.2 V domain max, 1.15 V)
-        Assert.Null(boost(hw, _gpu));
-
-        W(FakeDriver.State[Word(Slot.VoltVoltRailsGetStatus)], RailsLayout.StatusBase + 16, 1_160_000);
-        Assert.Contains("nvvdd", rails(hw, _gpu));
-        Assert.Contains("1150000", boost(hw, _gpu));
-    }
-
-    /// <summary>
-    /// The checks are relative to the state the write was planned on: a MAX another tool left above the ceiling is
-    /// not a reason to undo a write that did not raise it, and lowering it is allowed; only a rise past both the
-    /// ceiling and where it stood is a violation.
-    /// </summary>
-    [Fact]
-    public void The_checks_judge_a_MAX_against_the_ceiling_or_where_it_stood_before_the_write_whichever_is_higher()
-    {
-        var hw = RailsAndBoostFake();
-        var status = FakeDriver.State[Word(Slot.VoltVoltRailsGetStatus)];
-        W(status, RailsLayout.StatusBase + 16, 1_160_000);          // found above the ceiling before the write
-        var rails = WriteRegistry.Find(RailWrites.Kind)!.Prepare(hw, _gpu, "msvdd", "rel=-5000", WriteOptions.None).Cell.Spec.CheckAfterWrite!;
-        var boost = WriteRegistry.Find(VoltBoost.Kind)!.Prepare(hw, _gpu, "independent", "10", WriteOptions.None).Cell.Spec.CheckAfterWrite!;
-        Assert.Null(rails(hw, _gpu));                                // unchanged: not this write's doing
-        Assert.Null(boost(hw, _gpu));
-        W(status, RailsLayout.StatusBase + 16, 1_155_000);           // lowered, still above the ceiling: allowed
-        Assert.Null(rails(hw, _gpu));
-        Assert.Null(boost(hw, _gpu));
-        W(status, RailsLayout.StatusBase + 16, 1_165_000);           // raised: the violation names the rail and where it was
-        Assert.Contains("nvvdd", rails(hw, _gpu));
-        Assert.Contains("was 1160000", boost(hw, _gpu));
-    }
-
-    /// <summary>The 5090-shaped rails with NVVDD's REL at 1.2 V stock, above the 1.15 V ceiling, and a status that follows the
+    /// <summary>The 5090-shaped rails with NVVDD's REL at 1.2 V stock, the domain maximum itself, and a status that follows the
     /// control offsets (REL, ALT, OV = base + offset; MAX = their minimum), so a write moves what the next read sees.</summary>
-    private static NvClient RailsWithStockRelAboveTheCeiling()
+    private static NvClient RailsWithStockRelAtTheDomainMax()
     {
         RailsFixture.SeedDriver();
         uint statusWord = Word(Slot.VoltVoltRailsGetStatus), controlWord = Word(Slot.VoltVoltRailsGetControl);
@@ -343,15 +279,14 @@ public class WriteRegistryTests : IDisposable
     }
 
     /// <summary>
-    /// The rules bound excursions, not positions: a slot lowered from a stock value above the ceiling may go back to
-    /// that stock value, because the hardware held it before this program did anything. The registry learns that
-    /// origin from the journal (<see cref="WriteOptions.Original"/>), so a user's restore and recovery both land and
-    /// release the record, while the same request with no origin is refused by the ceiling rule.
+    /// The journal's original is for going back, not a bound on requests: a slot lowered from stock goes back to it with or
+    /// without the origin (stock sits inside the domain), and the registry learns that origin from the journal
+    /// (<see cref="WriteOptions.Original"/>), so a user's restore and recovery both land and release the record.
     /// </summary>
     [Fact]
-    public void A_lowered_slot_returns_to_a_stock_value_above_the_ceiling_only_with_the_journal_origin()
+    public void The_journal_tracks_restoration_without_being_a_ceiling_on_requests()
     {
-        var hw = RailsWithStockRelAboveTheCeiling();
+        var hw = RailsWithStockRelAtTheDomainMax();
         var path = WriteRegistry.Find(RailWrites.Kind)!;
         var down = path.Prepare(hw, _gpu, "nvvdd", "rel=-100000", WriteOptions.None);
         var w = Writer(hw).Apply(_gpu, down.Cell, down.Plan!);
@@ -360,12 +295,12 @@ public class WriteRegistryTests : IDisposable
         var item = _journal.Load()!.Items.Single();
         Assert.Equal("rel=0,alt=0,ov=0,vmin=0", item.Original);
 
-        // No origin: REL back to 1.2 V is a raise past the ceiling, refused before the driver.
+        // No origin is needed to authorize a value; restore still releases the journal.
         var blind = path.Prepare(hw, _gpu, "nvvdd", "rel=0", WriteOptions.None);
-        var refused = Writer(hw).Apply(_gpu, blind.Cell, blind.Plan!);
-        Assert.Equal(TxOutcome.Aborted, refused.Tx.Outcome);
-        Assert.Contains("REL would rise to 1200 mV, above the firmware-reported ceiling of 1150 mV", refused.Tx.Detail);
-        Assert.Equal(1, FakeDriver.Sets);
+        Assert.Equal(TxOutcome.Applied, Writer(hw).Apply(_gpu, blind.Cell, blind.Plan!).Tx.Outcome);
+        Assert.Equal(2, FakeDriver.Sets);
+        down = path.Prepare(hw, _gpu, "nvvdd", "rel=-100000", WriteOptions.None);
+        Assert.Equal(TxOutcome.Applied, Writer(hw).Apply(_gpu, down.Cell, down.Plan!).Tx.Outcome);
 
         // The journal's origin: the same request is a return, lands, and releases the record.
         var back = path.Prepare(hw, _gpu, "NVVDD", "rel=0", new WriteOptions(Original: item.Original));

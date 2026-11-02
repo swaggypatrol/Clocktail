@@ -10,7 +10,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Clocktail.Hw\Clocktail.Hw.csproj" />
-    <EmbeddedResource Include="Profiles\Presets\*.json" LogicalName="preset.%(Filename).json" />
   </ItemGroup>
 
 </Project>

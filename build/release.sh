@@ -12,7 +12,9 @@ node --test "$root"/npm/test/*.test.js
 
 rm -rf "$out" && mkdir -p "$out/bin"
 for p in src/Clocktail.Broker tools/Clocktail.Mcp tools/Clocktail.Lab src/Clocktail.Cli; do
-  dotnet publish "$root/$p" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true \
+  # The MCP server is built for net10.0 (the tests, Linux too) and net10.0-windows (the curve_editor window): ship the latter.
+  fw=(); [ "$p" = tools/Clocktail.Mcp ] && fw=(-f net10.0-windows)
+  dotnet publish "$root/$p" "${fw[@]}" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true \
     -p:EnableCompressionInSingleFile=true -p:DebugType=none -p:Version="$ver" -o "$out/bin" -nologo -v quiet
 done
 mv "$out/bin/Clocktail.Cli.exe" "$out/bin/clocktail.exe"

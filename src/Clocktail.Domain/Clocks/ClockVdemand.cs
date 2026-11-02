@@ -20,8 +20,15 @@ public static class ClockVdemand
 {
     public const string Kind = "vdemand";
 
-    /// <summary>The standard range; an XOC mode would take any int32, and this program has no XOC.</summary>
-    public const int MinUv = -25_000, MaxUv = 50_000;
+    /// <summary>A units and typo check, not a tuning envelope: the driver reports no range for this field, and a demand
+    /// a whole volt either way is no setting anyone means (it is µV given as mV, or a digit too many). Inside it, what
+    /// the driver accepts is its decision.</summary>
+    public const int MinUv = -1_000_000, MaxUv = 1_000_000;
+
+    /// <summary>Why a demand cannot be one, or null: outside ±1000 mV (<see cref="MinUv"/>..<see cref="MaxUv"/>).</summary>
+    public static string? Implausible(long uv) => uv < MinUv || uv > MaxUv
+        ? string.Create(CultureInfo.InvariantCulture, $"a voltage demand of {uv / 1000.0} mV is past ±{MaxUv / 1000} mV: that is a units or typing slip (µV for mV?), not a demand; nothing written")
+        : null;
 
     public static bool Writable(ClockDomainId d) => d is ClockDomainId.Graphics or ClockDomainId.Xbar or ClockDomainId.Sys or ClockDomainId.Video;
 
@@ -64,8 +71,7 @@ public static class ClockVdemand
         try { c = ClockDomainsParser.ParseControl(control, t.Index); }
         catch (InvalidDataException e) { return new Mutation.Abort(e.Message); }
         if (c.Type != t.Type) return new Mutation.Abort($"clock control entry {t.Index} reports type {c.Type}, the topology says {t.Type}: the identity changed");
-        if (uv < MinUv || uv > MaxUv)
-            return new Mutation.Abort(string.Create(CultureInfo.InvariantCulture, $"A voltage-demand offset of {uv / 1000.0} mV is outside the supported {MinUv / 1000} to +{MaxUv / 1000} mV range."));
+        if (Implausible(uv) is { } slip) return new Mutation.Abort(slip);
         if (c.Reserved0 != 0 || c.Reserved1 != 0)
             return new Mutation.Abort("an unexpected rail offset is active in a slot this program does not know; it will not overwrite it");
         if ((slot == 0 ? c.VdemandNvvddUv : c.VdemandMsvddUv) == uv) return new Mutation.Apply([]);

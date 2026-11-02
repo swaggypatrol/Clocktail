@@ -22,8 +22,9 @@ The game takes the foreground. Its client area covers at least **90 % of primary
 axis (81 % area). `windowPct=90..100` is a per-axis lower bound; sizes are raised as needed to meet the area requirement.
 No desktop-resolution change, input injection or modification of the person's game configuration is used.
 
-Options: `minutes=1..240`, `patterns`, `gpu` (card levers), `windowPct`, `maxScale=100..200`, `seed`, `maxTempC=50..88`, `note`.
-Defaults: 10 minutes, all patterns except renderer restart, power/fans, random repeatable seed, 85 C stop. Maximum internal
+Options: `minutes=1..240`, `patterns`, `gpu` (card levers), `windowPct`, `maxScale=100..200`, `seed`, `maxTempC` (1..120 C), `note`.
+Defaults: 10 minutes, all patterns except renderer restart, power/fans, random repeatable seed, and no thermal stop of the
+test's own (with no `maxTempC` it leaves temperature to NVIDIA's protection). Maximum internal
 resolution defaults to 200 % with at least 23 GiB VRAM, 150 % with at least 15 GiB, otherwise 125 %, from the locked snapshot.
 
 ## Installation
@@ -33,8 +34,9 @@ process registration and recovery. An old service is refused before the game sta
 lab is not enough. `npx clocktail setup` installs the *published* release, so use the local installer for a local build.
 
 1. Build the bundle (the four exes land in `out\game-test`):
-   `dotnet publish <project> -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -p:Version=0.5.0 -o out\game-test`
-   for `src\Clocktail.Broker`, `tools\Clocktail.Mcp`, `tools\Clocktail.Lab` and `src\Clocktail.Cli`.
+   `dotnet publish <project> -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -p:Version=0.6.0 -o out\game-test`
+   for `src\Clocktail.Broker`, `tools\Clocktail.Mcp`, `tools\Clocktail.Lab` and `src\Clocktail.Cli`; for `tools\Clocktail.Mcp` add
+   `-f net10.0-windows` (it is built twice: `net10.0` for the tests, `net10.0-windows` with the `curve_editor` window).
 2. Stop any lab job and close Quake II RTX. Agents may stay open (their old server is moved aside and keeps running).
 3. `powershell -ExecutionPolicy Bypass -File build\install-local.ps1 -Plan` shows what would change and changes nothing.
 4. `powershell -ExecutionPolicy Bypass -File build\install-local.ps1` backs up what it replaces to
@@ -92,7 +94,7 @@ is alive or cannot be confirmed gone.
 At completion:
 
 - Normal completion/stop restores only the controls this job attempted, verifies the full baseline, then restores the
-  starting session metadata. A service fan-safety release falls back to verified daily instead of reinstating fixed fans.
+  starting session metadata. The service handing a fixed fan duty back (its agent gone quiet) falls back to verified daily instead of reinstating fixed fans.
 - A plain failure is recorded only against the same trial with matching measured settings. A target reset is recorded by
   the service; the job releases its lease so recovery can proceed. The exact `TrialAt` crash point and daily readback are
   required before reset recovery is called complete. No timeout erases pending evidence.
@@ -111,7 +113,7 @@ Live maps explicitly use single-player mode, god mode and supplied weapons. Rest
 opt-in. Every rendering option used by a step, including DRS bounds/target and depth of field, is read back.
 
 Card levers run more slowly: power stays between the board minimum and the locked starting cap; fans go to 100 %, then
-50 % until min(76, maxTempC - 6) C, then auto. Boost Lock is opt-in. Starting values come from the host, never the client.
+50 % until min(76, maxTempC - 6) C (76 C with no `maxTempC`), then auto. Boost Lock is opt-in. Starting values come from the host, never the client.
 
 A second is credited only while the game is foreground, answering, drawing, progressing and holding the requested
 settings. Credit is capped to the remaining step/run duration. Startup, scene loads, hang waits and regular play share

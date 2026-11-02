@@ -27,9 +27,9 @@ public class CurveShiftTests
     }
 
     [Fact]
-    public void No_shift_near_a_step_still_warns_and_far_from_one_says_nothing()
+    public void No_shift_does_not_guess_another_boards_temperature_compensation_steps()
     {
-        Assert.Contains("82 °C", J(TuningTools.CurveShift(Curve(2_925_000), Curve(2_925_000), 80, [S(81)])).GetProperty("note").GetString());
+        Assert.Equal(JsonValueKind.Null, J(TuningTools.CurveShift(Curve(2_925_000), Curve(2_925_000), 80, [S(81)])).GetProperty("note").ValueKind);
         Assert.Equal(JsonValueKind.Null, J(TuningTools.CurveShift(Curve(2_925_000), Curve(2_925_000), 80, [S(66)])).GetProperty("note").ValueKind);
         Assert.Null(TuningTools.CurveShift(Curve(2_925_000), null, 80, []));
         Assert.Null(TuningTools.CurveShift(Curve(2_925_000), Curve(2_925_000), null, []));

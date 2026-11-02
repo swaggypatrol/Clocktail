@@ -268,6 +268,22 @@ public sealed class Card : IDisposable
         }
     }
 
+    /// <summary>The client clock limits in force (nvidia-smi -lgc, Afterburner's L, set_clock_lock); null when the record is
+    /// unreadable or not the confirmed layout, which is not the same as no lock.</summary>
+    public IReadOnlyList<Clocktail.Domain.Clocks.ClientLimit>? ClockLocks()
+    {
+        try { return WithDriver(Clocktail.Domain.Clocks.ClientLimitsLayout.Read); }
+        catch (Exception e) when (e is InvalidOperationException or InvalidDataException or NvApiException or DriverBusyException) { return null; }
+    }
+
+    /// <summary>Every clock domain's present clock from the driver's clock table (<see cref="AllClocksLayout"/> ids), kHz;
+    /// null when the table is unreadable.</summary>
+    public IReadOnlyDictionary<int, uint>? Clocks()
+    {
+        try { return WithDriver(PowerSplitReader.ReadClocks); }
+        catch (Exception e) when (e is InvalidOperationException or NvApiException or DriverBusyException) { return null; }
+    }
+
     /// <summary>Any other read of the driver, in the same lane as every read above (a read that writes nothing needs no
     /// broker and no elevation, as the CLI's reads do). What <paramref name="f"/> throws reaches the caller.</summary>
     public T WithDriver<T>(Func<NvClient, GpuSession, T> f)
@@ -277,12 +293,17 @@ public sealed class Card : IDisposable
 
     /// <summary>A broker op for this GPU, with the refusal code and whether the card can have changed
     /// (<see cref="WriteOutcome"/>; null for the ops that only read). A service that cannot be reached wrote nothing; one
-    /// that stops answering after the request went out may have.</summary>
-    public BrokerAnswer Broker(string op, string? kind = null, string? value = null)
+    /// that stops answering after the request went out may have. <paramref name="key"/>: the request's
+    /// <see cref="BrokerRequest.Key"/> (for an experiment "crash", the trial the run measured).</summary>
+    public BrokerAnswer Broker(string op, string? kind = null, string? value = null, string? key = null)
     {
         bool reads = op is BrokerRequest.OpPing or BrokerRequest.OpOwnership || kind is "show" or "saved" or "preview" or "preview-adopt" or "alive" or "quiet";
         BrokerResponse? r;
-        try { var request = new BrokerRequest(op, StableId, Kind: kind, Value: value); r = _brokerOverride != null ? _brokerOverride(request) : BrokerClient.TryCall(request); }
+        try
+        {
+            var request = new BrokerRequest(op, StableId, Kind: kind, Key: key, Value: value);
+            r = _brokerOverride != null ? _brokerOverride(request) : BrokerClient.TryCall(request);
+        }
         catch (Exception e) when (e is IOException or InvalidDataException or ObjectDisposedException or TimeoutException)
         {
             return new(false, null, $"the Clocktail service stopped answering after the request was sent ({e.Message}); {WriteOutcome.ReadFirst}",

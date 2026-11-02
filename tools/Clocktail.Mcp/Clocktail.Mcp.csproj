@@ -18,12 +18,24 @@
     <EmbeddedResource Include="Manual\*.md" LogicalName="manual.%(Filename).md" />
   </ItemGroup>
 
+  <!-- Two builds: net10.0 for the tests (they run on Linux too), net10.0-windows for the released server, which adds the
+       V/F curve editor window (curve_editor, WinForms). release.sh publishes the windows one. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;net10.0-windows</TargetFrameworks>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>clocktail-mcp</AssemblyName>
   </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+  <!-- WinForms' implicit usings would make Timer and friends ambiguous in the rest of the server: the window names its own. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows'">
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
 
 </Project>

@@ -58,7 +58,7 @@ public class GameRecoveryTests
         spec.Validate();
         foreach (var bad in new[]
         {
-            spec with { MaxTempC = 89 }, spec with { Seconds = 0 }, spec with { Seconds = 14401 },
+            spec with { Seconds = 0 }, spec with { Seconds = 14401 },
             spec with { WindowPct = 89 }, spec with { MaxScale = 201 }, spec with { GraceSeconds = -1 },
             spec with { Patterns = [] }, spec with { Patterns = ["unknown"] }, spec with { Levers = ["unknown"] },
             spec with { Pci = "invalid" }, spec with { SessionAt = null },

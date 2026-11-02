@@ -1,97 +1,68 @@
 # Every control
-What each write tool changes on the card, how far one call goes, what it is for, what it interacts with, and how to combine them.
+Controls use the current RTX 50 GPU's reported capabilities; there is no supplied tuning profile.
 
-## How every write works
-- Every change except the daily wall is a **trial** inside a session: `begin_session` first (a trial without one is refused). Each trial ends as stable (`mark_stable`), survived (replaced by the next one, or `back_to_daily`) or crash, and becomes a data point.
-- The service does the write, reads it back and records the value it found (the ownership journal), so `back_to_daily`, `end_session`, a crash and `stock` can always put back what Clocktail wrote. What `stock` clears of another tool's is not recorded anywhere.
-- Every tool takes any value within NVIDIA's own limits for the card (1150 mV, the board's power range, the driver's and the firmware's offset ranges) and refuses what passes them; there is no step per call and no cap of Clocktail's own (0.4.1). A refusal says why: explain the limit, never work around it. Small steps are still the method: a big one that fails says little about where the edge is.
-- `keep_as_daily` keeps what the trials left on the card, not just the last step; `preview_daily` shows exactly what it would keep. Walls, current limits, the F8 request, fixed fan duties and clock locks other than a cap are never kept. With `adopt=true` it also keeps what another tool left and Clocktail never wrote (the curve, the P0 and XBAR/SYS/Video offsets, the voltage demands, the boost).
-- `stock` gives back what Clocktail wrote, then writes NVIDIA's own value to every setting another tool left (no clock lock, every curve and clock offset and voltage demand 0, no boost, the board's default wall, fans on their curve) and keeps no record of the other tool's value. The rails, the firmware fan curve and the clock ratio have no known default and go back to what Clocktail found. The uninstall gives back only what Clocktail changed.
-- `keep_as_daily`, `load_preset`, `set_daily_power_limit`, `set_power_cap`, `delete_profile`, and `stock` when it would clear another tool's settings, ask the person themselves, in the chat: the first call changes nothing and answers with code `confirm_in_chat`, the question and a confirm code; put the question to them word for word, and only after their yes call again with the same arguments and `confirm` set to the code (good once, for that question, for 10 minutes). `CLOCKTAIL_CONFIRM=form` asks in an MCP form or else a Windows dialog instead, `off` never asks. Without a yes nothing changes.
-- `card_settings` shows each control now, stock and daily; its `controls` section says, for this card and driver, which ones can be written and why not.
+## Write and recovery model
+Read this GPU's settings first and obtain explicit consent. A trial is read back and recorded through the broker.
+Unknown layouts, changed GPU identity, conflicting operations and readback errors are reported rather than guessed around.
+The daily profile contains only settings the user explicitly chose to keep for this GPU. With no daily profile, trial cleanup returns Clocktail-owned changes to their recorded baseline.
+`preview_daily` shows what will be retained and what remains temporary; `keep_as_daily` asks before saving it. Another utility's settings require explicit adoption or explicit clearing.
+There are no stock clock, voltage, power, fan or offset values to copy from a bundled preset.
 
-## The core clock: the V/F curve
-The firmware climbs the curve until a limit stops it (`manual blackwell`). Every point is a voltage and a clock; what you change is the clock offset at each voltage.
-- `adjust_curve deltaMhz [fromMv toMv]`: the points in a voltage window, any step (the method's is 15 MHz). The default window is around where the card runs under load (20 mV under to 10 mV over); an idle card needs `fromMv`/`toMv`. The tool for mapping the boundary one band at a time.
-- `flatten_curve fromMv [marginMhz | ceilingMhz]`: every point from that voltage up at most the clock there. Only lowers. The flat top, in one call, at idle.
-- `set_curve curve`: every point's offset at once, in `card_settings`' encoding (kHz, runs `offset*count`, '0*127' is stock). For a curve worked out on paper, or one a data point recorded. At idle.
-- `shift_curve mv`: the curve on the card moved left by `mv` (25 mV at a time held on the reference card; 250 mV at 600 W bugchecked it), from the knee up: each point runs the clock the curve ran `mv` higher. The same clocks at less voltage, so under a wall more clock. It is a raise at every voltage: test it like one.
-- `set_core_offset mhz`: the core's P0 offset, the same MHz on every point (anywhere in the driver's range). The points' offsets and this share one firmware budget. The broker preserves the existing shape, repairs native P0 side effects when needed, and verifies the effective shift. Use it only when the whole curve should move by the same amount; the edge differs by voltage, so mapping is the curve's job.
-- `adjust_clock_domain core vdemandDeltaMv`: the core's voltage demand, every point's voltage moved by the same mV (-25..+50): the same curve at more voltage (margin) or at less (an undervolt of the whole curve). `card_settings` reads it back as `vf_curve.voltage_demand_mv`; on the reference card only that readback was measured, not what it does under load.
-- Shared rules: any curve within the driver's offset range and budget, which the broker holds; points under NVVDD's VMIN (800 mV on a 5090: the card runs no point under it) are never touched by `adjust_curve` or `flatten_curve`; a whole curve written while the GPU is over 15 % busy is written, with a warning (two of three hangs on 2026-10-18 began with a curve written under full load: write at idle); the curve lands on a 7.5 MHz grid.
+## Trial controls
+| Tool | Changes | Kept by keep_as_daily |
+|---|---|---|
+| `adjust_curve` | V/F offsets in a voltage band | yes |
+| `flatten_curve` | Lower a flat top from the selected voltage | yes |
+| `set_curve` | Whole per-point V/F curve | yes |
+| `shift_curve` | Move the current curve left by the selected mV | yes |
+| `set_core_offset` | Core P0 offset with verified effective curve shift | yes |
+| `set_memory_offset` | Memory P0 offset with verified effective curve preservation | yes |
+| `adjust_xbar` | Independent XBAR clock offset and voltage demand | yes |
+| `adjust_clock_domain` | Available domain offsets/demands; core demand only | yes |
+| `set_clock_ratio` | Driver-exposed propagation ratio | yes |
+| `set_voltage_boost` | Driver-exposed boost percentage | yes |
+| `set_clock_lock` | Cap, floor, point lock or Boost Lock | cap only |
+| `set_fan_curve` | Editable firmware fan curves | yes |
+| `set_fan_start` | Editable fan stop/start bands | yes |
+| `set_fan_speed` | Temporary fixed fan duty or auto | no |
+| `set_power_limit` | Ordinary board power request for a trial | no; use set_daily_power_limit separately |
+| `set_current_limit` | Temporary rail current limit | no |
+| `set_power_cap` | Additional board power request (F8) | no |
 
-## The rails' limits: the voltage boost
-- `set_voltage_boost percent`: the driver's voltage boost (0..100 %): every rail's REL limit +5 mV per 25 % (100 % adds the 20 mV between REL and ALT/OP: NVVDD 1095 → 1115, MSVDD 1045 → 1065 mV on the reference card, driver 621.01, 2026-10-23). A curve cut flat under NVVDD's MAX never reaches the higher NVVDD limit, so there it acts on MSVDD alone, XBAR's ceiling: at the daily XBAR +400 / +50 mV, 100 % made the L2 test 1.0-1.3 % faster, the core unchanged. Every rail's MAX stays under the 1150 mV ceiling or the write is put back.
-- NVVDD's and MSVDD's own offsets (REL, ALT, OV, VMIN) have no tool since 0.3.5: driver 621.01 takes them and changes nothing. `card_settings` still reads them.
+## Curves and offsets
+Point count, offset budget, regulator step and available voltage points come from the current driver layout.
+Core and memory P0 writes can change V/F point controls. The broker preserves the curve shape through a core shift and preserves effective frequencies through a memory change. It repairs mismatches and verifies the effective readback. A daily core offset without an explicit curve requests a uniform effective shift.
+`flatten_curve` only lowers by definition. `shift_curve` changes clocks for a requested voltage shift, rather than programming a universal undervolt recipe.
+A memory offset's units are those of the driver interface; preserve units when comparing it with telemetry.
 
-## Holding the clock in place: clock locks
-- `set_clock_lock`: the driver's client clock-limit record, the one `nvidia-smi -lgc`, a V/F point lock and Boost Lock use. `maxMhz` caps the core, `minMhz` holds it at least there, `lockMv` pins it to the V/F point at that voltage, `boostLock` holds the curve's top even at idle. 0 (or false) releases one; a point lock and a range cannot be in force together.
-- What it is for: test one point exactly (`lockMv` + `stress_test` at light load, which otherwise lands where its power puts it), or keep a run in one band while the wall would move it (`minMhz`/`maxMhz`). The light-load boundary in `manual stability` was measured this way.
-- A lock changes what every later measurement means: `limiter`'s `perf_limits` names it (CLIENT_LOW_STRICT_GPC_MAX/MIN on the reference card). Release it (`lockMv 0`, or `maxMhz 0 minMhz 0`) before mapping the curve.
-- **Only a cap is ever kept.** A floor, a point lock and Boost Lock are trial-only, like a current limit: `keep_as_daily`, `back_to_daily`, `end_session`, a crash and the agent going away all release them, because any of them would hold the card at a high clock or voltage at idle after every boot (mVolt+ never keeps one either). A cap (`maxMhz`) only ever lowers, so `keep_as_daily` keeps it: release one set only for a test (`maxMhz 0`) before keeping, or the test clock becomes the daily ceiling.
-- `card_report` flags a lock another tool left on the card (they outlive the tool that set them).
+## Clock locks
+`set_clock_lock` writes the client limit record that nvidia-smi locked clocks and Afterburner's L also use (NVAPI's partner "Client" interface, stable across architectures). A cap, floor, point lock or Boost Lock is a request, not a hard P-state lock: the driver still lowers the clock for power, temperature and voltage, and XBAR, SYS and Video are not held with the core. A lock outlives the program that set it; `card_settings` and `gpu_status` show any in force. `stress_test`, `watch` and `live_read` report `clock_locks` against the clock that actually ran; the live watch reports one entry per period a lock was in force.
+
+## Clock domains and voltage
+Topology identifies available domains and their rails. Clock offset, voltage demand, propagation ratio and boost are independent requests, not mandatory pairings.
+NVIDIA decides which values and combinations it accepts; readback verifies the result.
+Domain offsets, demands and the ratio go through private driver layouts that change with GPU architecture; a layout that is not the confirmed one is refused, not guessed. `gpu_status` and the measurement tools report XBAR, SYS and Video clocks so a change to one domain can be checked against the others.
+Boost percentages do not imply a fixed mV change across models. Low-level rail offsets may be ignored by a driver; reporting that is different from imposing a tuning ceiling.
 
 ## Power
-- `set_power_limit watts`: the board power request (FE) for the session, 400-600 W on a 5090. A lower wall runs heavy load lower down the curve: the way to reach the knee and the middle band. Never kept.
-- `set_daily_power_limit watts`: the daily wall (ask first). The firmware's own board limit (`card_settings` `power.firmware_w`) must match it; the service checks every time it puts the profile on and writes the request again if not (`manual troubleshooting`).
-- `set_current_limit rail amps`: a rail's current limit (OCP). Closed-loop: current holds 1-2 % under it, no trip. A lowered NVVDD limit reaches points below what 400 W does (350 A ~2145 MHz at 850 mV on the reference card). Raising it above the VBIOS default (600 A NVVDD, 180 A MSVDD) is allowed up to the driver's maximum, changes nothing on a 5090 (the 600 W wall binds near 430 A) and `card_report` marks it ⚠️. Never kept.
-- `set_power_cap watts`: the second board request (F8), ask first. The lower of FE and F8 holds. It does not exist until the first call creates it and cannot be deleted: after the trial it goes back to the board's maximum (600 W, limiting nothing) until the next boot. On a 5090 FE it does nothing `set_power_limit` cannot: use it only when the person asks for it. Never kept.
+`set_power_limit` moves the ordinary request (FE); `set_power_cap` moves the additional request (F8), where available: the lower of FE and F8 holds.
+FE here is the request identifier, not a board-edition requirement.
+Use this board's reported minimum, maximum and stock power. An additional request can persist until restart even after trial cleanup returns it to a non-limiting value.
+`set_daily_power_limit` separately asks to create/update the user's persistent wall. No daily power limit is supplied by Clocktail.
+Current limits use each rail's reported range; useful values depend on the workload and active limiter.
 
-## The uncore: MSVDD, XBAR, SYS, Video
-MSVDD feeds the crossbar (XBAR), L2, SYS and Video; it runs at what the core asks for minus its REL offset (-50 mV stock on a 5090), down to its VMIN floor. Its ceiling moves only with `set_voltage_boost` now. Details and measurements: `manual xbar-msvdd`.
-- `adjust_xbar offsetDeltaMhz vdemandDeltaMv`: XBAR's clock offset (the driver's range) and its voltage demand on MSVDD (-25..+50 mV). Above +250 the demand must be +20 mV, above +300 +50 mV (the cliff).
-- `set_clock_ratio ratio`: the ceiling XBAR's offset runs into. Under load XBAR is held to the core clock x this ratio (0.8999 stock), which is why the offset stops paying past +250. 0.5..1.0. A higher ratio asks MSVDD for more voltage, so the demand rules apply to the clock XBAR then reaches.
-- `adjust_clock_domain sys|video offsetDeltaMhz vdemandDeltaMv`: SYS (falls as XBAR's offset rises) and Video (NVENC/NVDEC, which games do not use). SYS +150 back at XBAR +300 changed nothing in Blender. Judge either by its own clock (`gpu_status`, `stress_test`'s `sys_mhz`) and a benchmark that uses it.
+## Cooling
+Read the actual fan channels, editable policies and their ranges. No universal duty floor, stock curve, full-speed temperature or zero-RPM band is assumed.
+The firmware curve uses three encoded temperature/duty/RPM points. An omitted RPM is resolved against this policy's own pairing, not another board's curve.
+Fixed fan duty is temporary. The service does not watch the temperature and take it back; it goes back with the trial (back_to_daily, end_session, a crash) and when the agent goes quiet.
+A zero-RPM band (`set_fan_start`) is checked for being one: stop under start, both within 0..120 °C. Where it sits is the user's choice.
 
-## Memory
-- `set_memory_offset mhz`: the GDDR7 P0 offset (the driver's range, -1000..+3000 on a 5090; NVML shows it doubled). A P0 write can change the curve's controls; the broker preserves and verifies the effective core curve, repairing the controls when needed. Judge by a benchmark as well as `stress_test` (exit code 6 is a data error): past its edge memory retries errors and gets slower before it crashes. Watch `memory_c`. `manual memory`.
+## Measurements and jobs
+`stress_test` and `lab_test` judge current settings; `watch` and live tools observe real workloads.
+`tune_memory` and `tune_uncore` use search parameters and measurements, not predefined daily targets. Explicit candidates are not filtered by another card's voltage/clock advice.
+`game_test` is optional local Quake II RTX automation. Jobs are followed with `lab_status` and stopped with `lab_stop`.
+By default `stress_test` and `lab_test` stop only when the card comes within 2 °C of NVIDIA's slowdown point; with a `maxTempC` they also stop there. `game_test` stops only at a `maxTempC` it is given, and the background sweeps (`tune_memory`, `tune_uncore`) make no thermal stop. NVIDIA's own protection stays active throughout.
 
-- `tune_uncore [xbarMaxMhz seconds candidates]`: the uncore tuner. From the settings on the card, one axis at a time: XBAR's offset in 50 MHz steps, each with the demand `adjust_xbar`'s rule asks for (more where a step hits the cliff), then the clock ratio in 0.025 steps to 0.95, then the voltage boost in 25 % steps to 100 % (MSVDD's ceiling), then the ratio and the boost a step each together, in rounds: an axis runs again when another has moved the best since it last ran (XBAR's clock sits between the ratio's floor and the ceiling MSVDD's reliability limit sets, so each can hold the others). Each candidate is a trial compared A B B A against the best so far: kept only when the L2 test (a 32 MiB region walked over and over, the crossbar XBAR clocks) is faster in both pairs and by 0.5 % or more, DRAM bandwidth does not fall and the memory phase's core does not fall 1 % (5 % is the cliff, which gets more demand). An axis stops at a failure or two misses in a row. The best is measured once more against the daily settings and named only if its L2 gain holds there and DRAM does not fall more than 2 %. About 1 min 45 s a comparison at 20 s runs; it keeps nothing. `candidates='400/50/0.9/100;400/50/0.925/100'` (XBAR MHz/demand mV/ratio/boost %) compares a list, each against the settings on the card, instead of the search.
-- `game_test [minutes patterns gpu windowPct maxScale seed maxTempC]`: Quake II RTX played unattended by a seeded script (`manual stability`, the game test); it runs in the background like the sweeps (`lab_status`, `lab_stop`). It writes only its levers, each a trial with the curve recorded and not written: `power` the wall (never above the one in force at its start, never under the board's lowest), `fans` a fixed duty (100 %, then 50 % until ~76 °C) and back to the curve, `boost` Boost Lock and its release. It begins on the trial in force (or the daily profile) and puts it back at the end; a failure is the trial's crash. Interacts: a trial's own wall is the start, so a lower trial wall moves the whole test lower down the curve; `begin_session unattended=true` stops its levers after the crash budget.
-- `tune_memory toMhz [stepMhz fromMhz seconds]`: the memory sweep (ST02), each step a trial the lab measures; it runs in the background and stops where the memory fails or gets slower and stays slower (two steps in a row; one slower step is watched); `trend=true` goes on to the end and only a failure stops it. One lab job runs on a card at a time; `lab_stop job=...` ends a particular one, and a job counts as running while its process does (its alive.json), not by how fresh its status is. It covers the driver's whole range and may start anywhere in it: a fine sweep is `fromMhz`/`toMhz` 90 MHz either side of a best, `stepMhz` 30. `lab_status` follows it, `lab_stop` ends it. It keeps nothing. `manual memory`.
-
-## Fans
-- `set_fan_curve`: the firmware fan curve, three points `degC:duty%`; the last must be 100 % at 88 C or lower. It sets the temperature the curve is tested at: set it before the curve (`manual method`, phase 2).
-- `set_fan_start startC [stopC]`: the zero-RPM band (fans stop under 43 C and start at 50 C on a 5090 FE). Only earlier: a start no later than the curve's first point, stop at least 3 C under the start. A card with stopped fans warms itself at idle until the start temperature; a lower one keeps it cooler.
-- `set_fan_speed percent|auto`: every fan at a fixed duty for a test (30-100 %). Never kept. The service gives the fans back to the curve by itself at 85 C, or when the agent goes away.
-
-## What each tool changes, and what is kept
-| Tool | Changes | One call | Kept by keep_as_daily |
-|---|---|---|---|
-| `adjust_curve` | the V/F curve in a voltage window | any | yes |
-| `flatten_curve` | the curve flat from a voltage up (only lowers) | any, down | yes |
-| `set_curve` | the whole curve, every point's offset | any | yes |
-| `shift_curve` | the curve on the card moved left by N mV (from the knee up) | any | yes |
-| `set_core_offset` | the core P0 offset: every point at once (effective shift verified, existing shape preserved) | any | yes |
-| `set_fan_curve` | the firmware fan curve | any | yes |
-| `set_fan_start` | the temperature the stopped fans start at (and stop under) | any, earlier only | yes |
-| `set_memory_offset` | the memory offset (effective core curve preserved and verified) | any | yes |
-| `adjust_xbar` | XBAR's clock offset and voltage demand | any | yes |
-| `adjust_clock_domain` | SYS's or Video's clock offset and voltage demand; the core's voltage demand | any | yes |
-| `set_clock_ratio` | XBAR's clock ratio to the core | any | yes |
-| `set_voltage_boost` | the voltage boost: every rail's REL limit, +5 mV per 25 % | 25 % | yes |
-| `set_clock_lock` | a clock cap, a clock floor, a V/F point lock or Boost Lock | any | the cap only; a floor, point lock or Boost Lock never |
-| `set_power_limit` | the wall, for the session (to reach other points) | 400-600 W | no: `set_daily_power_limit` sets the daily wall |
-| `set_power_cap` | the F8 power request, for the session (ask first: it cannot be deleted) | 400-600 W | never |
-| `set_current_limit` | a rail's current limit, for the session | up to the driver's max | never |
-| `set_fan_speed` | a fixed fan duty, for the session | 30-100 % | never |
-
-`keep_as_daily` keeps everything a trial set, not just the last change. Call `back_to_daily` first if only some of it should stay. The daily profile writes them in a fixed order (power, fans, P0 offsets, rails, the rest, voltage demands, XBAR/SYS/Video offsets, the curve last), because native P0 writes can change the curve controls. A saved core target without an explicit curve restores a uniform effective shift; memory preserves that result. Generated curve offsets are owned with their captured original, and application leaves the saved profile unchanged.
-
-## Combining them
-- **Map a band of the curve at full load**: `set_power_limit` (or `set_current_limit nvvdd` below 400 W) to put full load there, warm up, then `adjust_curve +15` with `fromMv`/`toMv` around the voltage it ran at, `stress_test load=100`, `mark_stable`, repeat. After each raise, loosen the wall a little until the clock reaches the point's new frequency, or the run only shows the same clock at a lower voltage (`manual tuning`).
-- **Test one clock exactly**: `set_clock_lock minMhz=<MHz> maxMhz=<MHz>` and `stress_test load=40`: the card runs that clock at the voltage the curve gives it, wherever the load's power would have put it. Raise the lock 15 MHz per pass (or the curve there, which tests the same clock at less voltage); `lockMv` pins a point by its voltage instead. Release both with 0 when done: the floor goes by itself at the end of the trial, the cap would be kept.
-- **Write the daily curve worked out from the boundary**: `set_curve` with the whole curve at idle (or `adjust_curve` down in bands), then `flatten_curve` where the chip stopped scaling; `stress_test` at load 100 and 50, then games, then `keep_as_daily` (ask).
-- **Undervolt (the same clocks for less power)**: `shift_curve 25` at a time, tested like a raise; under a wall it turns into clock. To keep the clocks and only lower the voltage, `adjust_clock_domain core` with a negative demand, tested the same way.
-- **The uncore, in order**: `set_voltage_boost` up to 100 % (MSVDD's ceiling +20 mV), `adjust_xbar` demand +20 mV, offset +50 at a time to +250..+300 and on to +400 / +50 mV, then `set_clock_ratio` up 0.025 at a time if XBAR still sits at 0.9 x the core. Judge each by a benchmark, A B B A (`manual method`). `tune_uncore` does this search by itself; set what it finds by hand, test it, keep it (ask).
-- **A quiet profile**: `set_daily_power_limit` lower (ask) and a gentler `set_fan_curve`; the curve stays, since a lower wall only moves the card down it. `save_profile` it under a name.
-- **Read before and after every step**: `gpu_status` for one look, `limiter` for what holds the clock (and `perf_limits` for the driver's own ceilings), `card_settings` for what is set.
-
-## What the newer controls did on the reference card
-5090 FE, driver 617.42, 2026-10-21; each written at idle, read back exactly and put back by `back_to_daily`:
-- `set_clock_lock`: Boost Lock held 3052 MHz in P0 at idle; a 2000 MHz cap held 1980 MHz at full load; a 900 mV point lock held 2775 MHz at 890 mV at load 50. A lock changes what a stress run measures: release it before mapping the curve.
-- `set_clock_ratio`: stock 0.8999. At 0.92 XBAR ran 2595 MHz against a 2850 MHz core (0.911) at the 600 W wall, against 2535 / 2865 (0.885) at stock; MSVDD rose 980 → 1005 mV and the core gave 15 MHz back. Its gain in frames is not measured.
-- `adjust_clock_domain` core: +5 mV read back as the curve's `voltage_demand_mv` +5.
-- `set_power_cap`: the lower of FE and F8 holds (F8 500 W under FE 600 W held the board at 500 W), so F8 at the board maximum limits nothing. NVML's enforced limit in `gpu_status` shows a change a few seconds late.
-- `set_current_limit` 650 A on NVVDD (above the 600 A default) and `set_voltage_boost` 1 % landed and changed nothing visible at idle (the boost moves in 5 mV steps: 25 % raised every rail's REL limit 5 mV, 2026-10-23).
-- `set_fan_start`: 38:45 landed on the two curve policies only; the firmware's backstop policies were left alone.
+## User profiles
+`list_presets` and `load_preset` retain their API names for compatibility, but only user-saved profiles are available; the built-in list is empty.
+`save_profile`, `delete_profile`, `load_daily`, `back_to_daily` and `stock` manage the user's own settings and recorded baseline. A missing profile is not replaced by a starter preset.

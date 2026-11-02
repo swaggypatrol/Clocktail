@@ -33,23 +33,25 @@ public sealed partial class TuningTools
 
     /// <summary>One measurement's hold on the card (<see cref="HoldCard"/>): judge.lock, given back when disposed. Trial: the
     /// settings of the trial in force once the card was quiet (<see cref="TrialSettings"/>; null for none), the one the run
-    /// measures; Known: the service could be asked then (one that could not be reached says nothing about it).</summary>
-    private sealed class CardHold(string path, string runId, string? trial, bool known) : IDisposable
+    /// measures; TrialId: that trial's identity (<see cref="TrialId"/>; null for none, or from a service that gives none);
+    /// Known: the service could be asked then (one that could not be reached says nothing about it).</summary>
+    private sealed class CardHold(string path, string runId, string? trial, string? trialId, bool known) : IDisposable
     {
         public string? Trial => trial;
+        public string? TrialId => trialId;
         public bool Known => known;
         public void Dispose() => JudgeLock.Release(path, runId);
     }
 
     /// <summary>
-    /// The card to one measurement (stress_test, lab_test): judge.lock taken, so no write but the run's own (and the fan
-    /// guard's, BrokerDispatcher.SafetyLease) lands from here, then the service asked to finish what it is in the middle of
+    /// The card to one measurement (stress_test, lab_test): judge.lock taken, so no write but the run's own lands from
+    /// here, then the service asked to finish what it is in the middle of
     /// (<see cref="Quiet"/>; the lock says the run waits so, JudgeLock.Info.Waits, so that operation finishes rather than
     /// stop part-way), and the trial in force then, to hold the result to. Until 0.3.7 stress_test took no lock at
     /// all, so another agent could change the card under it and its pass or crash went to whatever trial was in force at
     /// the end; lab_test took the lock but could start in the middle of a write. On a service from before 0.3.7 a run that
-    /// held no lock then (<paramref name="olderToo"/> false: stress_test) still holds none: that service's fan guard cannot
-    /// pass the lock, and an agent blocked in the run cannot watch the temperature.
+    /// held no lock then (<paramref name="olderToo"/> false: stress_test) still holds none: that service's fan guard (removed in
+    /// 0.6.0) could not pass the lock, and an agent blocked in the run cannot watch the temperature.
     /// </summary>
     private CardHold HoldCard(string label, bool olderToo)
     {
@@ -61,7 +63,7 @@ public sealed partial class TuningTools
         {
             var quiet = Quiet(k => card.Broker(BrokerRequest.OpExperiment, k), QuietTries, Thread.Sleep, out bool older);
             if (older && !olderToo) JudgeLock.Release(lockPath, runId);
-            return new CardHold(lockPath, runId, TrialSettings(quiet), quiet.Code != BrokerCode.BrokerUnreachable);
+            return new CardHold(lockPath, runId, TrialSettings(quiet), TrialId(quiet), quiet.Code != BrokerCode.BrokerUnreachable);
         }
         catch { JudgeLock.Release(lockPath, runId); throw; }
     }
@@ -74,57 +76,48 @@ public sealed partial class TuningTools
     /// with other settings now is not blamed. The crash's data point is on record even when the daily profile could not go
     /// back on yet (the card held busy): true then too, so nobody records it again.
     /// </summary>
-    private bool RecordCrash(CardHold hold, int? resets, string what)
+    private bool RecordCrash(CardHold hold, int? resets, string what) =>
+        RecordCrash((kind, value, key) => card.Broker(BrokerRequest.OpExperiment, kind, value, key), hold.Trial, hold.TrialId, hold.Known, resets, what, Thread.Sleep);
+
+    /// <summary>
+    /// <see cref="RecordCrash(CardHold, int?, string)"/> over the service's experiment op (<paramref name="experiment"/>: kind,
+    /// value, key). With the measured trial's identity (<paramref name="measuredId"/>) the crash goes in one request that
+    /// names it, and the service refuses it when another trial is in force: the run gave judge.lock back before this, so a
+    /// look and then a record in two requests could blame a trial written in between. Without one (a service that gives
+    /// trials none) the trial in force must have the measured settings (<see cref="TrialSettings"/>) and no identity.
+    /// </summary>
+    public static bool RecordCrash(Func<string, string?, string?, BrokerAnswer> experiment, string? measured, string? measuredId, bool known,
+        int? resets, string what, Action<TimeSpan> sleep)
     {
-        if (hold.Known && hold.Trial == null) return false;
-        if (resets > 0 && TrialClosedWithin(() => TrialInForce(card.Broker(BrokerRequest.OpExperiment, "show")), ServiceRecordsWithin, Thread.Sleep))
+        if (known && measured == null) return false;
+        if (resets > 0 && TrialClosedWithin(() => TrialInForce(experiment("show", null, null)), ServiceRecordsWithin, sleep))
             return true;
-        if (TrialSettings(card.Broker(BrokerRequest.OpExperiment, "show")) is not { } now || hold.Known && now != hold.Trial) return false;
-        var c = card.Broker(BrokerRequest.OpExperiment, "crash", what);
+        if (measuredId == null)
+        {
+            var show = experiment("show", null, null);
+            if (TrialSettings(show) is not { } now || known && (now != measured || TrialId(show) != null)) return false;
+        }
+        var c = experiment("crash", what, measuredId);
         return c.Ok || c.Result is { } res && res.TryGetProperty("point", out var p) && p.ValueKind == JsonValueKind.Object;
     }
 
     [McpServerTool(Name = "lab_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Run the lab on what is on the card now: StabilityLab's load engine (CUDA, kernels the driver compiles, no toolkit), " +
-        "every result checked bit for bit on the CPU, as stress_test runs nvgwls. Phases, split evenly over the seconds: burn " +
-        "(every thread on an FMA chain: steady power; targetW steers it to that board power), light (one thread in lightDiv, " +
-        "so few SMs draw current and the card climbs to its curve's top: 2910 MHz at ~410 W on the reference card at stock), " +
-        "pulse (one short full launch per game-like frame at 30-120 fps: the load step at the top of the curve), memory (fill " +
-        "and verify the whole buffer in five access orders: linear, 64 KiB and 128 KiB strides, block-xor, permute; bandwidth " +
-        "and spread per order), latency (a pointer chase: ns per DRAM round trip), solo (the integer soloist from Etude: the " +
-        "INT8 tensor core, the 64-bit integer MAC and dp4a over a quiet fp32 line, the paths that fail first, each judged on its " +
-        "own lane by every block against the others, a wrong one named by SM and pipe; played on a moving window of the SMs, " +
-        "the share fitted to ~85 % of the power limit so the clock stays on the curve's point instead of the limiter's; its " +
-        "blocks time their own clock, and unless it held the point (held: the SMs' clock within 7 % of NVML's, off the wall, " +
-        "every SM meant to play running) the run is inconclusive, not a pass: the judge for the top of the curve; to test one " +
-        "point, pin it first with set_clock_lock), leap (the soloist on the whole chip for 1.5 s, then on a quarter of it for " +
-        "1.5 s, over and over: the whole chip holds the board on its wall and the clock in the middle of the curve, the quarter " +
-        "lets go and the driver lifts the clock to the curve's top within a quarter of a second, as when a game's heavy scene " +
-        "turns light; judged per pipe, a hang is its failure, and unless the clock leapt in half the cycles (held: the light half " +
-        "90 MHz or more over the heavy half) it is inconclusive. It judges the soloist's pipes through the jump, not a game: " +
-        "on the reference card a curve that hung two games six times in that jump passed it 80 jumps in a row, so the games " +
-        "failed in work the soloist does not play; games stay the top's last judge). Any wrong bit, wrong lane, wrong chain end or dead " +
-        "context fails it; while a trial is in force the failure is recorded as its crash and the daily profile goes back on. " +
-        "Memory runs are kept per memory offset and compared with the last at the same offset and buffer: a drop is the " +
-        "memory retrying (ST02). It says when other work shared the GPU (over 4 GiB of others' video memory, over half busy " +
-        "before the load or over 10 % just after it, with the clocks still up: a local AI model, a game, a screen saver " +
-        "drawing): then its speeds are not the card's alone. Blocks for the run's length.")]
+        "Run bit-checked core, memory, latency and cache-oriented lab workloads on current settings. Available phases include burn, light, pulse, solo and leap. Verify the intended operating point actually ran; interrupted/shared or inconclusive measurements do not establish stability. It stops within 2 °C of NVIDIA's slowdown point, and at maxTempC when one is given.")]
     public string LabTest(
         [Description("Phases, comma-separated: burn, light, pulse, solo (the top of the curve, judged per pipe; give it 60 s or more of its own), leap (the jump from the middle of the curve to its top that games make; 60 s or more of its own), memory, latency, l2 (the crossbar: a 32 MiB region walked over and over). Default burn,pulse,light,memory,latency.")] string phases = "burn,pulse,light,memory,latency",
         [Description("Run length in seconds, 10..600 (default 60), split evenly between the phases.")] int seconds = 60,
         [Description("Steer burn to this board power, W (default: no steering, every thread).")] double? targetW = null,
         [Description("Light: one thread in this many (default 64: 64 SMs busy).")] int lightDiv = 64,
         [Description("What this run is meant to show, for the log.")] string? note = null,
-        [Description("Stop the run if the GPU reaches this temperature, °C (default 85, at most 88).")] int? maxTempC = null) => Guard(() =>
+        [Description("Also stop the run if the GPU reaches this temperature, °C. Omitted: it stops only within 2 °C of NVIDIA's slowdown point.")] int? maxTempC = null) => Guard(() =>
     {
         string exe = LabExe() ?? throw new InvalidOperationException("clocktail-lab.exe is not beside this server: run npx -y clocktail@latest setup");
         var list = phases.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(p => p.ToLowerInvariant()).ToList();
         if (list.Count == 0 || list.Any(p => !LabPhases.Contains(p))) throw new ArgumentException($"phases are {string.Join(", ", LabPhases)}");
         if (seconds < 10 || seconds > MaxLabSeconds) throw new ArgumentException($"seconds is 10..{MaxLabSeconds}");
         if (lightDiv is < 2 or > 4096) throw new ArgumentException("lightDiv is 2..4096");
-        if (targetW is { } tw && tw is < 100 or > 700) throw new ArgumentException("targetW is 100..700 W");
-        int maxC = maxTempC ?? StressMaxC;
-        if (maxC is < 50 or > StressMaxCeilingC) throw new ArgumentException($"maxTempC is 50..{StressMaxCeilingC}");
+        if (targetW is { } tw && (!double.IsFinite(tw) || tw <= 0)) throw new ArgumentException("targetW must be positive and finite");
+        int? maxC = MaxTemp(maxTempC);
 
         string dir = Path.Combine(Path.GetTempPath(), "clocktail-lab");
         Directory.CreateDirectory(dir);
@@ -134,13 +127,15 @@ public sealed partial class TuningTools
                                   "--gpu-pci", card.PciBusId, "--light-div", lightDiv.ToString(CultureInfo.InvariantCulture) })
             psi.ArgumentList.Add(a);
         if (targetW is { } w) { psi.ArgumentList.Add("--target-w"); psi.ArgumentList.Add(w.ToString(CultureInfo.InvariantCulture)); }
-        psi.ArgumentList.Add("--max-temp-c"); psi.ArgumentList.Add(maxC.ToString(CultureInfo.InvariantCulture));   // the lab's own guard, besides this one
+        // The person's limit goes to the lab too, which stops on it by itself; the margin stop is watched from here.
+        if (maxC is { } mc) { psi.ArgumentList.Add("--max-temp-c"); psi.ArgumentList.Add(mc.ToString(CultureInfo.InvariantCulture)); }
 
         var samples = new List<Card.Sample>();
         int hotRun = 0;
         double? stopC = null;
+        string? hotWhy = null;
         int grace = (OperatingSystem.IsWindows() ? Clocktail.Domain.Platform.TdrSettings.Read() : null)?.StressGraceS ?? 30;
-        int? code = null;
+        int? code = null, memoryOffset = null;
         bool hot = false, hung = false;
         using var children = OperatingSystem.IsWindows() ? new KillOnCloseJob() : null;
         Process? p = null;
@@ -168,11 +163,13 @@ public sealed partial class TuningTools
                     hotRun = Nvgwls.TooHot(s.Telemetry?.TemperatureC, s.Telemetry?.TempMarginC, maxC) ? hotRun + 1 : 0;
                 }
                 catch (DriverBusyException) { }
-                if (hotRun >= 2) { hot = true; stopC = samples[^1].Telemetry?.TemperatureC; }
+                if (hotRun >= 2) { hot = true; stopC = samples[^1].Telemetry?.TemperatureC; hotWhy = Nvgwls.HotWhy(stopC, maxC); }
                 if (DateTime.UtcNow > deadline) hung = true;
                 if (hot || hung) break;
             }
             if (!hot && !hung) code = p.ExitCode;
+            // Read while the card is still held, so the memory history files the run under the offset it measured.
+            if (code != null && list.Contains("memory")) memoryOffset = MemoryOffsetMhz();
         }
         finally
         {
@@ -195,13 +192,21 @@ public sealed partial class TuningTools
         double? busyAfter = lab is { } l7 && l7.TryGetProperty("busy_after_pct", out var ba) && ba.ValueKind == JsonValueKind.Number ? ba.GetDouble() : null;
         bool shared = lab is { } l8 && l8.TryGetProperty("shared", out var sh) && sh.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? sh.GetBoolean() : others > 4096 || busy > 50 || busyAfter > 10;
+        // The lab stops itself at the person's maxTempC (it samples every 100 ms, this loop every 500 ms, so it is usually
+        // first): the same thermal stop as one seen here, not an inconclusive run with nothing to do next.
+        if (!hot && !hung && LabStoppedHot(lab, out double? labC))
+        {
+            hot = true;
+            stopC = labC ?? samples.LastOrDefault()?.Telemetry?.TemperatureC;
+            hotWhy = Nvgwls.HotWhy(stopC, maxC);
+        }
         // The card's failure is a bad bit, a dead context or a driver reset; a lab that hung with no reset (a GPU hang brings
         // one within the TDR delay), crashed or wrote nothing is the runner's, and says nothing about the setting.
         bool failed = resets > 0 || labVerdict == "fail";
         bool runner = !failed && !hot && (hung || code is not (0 or 4 or 5) || labVerdict == "none");
         string verdict = resets > 0 ? $"driver reset ({resets}) during the run"
             : hung ? $"the lab did not finish within {seconds + grace + 30} s and no driver reset followed: the run's fault, not the card's"
-            : hot ? string.Create(CultureInfo.InvariantCulture, $"thermal stop at {stopC:0} °C (maxTempC {maxC}): stopped by lab_test, not a pass or a crash")
+            : hot ? string.Create(CultureInfo.InvariantCulture, $"thermal stop at {stopC:0} °C ({hotWhy}): stopped by lab_test, not a pass or a crash")
             : labVerdict == "none" ? $"the lab ended without a result (exit code {code})"
             : labVerdict;
 
@@ -214,11 +219,14 @@ public sealed partial class TuningTools
         }
         double? mv = P50(held.Select(s => s.NvvddUv / 1000.0)), mhz = P50(held.Select(s => (double?)s.Telemetry?.GraphicsClockMhz));
         int? pointIndex = mv is { } m && Nearest(before.Curve, (uint)(m * 1000)) is { } pt ? pt.Index : null;
+        double? xbarMhz = P50(held.Select(s => s.Mhz(Clocktail.Domain.Power.AllClocksLayout.Xbar)));
 
-        // ST02: each memory run is kept by memory offset and buffer, and compared with the last one like it.
+        // ST02: each memory run that passed clean is kept by its setup (SameMemorySetup), and compared with the last one like it.
         object? memoryVsLast = null;
-        if (lab is { } r && !failed && !shared && Phase(r, "memory") is { } mem)
-            memoryVsLast = KeepMemoryRun(mem, Phase(r, "latency"), r.TryGetProperty("buffer_mib", out var bm) ? bm.GetInt64() : 0);
+        if (lab is { } r && Phase(r, "memory") is { } mem)
+            memoryVsLast = KeepsMemoryRun(labVerdict, failed, shared, hot, hung)
+                ? KeepMemoryRun(mem, Phase(r, "latency"), r.TryGetProperty("buffer_mib", out var bm) ? bm.GetInt64() : 0, memoryOffset, xbarMhz)
+                : new { kept = false, note = "not kept or compared: only a run that passed, whole and with the GPU to itself, is a reference for later runs" };
 
         bool trial = hold.Trial != null;   // in force when the run began: the trial it measured
         string summary = string.Create(CultureInfo.InvariantCulture,
@@ -243,7 +251,7 @@ public sealed partial class TuningTools
                 board_w = P50(held.Select(s => s.Telemetry?.PowerWatts)),
                 temp_max_c = held.Max(s => s.Telemetry?.TemperatureC),
                 memory_c = P50(held.Select(s => s.MemoryC)),
-                xbar_mhz = P50(held.Select(s => s.Mhz(Clocktail.Domain.Power.AllClocksLayout.Xbar))),
+                xbar_mhz = xbarMhz,
             },
             memory_vs_last = memoryVsLast,
             trial_in_force = trial,
@@ -265,17 +273,66 @@ public sealed partial class TuningTools
     private static double? Num(JsonElement? e, string name) =>
         e is { } o && o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : null;
 
-    /// <summary>Appends this memory run to the card's lab/memory.jsonl and compares it with the last one at the same memory
-    /// offset, buffer and P-state: bandwidth or latency moving the wrong way at the same setting is the memory retrying, or a
-    /// hotter card (the temperatures are beside it).</summary>
-    private object? KeepMemoryRun(JsonElement mem, JsonElement? lat, long bufferMib)
+    /// <summary>The memory offset on the card, MHz (P0's), or null when the driver could not be read.</summary>
+    private int? MemoryOffsetMhz()
     {
-        int? offset = null;
-        try { offset = card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Memory)?.DeltaKhz / 1000; } catch (Exception e) when (e is InvalidOperationException or DriverBusyException) { }
+        try { return card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Memory)?.DeltaKhz / 1000; }
+        catch (Exception e) when (e is InvalidOperationException or DriverBusyException) { return null; }
+    }
+
+    /// <summary>Whether lab_test keeps a run's memory phase as the reference later runs are compared with: only a run that
+    /// passed, and was not cut short (too hot, hung), failed or shared. In 0.8.1 an inconclusive run was kept too, a memory
+    /// phase the lab had stopped at the temperature limit among them, and the next run at the offset was compared with its
+    /// part of a minute.</summary>
+    public static bool KeepsMemoryRun(string labVerdict, bool failed, bool shared, bool hot, bool hung) =>
+        labVerdict == "pass" && !failed && !shared && !hot && !hung;
+
+    /// <summary>Whether the lab stopped the run itself at the temperature limit (its JSON's interrupted is "temperature"), and
+    /// the hottest its phases saw (temp_max; null when none says).</summary>
+    public static bool LabStoppedHot(JsonElement? lab, out double? atC)
+    {
+        atC = null;
+        if (lab is not { ValueKind: JsonValueKind.Object } l || !l.TryGetProperty("interrupted", out var i)
+            || i.ValueKind != JsonValueKind.String || i.GetString() != "temperature") return false;
+        if (l.TryGetProperty("phases", out var ps) && ps.ValueKind == JsonValueKind.Array)
+            atC = ps.EnumerateArray().Select(p => Num(p, "temp_max")).Max();
+        return true;
+    }
+
+    /// <summary>The share of the crossbar clock two memory runs may differ by and still compare (1 %). On the reference card
+    /// XBAR +250 moved bandwidth 1455 → 1474 GB/s, over the ~1 % the comparison reads as slower.</summary>
+    public const double XbarSameShare = 0.01;
+
+    /// <summary>Whether a kept memory run (<paramref name="was"/>, a memory.jsonl line) was measured on the setup this one
+    /// (<paramref name="now"/>) was, so their speeds compare: the same memory offset, buffer, P-state and driver, and a crossbar
+    /// clock within <see cref="XbarSameShare"/> (both unknown counts as the same). A line kept by 0.8.1 or before has no
+    /// driver or crossbar clock and matches nothing.</summary>
+    public static bool SameMemorySetup(JsonObject was, JsonObject now)
+    {
+        static double? N(JsonNode? n) => n is JsonValue v && v.GetValueKind() == JsonValueKind.Number
+            ? double.Parse(v.ToJsonString(), CultureInfo.InvariantCulture) : null;
+        static string? S(JsonNode? n) => n is JsonValue v && v.GetValueKind() == JsonValueKind.String ? v.GetValue<string>() : null;
+        if (N(was["driver"]) is not { } d || d != N(now["driver"])) return false;
+        if (N(was["offset_mhz"]) != N(now["offset_mhz"]) || N(was["buffer_mib"]) != N(now["buffer_mib"]) || S(was["pstate"]) != S(now["pstate"])) return false;
+        return (N(was["xbar_mhz"]), N(now["xbar_mhz"])) switch
+        {
+            (null, null) => true,
+            ({ } a, { } b) => Math.Abs(a - b) <= XbarSameShare * Math.Max(a, b),
+            _ => false,
+        };
+    }
+
+    /// <summary>Appends this memory run to the card's lab/memory.jsonl and compares it with the last one on the same setup
+    /// (<see cref="SameMemorySetup"/>): bandwidth or latency moving the wrong way on the same setup is the memory slower there,
+    /// from error retries or a hotter card (the temperatures are beside it). <paramref name="offsetMhz"/>: the memory offset
+    /// read while the run held the card; <paramref name="xbarMhz"/>: the crossbar clock's P50 over the run.</summary>
+    private object? KeepMemoryRun(JsonElement mem, JsonElement? lat, long bufferMib, int? offsetMhz, double? xbarMhz)
+    {
         var entry = new JsonObject
         {
-            ["at"] = DateTimeOffset.Now, ["offset_mhz"] = offset, ["buffer_mib"] = bufferMib,
+            ["at"] = DateTimeOffset.Now, ["offset_mhz"] = offsetMhz, ["buffer_mib"] = bufferMib,
             ["pstate"] = mem.TryGetProperty("p_state", out var ps) ? ps.GetString() : null,
+            ["xbar_mhz"] = xbarMhz, ["driver"] = card.DriverVersion,
             ["mem_mhz"] = Num(mem, "mem_mhz_p50"), ["gbps"] = Num(mem, "gbps"), ["latency_ns"] = Num(lat, "latency_ns"), ["temp_c"] = Num(mem, "temp_p50"),
             ["patterns"] = mem.TryGetProperty("patterns", out var pat) ? JsonNode.Parse(pat.GetRawText()) : null,
         };
@@ -284,10 +341,10 @@ public sealed partial class TuningTools
         JsonObject? last = null;
         if (File.Exists(path))
             foreach (var line in File.ReadLines(path).Reverse())
-                if (JsonNode.Parse(line) is JsonObject o && (int?)o["offset_mhz"] == offset && (long?)o["buffer_mib"] == bufferMib && (string?)o["pstate"] == (string?)entry["pstate"])
+                if (JsonNode.Parse(line) is JsonObject o && SameMemorySetup(o, entry))
                 { last = o; break; }
         File.AppendAllText(path, entry.ToJsonString() + "\n");
-        if (last == null) return new { first = true, note = "the first memory run kept at this offset, buffer and P-state: later runs are compared with it" };
+        if (last == null) return new { first = true, note = "the first memory run kept at this memory offset, buffer, P-state, crossbar clock and driver: later runs on the same are compared with it" };
         static double? Pct(double? now, double? was) => now is { } n && was is > 0 ? Math.Round((n / was.Value - 1) * 100, 2) : null;
         return new
         {
@@ -295,32 +352,16 @@ public sealed partial class TuningTools
             gbps = (double?)entry["gbps"], gbps_last = (double?)last["gbps"], gbps_change_pct = Pct((double?)entry["gbps"], (double?)last["gbps"]),
             latency_ns = (double?)entry["latency_ns"], latency_last = (double?)last["latency_ns"], latency_change_pct = Pct((double?)entry["latency_ns"], (double?)last["latency_ns"]),
             temp_c = (double?)entry["temp_c"], temp_last = (double?)last["temp_c"],
-            note = "same offset, buffer and P-state: bandwidth down or latency up by more than ~1 % is the memory retrying (or a hotter card)",
+            note = "same memory offset, buffer, P-state, crossbar clock and driver: bandwidth down or latency up by more than ~1 % means the memory got slower here, from error retries or a hotter card (the temperatures are beside it)",
         };
     }
 
     [McpServerTool(Name = "tune_memory", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Start ST02's memory sweep, which runs by itself in the background (minutes to an hour; it carries on when the agent " +
-        "goes away): from the daily memory offset (or fromMhz) up to toMhz in stepMhz steps, each a trial through the service, " +
-        "each measured by the lab for `seconds` at one fixed buffer: bit errors, bandwidth in five access orders, latency. " +
-        "GDDR7 hides its errors by retrying them, so past its edge the memory gets slower before it fails: a step stops the " +
-        "sweep when it fails (a bad bit, a driver reset: the service records it), or when it gets slower and stays slower: " +
-        "bandwidth 0.5 % under the best step twice in a row, or latency 1 % over the lowest and rising again after a step that " +
-        "rose too. One slower step is only watched: the memory changes its timings at some clocks (latency jumped 17 ns at " +
-        "+958 on the reference card, then fell with the clock again) and one run can be noise. The best offset is the step " +
-        "before the slowdown began; " +
-        "the daily profile goes back on at the end, nothing is kept. CUDA work alone ran in P1 on the reference card (Boost Lock " +
-        "did not change that) and the memory offset is a P0 offset, so each step checks NVML's memory clock rose with the " +
-        "offset: if it did not, the sweep stops and says the offset was not in force. Needs an open session " +
-        "(begin_session) with no trial in force, and an otherwise idle GPU (close games and local AI models; a run another " +
-        "program shared, a screen saver drawing too, is measured again every 30 s for up to 10 minutes). Follow it with " +
-        "lab_status; lab_stop ends it. It covers the driver's whole range (the reference card ran error-free to +3000, bandwidth " +
-        "flat past +1758, latency falling all the way). A fine sweep around a best found before: fromMhz and toMhz 90 MHz either " +
-        "side, stepMhz 30, seconds 60, trend true. Tell the person first: it raises the memory past what has been tested.")]
+        "Run a background memory-offset sweep over a user-selected range, using this GPU's reported offsets and current curve. Each candidate is measured through a trial; correctness and sustained performance guide the search. Search increments are not recommended daily settings. Follow with lab_status, stop with lab_stop; nothing is kept automatically.")]
     public string TuneMemory(
-        [Description("The highest memory offset to try, MHz (up to the driver's limit, +3000 on a 5090).")] int toMhz,
+        [Description("The highest memory offset to try, MHz, within this GPU's reported range.")] int toMhz,
         [Description("MHz per step, 25..100 (default 50).")] int stepMhz = 50,
-        [Description("The first offset, MHz (default the daily one on the card; anywhere in the driver's range, so a fine sweep can start 90 MHz under a best found before).")] int? fromMhz = null,
+        [Description("The first offset, MHz (default: the offset currently on this GPU, within its reported range).")] int? fromMhz = null,
         [Description("Seconds the lab measures each step, 30..300 (default 60).")] int seconds = 60,
         [Description("true: a slower step does not stop the sweep, only a failure does, so it shows the whole trend of " +
             "bandwidth and latency up to toMhz; the best is still the step before the first slowdown that lasted.")] bool trend = false) => Guard(() =>
@@ -433,7 +474,10 @@ public sealed partial class TuningTools
             if (p.Length != 4 || !int.TryParse(p[0], NumberStyles.Integer, inv, out var x) || !int.TryParse(p[1], NumberStyles.Integer, inv, out var d)
                 || !double.TryParse(p[2], NumberStyles.Float, inv, out var r) || !int.TryParse(p[3], NumberStyles.Integer, inv, out var b))
                 throw new ArgumentException($"'{c}' is not XBAR MHz/demand mV/ratio/boost %");
-            if (r is < 0.5 or > 1.0) throw new ArgumentException($"'{c}': the ratio is 0.5..1.0");
+            if (!double.IsFinite(r) || Math.Round(r * 65536) is < ClockRatio.MinRaw or > uint.MaxValue)
+                throw new ArgumentException($"'{c}': the ratio must be above 0 and fit U16.16");
+            if ((long)x * 1000 is < int.MinValue or > int.MaxValue || (long)d * 1000 is < int.MinValue or > int.MaxValue)
+                throw new ArgumentException($"'{c}': clock and demand must fit signed driver fields");
             if (b is < 0 or > (int)VoltBoost.MaxPercent) throw new ArgumentException($"'{c}': the boost is 0..{VoltBoost.MaxPercent} %");
             list.Add(new { xbar_mhz = x, demand_mv = d, ratio_raw = (uint)Math.Round(r * 65536), boost_pct = b });
         }
@@ -442,34 +486,13 @@ public sealed partial class TuningTools
     }
 
     [McpServerTool(Name = "tune_uncore", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Start the uncore tuner, which runs by itself in the background (about 1 min 45 s a comparison at 20 s runs, 18 minutes on the reference card; it carries on when the agent goes " +
-        "away where its host allows): from the settings on the card, one axis at a time, one step at a time, each candidate " +
-        "a trial through the service compared A B B A against the best so far by the lab: L2 bandwidth (a 32 MiB region walked " +
-        "over and over: the crossbar XBAR clocks), DRAM bandwidth, and the memory phase's core clock. A candidate is kept only " +
-        "when L2 bandwidth rose in both pairs and by 0.5 % or more, DRAM bandwidth did not fall and the core did not fall 1 % " +
-        "(5 % is the cliff: MSVDD at its floor pins it near 1610 MHz); runs of one setting more than 2 % apart were disturbed " +
-        "(other work, or the card still settling), so that comparison is measured again, and twice ends the search. Axes in " +
-        "order: XBAR's offset, each step with the demand " +
-        "adjust_xbar's rule asks for (above +250 MHz +20 mV, above +300 +50 mV; more where a step still hits the cliff), the " +
-        "XBAR/core clock ratio (its 0.9 x core floor), the voltage boost in 25 % steps (every rail's REL limit +5 mV a step, so " +
-        "MSVDD's reliability limit, XBAR's ceiling: MSVDD's own offsets cannot be set since driver 621.01), then the ratio and the " +
-        "boost a step each together (XBAR's window up as a whole: on the reference card neither alone moved it), " +
-        "in rounds: an axis runs again when another has moved the best since. An axis stops at a " +
-        "failure (recorded as its trial's crash) or two candidates in a row that are not faster. The best is measured once more " +
-        "against the daily settings at the end (stage confirm) and named only if its L2 gain holds there (a core or DRAM cost " +
-        "the steps add up to is told with it); a search that ends early names nothing. The daily profile goes back " +
-        "on at the end; nothing is kept: lab_status names the best setting to try. Needs an open session (begin_session) with " +
-        "no trial in force, and the GPU to itself (a run another program shared, a screen saver drawing too, is measured again " +
-        "every 30 s for up to 10 minutes). On the reference card on driver 621.01 (MSVDD at stock) XBAR +400 / +50 mV at ratio " +
-        "0.9 made the L2 test about 10 % faster than stock, and this search found XBAR +500 / +50 mV, ratio 0.95, boost 100 % " +
-        "7.1 % faster again, DRAM 4.5 % (manual xbar-msvdd); games not measured. Tell the person first: it raises voltages and " +
-        "clocks past their daily ones.")]
+        "Run a background search or explicit candidate comparisons for available XBAR offset, voltage demand, ratio and boost controls. Start from current settings, not a supplied profile. Search bounds are algorithm parameters, not a tuning envelope. A B B A comparisons assess cache/DRAM speed and core cost; explicit candidates have no mandatory MHz/mV pairing. Restore the user's daily profile or baseline and keep nothing automatically.")]
     public string TuneUncore(
-        [Description("The highest XBAR offset to try, MHz (default 500; the driver allows 1000; past +400 is unmeasured).")] int xbarMaxMhz = 500,
+        [Description("The highest XBAR offset the search should try, MHz (algorithm default 500, bounded by this GPU's reported range; not a recommended daily offset).")] int xbarMaxMhz = 500,
         [Description("Seconds the lab measures each run, 15..60 (default 20; a comparison is four runs).")] int seconds = 20,
         [Description("Settings to compare instead of the search, each A B B A against the settings on the card: " +
             "'XBAR MHz/demand mV/ratio/boost %' separated by ';', e.g. '400/50/0.9/100;400/50/0.925/100'. One outside the " +
-            "limits or the cliff rule is skipped; at most 30.")] string? candidates = null) => Guard(() =>
+            "driver field encoding is refused; no reference-card cliff rule is enforced; at most 30.")] string? candidates = null) => Guard(() =>
     {
         if (seconds is < 15 or > 60) throw new ArgumentException("seconds is 15..60");
         var list = Candidates(candidates);
@@ -477,7 +500,7 @@ public sealed partial class TuningTools
         var (exe, look) = JobPreflight();
         var (xbarKhz, demandUv) = SettingsTools.Domain(card, ClockDomainId.Xbar);
         var (_, xbarTop) = OffsetRange(ClockDomainId.Xbar);
-        int xbarMax = Math.Min(xbarMaxMhz, Math.Min(xbarTop, MaxXbarMhz));
+        int xbarMax = Math.Min(xbarMaxMhz, xbarTop);
         if (list == null && xbarMax <= xbarKhz / 1000) throw new ArgumentException($"xbarMaxMhz must be above the XBAR offset on the card ({xbarKhz / 1000} MHz)");
         uint ratioRaw = card.WithDriver(ClockRatio.Read).Raw;
         // The boost on the path the card takes (set_voltage_boost's): the legacy byte on a 5090, whose NVVDD is kind 3.
@@ -488,8 +511,7 @@ public sealed partial class TuningTools
         var (job, dir, detached) = StartJob(exe, "uncore", "tune-uncore", new
         {
             stable_id = card.StableId, pci = card.PciBusId, curve = VfOffsets.Encode(look.Curve.Offsets()), start,
-            xbar_max_mhz = xbarMax, xbar_step_mhz = 50, demand_max_mv = MaxVdemandMv, demand_step_mv = 10,
-            cliff_mhz = XbarCliffMhz, cliff_demand_mv = XbarCliffDemandMv, high_mhz = XbarHighMhz, high_demand_mv = XbarHighDemandMv,
+            xbar_max_mhz = xbarMax, xbar_step_mhz = 50, demand_max_mv = 50, demand_step_mv = 10,
             ratio_max = 0.95, ratio_step = 0.025, boost_max_pct = (int)VoltBoost.MaxPercent, boost_step_pct = 25,
             seconds, warmup_seconds = 60, grace_seconds = 45, boost_key = path == BoostPath.Independent ? "independent" : "legacy", candidates = list,
         });

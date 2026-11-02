@@ -19,7 +19,8 @@ public sealed class LiveTools(LiveWatch live)
         "once with the log's path. In Claude Code, follow the log with the Monitor tool (the command is in 'follow') and comment as " +
         "lines arrive; any agent can call live_read whenever the person talks. Every sample also goes to a CSV beside the log. Each " +
         "line under load ends with the game's frame rate over those seconds (average, 1 % and 0.1 % lows), from the service's " +
-        "PresentMon capture (nothing injected into the game); the summary has the whole run's. Ends " +
+        "PresentMon capture (nothing injected into the game); the summary has the whole run's under load. A clock lock set, changed or " +
+        "released mid-watch is checked per period. Ends " +
         "on live_stop, after 6 h, or when the server stops. Use watch instead for one fixed stretch you wait for.")]
     public string Start(
         [Description("A line every this many seconds under load (2..120; default 10).")] int everySeconds = 10,
@@ -31,7 +32,7 @@ public sealed class LiveTools(LiveWatch live)
     [McpServerTool(Name = "live_read", ReadOnly = true, OpenWorld = false), Description(
         "The live watch's lines since the last live_read (the newest 'max' of them), and the run so far: time under load, " +
         "p10/p50/p90 clock, the curve points it spent most time on, how much of it sat on the wall, max temperature and power, " +
-        "and what held the clock how often. After a crash or a stutter, tailSeconds returns every sample of the last seconds " +
+        "what held the clock how often, each clock lock period against what ran, and how often the card stopped answering or looked hung. After a crash or a stutter, tailSeconds returns every sample of the last seconds " +
         "(up to 30). Works after live_stop too, for the last run.")]
     public string Read(
         [Description("At most this many new lines (default 30; the rest stay in the log).")] int max = 30,

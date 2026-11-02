@@ -13,7 +13,8 @@ public class CliParsingTests
         Assert.Throws<ArgumentException>(() => VfCommands.Undervolt("7,5"));    // was 75 mV
         Assert.Throws<ArgumentException>(() => VfCommands.Undervolt("1,00"));
         Assert.Throws<ArgumentException>(() => VfCommands.Undervolt("-5"));
-        Assert.Throws<ArgumentException>(() => VfCommands.Undervolt("101"));
+        Assert.Equal(250_000, VfCommands.Undervolt("250"));                    // no depth cap: the firmware's range bounds the curve
+        Assert.Throws<ArgumentException>(() => VfCommands.Undervolt("3000000"));   // not a number of µV an int holds
     }
 
     [Fact]

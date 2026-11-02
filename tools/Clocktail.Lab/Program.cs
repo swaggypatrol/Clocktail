@@ -38,7 +38,7 @@ try
         case "run":
         {
             var phases = LabConfig.Parse(O("phases") ?? "burn", D("seconds", 60));
-            var cfg = new LabConfig(phases, TargetW: D("target-w", 0), LightDiv: (int)D("light-div", 64), MaxTempC: D("max-temp-c", 85));
+            var cfg = new LabConfig(phases, TargetW: D("target-w", 0), LightDiv: (int)D("light-div", 64), MaxTempC: D("max-temp-c", double.PositiveInfinity));
             using var cu = CudaApi.Load();
             int ordinal = Ordinal(cu, O("gpu-pci"));
             using var sampler = new NvmlSampler(cu.DevicePciBusId(cu.Device(ordinal)));

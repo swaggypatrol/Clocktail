@@ -11,6 +11,7 @@ namespace Clocktail.Tests.Mcp;
 /// an overclocking program running is said, the lite tool set is real, and the person's own yes is asked for the changes
 /// that stay.
 /// </summary>
+[Collection("Consent codes")]
 public class NotStockTests
 {
     private static List<(string Name, string Mark, string Note)> Rows(string settings) =>
@@ -149,7 +150,6 @@ public class NotStockTests
         Assert.Contains(Consent.Variable + "=chat", await Consent.Ask("form", null, _ => null, what, default));   // nobody to ask
 
         Assert.Contains("Windows dialog", await Consent.Ask("dialog", Form(true), _ => false, what, default));  // dialog only
-        Assert.Null(await Consent.Ask("off", Form(false), _ => false, what, default));         // the person opted out
         Assert.Contains("stopped waiting", await Consent.Ask("form", null, _ => true, what, new CancellationToken(canceled: true)));
     }
 
@@ -163,6 +163,8 @@ public class NotStockTests
             Assert.Equal("chat", Consent.Mode);
             Environment.SetEnvironmentVariable(Consent.Variable, "auto");
             Assert.Equal("form", Consent.Mode);
+            Environment.SetEnvironmentVariable(Consent.Variable, "off");
+            Assert.Equal("chat", Consent.Mode); // Explicit approval cannot be disabled.
         }
         finally { Environment.SetEnvironmentVariable(Consent.Variable, old); }
     }

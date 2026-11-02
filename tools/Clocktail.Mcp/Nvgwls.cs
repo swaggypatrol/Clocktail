@@ -52,9 +52,19 @@ public static class Nvgwls
     /// <summary>A failure of the card, not of the run: what counts against the settings under test.</summary>
     public static bool Failed(int? code) => code is null or 3 or 4 or 5 or 6;
 
-    /// <summary>stress_test's own stop: the run was ended because the card got too hot (two samples in a row at or above
-    /// the limit, or within 2 °C of the driver's slowdown point). Neither a pass nor a failure of the settings.</summary>
-    public static bool TooHot(double? tempC, int? marginC, double maxC) => tempC >= maxC || marginC <= 2;
+    /// <summary>How close to NVIDIA's own slowdown point (NVML's temperature margin) a run may go: the one thermal stop
+    /// stress_test and lab_test make by default.</summary>
+    public const int MarginStopC = 2;
+
+    /// <summary>stress_test's and lab_test's stop (two samples in a row): within <see cref="MarginStopC"/> °C of the
+    /// driver's slowdown point, or at the person's <paramref name="maxC"/> when they gave one. Neither a pass nor a failure
+    /// of the settings. Nothing read is not a reason to stop.</summary>
+    public static bool TooHot(double? tempC, int? marginC, int? maxC) => maxC is { } m && tempC >= m || marginC <= MarginStopC;
+
+    /// <summary>Why a run that stopped hot stopped, in words: the person's maxTempC, or the margin to the slowdown point.</summary>
+    public static string HotWhy(double? tempC, int? maxC) => maxC is { } m && tempC >= m
+        ? $"at the maxTempC of {m} °C asked for"
+        : $"within {MarginStopC} °C of NVIDIA's slowdown point";
 
     /// <summary>The verdict with the System log's word on it. A driver reset during the run is the card's failure whatever
     /// the exit code: every hang measured on the reference card was a driver reset (nvlddmkm 153) followed by exit code 2,
@@ -87,10 +97,11 @@ public static class Nvgwls
     }
 
     /// <summary>Runs it hidden and calls <paramref name="sample"/> every 500 ms until it exits or overruns. A sample that
-    /// answers true stops the run (its process tree is ended) and sets <paramref name="stopped"/>; the code is then null.</summary>
-    public static int? Run(string exe, int load, int seconds, Func<bool> sample, out bool stopped, int graceS = 30)
+    /// answers true stops the run and sets <paramref name="stopped"/>; the code is then null. <paramref name="exited"/> is
+    /// false only when nvgwls was still running <see cref="ChildProcess.ExitWait"/> after being stopped: its load may
+    /// still be on the card.</summary>
+    public static int? Run(string exe, int load, int seconds, Func<bool> sample, out bool stopped, out bool exited, int graceS = 30)
     {
-        stopped = false;
         var dir = Path.Combine(Path.GetTempPath(), "clocktail-stress");
         Directory.CreateDirectory(dir);
         var psi = new ProcessStartInfo(exe)
@@ -101,22 +112,44 @@ public static class Nvgwls
         };
         foreach (var a in new[] { "-b", "500", "-r", (seconds * 1000).ToString(System.Globalization.CultureInfo.InvariantCulture), "-l", load.ToString(System.Globalization.CultureInfo.InvariantCulture) })
             psi.ArgumentList.Add(a);
-        using var p = Process.Start(psi) ?? throw new InvalidOperationException("nvgwls did not start");
-        var deadline = DateTime.UtcNow.AddSeconds(seconds + graceS);
-        while (!p.WaitForExit(500))
+        return Run(psi, seconds, sample, out stopped, out exited, graceS);
+    }
+
+    /// <summary>
+    /// <see cref="Run(string, int, int, Func{bool}, out bool, out bool, int)"/> for any process: the exit code, or null when
+    /// <paramref name="sample"/> stopped it or it overran <paramref name="seconds"/> + <paramref name="graceS"/>. Every way
+    /// out, a sampling error too, ends its process tree and waits for it, and while it runs it sits in a kill-on-close job,
+    /// so it never outlives this server either: nothing after the run (the card given back, a crash record putting the
+    /// daily profile back) starts under its load. A sampling error that leaves it running says so in its message.
+    /// <paramref name="started"/> sees the process once it is in the job.
+    /// </summary>
+    public static int? Run(ProcessStartInfo psi, int seconds, Func<bool> sample, out bool stopped, out bool exited, int graceS = 30,
+                           Action<Process>? started = null)
+    {
+        stopped = false;
+        string name = Path.GetFileNameWithoutExtension(psi.FileName);
+        using var children = OperatingSystem.IsWindows() ? new KillOnCloseJob() : null;
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException($"{name} did not start");
+        if (OperatingSystem.IsWindows()) children?.Add(p);
+        int? code = null;
+        try
         {
-            if (sample())
+            started?.Invoke(p);
+            var deadline = DateTime.UtcNow.AddSeconds(seconds + graceS);
+            while (true)
             {
-                try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-                stopped = true;
-                return null;
-            }
-            if (DateTime.UtcNow > deadline)
-            {
-                try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-                return null;
+                if (p.WaitForExit(500)) { code = p.ExitCode; break; }
+                if (sample()) { stopped = true; break; }
+                if (DateTime.UtcNow > deadline) break;
             }
         }
-        return p.ExitCode;
+        catch (Exception e)
+        {
+            if (!ChildProcess.Stop(p))
+                throw new InvalidOperationException($"{e.Message} ({name} did not exit after being stopped: its load may still be running)", e);
+            throw;
+        }
+        exited = ChildProcess.Stop(p);
+        return code;
     }
 }

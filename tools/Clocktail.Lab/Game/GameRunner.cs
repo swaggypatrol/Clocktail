@@ -73,7 +73,7 @@ public sealed record StepResult(int Index, string Pattern, string Name, string K
 public sealed record GameTimings(
     double StartSeconds = 240, double LoadSeconds = 120, double HangAfterSeconds = 10, double ResetGraceSeconds = 45,
     double StallSeconds = 6, double NotInFrontMinutes = 10, double ToFrontEverySeconds = 15, double ResetCheckSeconds = 5,
-    int MaxTempC = 85, int NanStreak = 2, double WallFactor = 2.0, double TelemetryGraceSeconds = 10);
+    int? MaxTempC = null, int NanStreak = 2, double WallFactor = 2.0, double TelemetryGraceSeconds = 10);
 
 /// <summary>
 /// Plays a <see cref="GamePlan"/> on the game: levers, scene, settings and the play pattern's commands at each step's start,
@@ -321,8 +321,8 @@ public sealed class GameRunner(IGameWorld world, GameTimings? timings = null)
         if (world.TempC() is double c && double.IsFinite(c))
         {
             _temperatureMissingSince = null;
-            if (c >= _t.MaxTempC)
-                return Done(GameEnd.Unjudged, Inv($"thermal stop at {c:0} °C (maxTempC {_t.MaxTempC}): stopped by the test, not a pass or a crash"), step);
+            if (_t.MaxTempC is { } maxC && c >= maxC)
+                return Done(GameEnd.Unjudged, Inv($"thermal stop at {c:0} °C (the maxTempC of {maxC} °C asked for): stopped by the test, not a pass or a crash"), step);
         }
         else
         {

@@ -348,35 +348,35 @@ public class FanPolicyTests : IDisposable
     public void Requests_the_rules_refuse_never_reach_the_driver()
     {
         var hw = FanPolicyFixture.Install();
-        foreach (var bad in new[] { "50:20,50:60,86:100", "50:60,79:20,86:100", "50:20,79:60,86:101", "50:20,79:60,130:100", "50:20,79:60:3000,86:100:2875" })
+        foreach (var bad in new[] { "50:20,50:60,86:100", "50:60,79:20,86:100", "50:20,79:60,86:101", "50:20,79:60:3000,86:100:2875" })
         {
             var r = Write(hw, "0", bad);
             Assert.Equal(TxOutcome.Aborted, r.Tx.Outcome);
         }
         Assert.Equal(0, FakeDriver.Sets);
         Assert.Null(_journal.Load());
-        Assert.Contains("0..120 degC", Write(hw, "0", "50:20,79:60,130:100").Tx.Detail);
+        Assert.Equal(TxOutcome.Applied, Write(hw, "0", "50:20,79:60,130:100").Tx.Outcome);
     }
 
     [Fact]
-    public void A_named_rpm_under_the_duty_pairing_is_refused_whatever_the_duties_say()
+    public void Explicit_rpm_is_not_bounded_by_the_stock_duty_pairing()
     {
         var hw = FanPolicyFixture.Install();
         // Every duty passes the MCP's rules (100 % by 88 °C, none under 20 %); the firmware drives by the rpm column.
         foreach (var slow in new[] { "50:20:1100,79:60:1300,86:100:1500", "50:20:0,83:50:0,88:100:0", "50:20:1100,79:60:1995,86:100:2874" })
         {
             var r = Write(hw, "0", slow);
-            Assert.Equal(TxOutcome.Aborted, r.Tx.Outcome);
-            Assert.Contains("may only be faster", r.Tx.Detail);
+            Assert.Equal(TxOutcome.Applied, r.Tx.Outcome);
+            Assert.Equal(slow, r.After);
         }
-        Assert.Equal(0, FakeDriver.Sets);
-        Assert.Null(_journal.Load());
+        Assert.Equal(3, FakeDriver.Sets);
+        Assert.NotNull(_journal.Load());
 
         var faster = Write(hw, "0", "50:20:1200,79:60:2100,86:100:2875");   // at or above the pairing: written as named
         Assert.Equal(TxOutcome.Applied, faster.Tx.Outcome);
         Assert.Equal("50:20:1200,79:60:2100,86:100:2875", faster.After);
-        var founders = Write(hw, "1", "50:20:1100,79:60:1995,86:100:2875");  // the preset's own rpm are the pairing
-        Assert.Equal(TxOutcome.Applied, founders.Tx.Outcome);
+        var paired = Write(hw, "1", "50:20:1100,79:60:1995,86:100:2875");  // rpm named exactly at the pairing
+        Assert.Equal(TxOutcome.Applied, paired.Tx.Outcome);
     }
 
     [Fact]

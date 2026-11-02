@@ -135,8 +135,8 @@ public sealed class OwnedWriter(NvClient hw, OwnershipJournal journal, ApplySent
     /// The original this process owes for a cell, from the record it owns or adopts (an earlier run's record whose
     /// owner is gone), or null when the cell is not held. Refuses a record that is not this process's to use (a live
     /// owner, another GPU) before any sentinel exists, exactly as a write would. A caller planning a write asks this
-    /// first when its path judges a request against the origin as well as the current state (a rail slot may return to
-    /// where the hardware stood before this program touched it, even above the ceiling); the key is matched as the
+    /// first when its path treats a return to the origin apart from a request (a rail slot going back to where the
+    /// hardware stood before this program touched it is written exactly, never rounded); the key is matched as the
     /// paths parse it, ignoring case, because the journal holds the cell's canonical spelling.
     /// </summary>
     public string? AdoptedOriginal(string kind, string key)

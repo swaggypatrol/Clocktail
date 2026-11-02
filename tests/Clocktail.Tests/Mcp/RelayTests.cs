@@ -175,7 +175,7 @@ public class RelayTests
         Assert.DoesNotContain(Tools, t => t.ReadOnly && RelayCore.RecordOnly.Contains(t.Name!));
         Assert.Equal(Tools.Where(t => t.ReadOnly).Select(t => t.Name!).Order(StringComparer.Ordinal), RelayCore.Readers.Order(StringComparer.Ordinal));
         Assert.Equal([
-                "card_report", "card_settings", "curve_around", "data_points", "delete_profile", "diagnostic_report", "gpu_status", "lab_status",
+                "card_report", "card_settings", "curve_around", "curve_editor", "data_points", "delete_profile", "diagnostic_report", "gpu_status", "lab_status",
                 "limiter", "list_presets", "live_read", "live_start", "live_stop", "log_note", "manual", "mark_stable", "preview_daily", "read_log",
                 "save_profile", "watch",
             ], names.Where(n => !RelayCore.MayWriteCard(n)).Order(StringComparer.Ordinal));

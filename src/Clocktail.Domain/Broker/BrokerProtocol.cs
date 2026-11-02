@@ -25,7 +25,9 @@ public sealed record BrokerRequest(
     int Khz = 0,
     bool AllowCreate = false,
     bool TakeOver = false,
-    /// <summary>For <see cref="OpWrite"/> and <see cref="OpProve"/>: the cell's key within its kind.</summary>
+    /// <summary>For <see cref="OpWrite"/> and <see cref="OpProve"/>: the cell's key within its kind. For
+    /// <see cref="OpExperiment"/> "crash": the identity of the trial the run measured
+    /// (<see cref="Clocktail.Domain.Profiles.ExperimentTrial.Id"/>); the crash is refused when another trial is in force.</summary>
     string? Key = null,
     /// <summary>For <see cref="OpWrite"/>: the value in the cell's canonical encoding.</summary>
     string? Value = null,
@@ -86,15 +88,18 @@ public sealed record BrokerRequest(
     /// log; never a trial that crashed and is still on the card), but once a profile is kept only the Core curve is taken from the card: its power limit and memory offset
     /// stay as kept, and a trial's lowered wall goes back to the kept one at once; "adopt" keeps as "keep" does and also what another tool left on the
     /// card and Clocktail never wrote (the curve, the P0 and clock-domain offsets, the voltage demands, the boost; 0.4.0); "preview" and "preview-adopt"
-    /// say what "keep" (or a preset or saved profile, <see cref="Value"/>: its name) and "adopt" would make the profile, writing nothing; "off" suspends it and writes nothing; "stock" suspends it and gives back everything this broker holds in the same operation (its answer's "recover"): the card as Clocktail found it, the uninstall's;
+    /// say what "keep" (or a saved profile, <see cref="Value"/>: its name) and "adopt" would make the profile, writing nothing; "off" suspends it and writes nothing; "stock" suspends it and gives back everything this broker holds in the same operation (its answer's "recover"): the card as Clocktail found it, the uninstall's;
     /// "factory" does that and then writes every setting whose NVIDIA default is known (<see cref="Clocktail.Domain.FactoryStock"/>) and another tool left at another value to that default, letting go of it: the card at NVIDIA's own settings, the agent's stock (0.4.0); "apply" writes it unless suspended (<see cref="Value"/>: why, for the log); "load" ends a
-    /// suspension and writes it; "preset" makes a shipped preset or a saved profile (<see cref="Value"/>: its name) the profile and writes it; "save"
+    /// suspension and writes it; "preset" (the op's old name; nothing ships) makes a saved profile (<see cref="Value"/>: its name) the profile and writes it; "save"
     /// saves the profile under a name (<see cref="Value"/>), "saved" lists the saved ones, "forget" deletes one;
     /// "wall" sets the profile's power limit (<see cref="Value"/>: mW) and writes it unless suspended or a trial holds its own; "apply-power" writes only its power limit (none under a trial in force with a wall of its own, and nothing else of a trial in force: right after a driver reset, which puts the
     /// limit back to 575 W, without waiting for an idle GPU); "crashed" records a crash at once (the held cells already
     /// given back): the trial on the card when the GPU stopped answering (<see cref="HungAt"/>; without it, the trial in
-    /// force) made a data point, nothing written; the service's own (a client sending it is refused); "after-reset" then writes the profile back
-    /// unchanged once the GPU is idle, unless a trial written since is in force. Every one of
+    /// force) made a data point, nothing written; the service's own (a client sending it is refused); "crashed-held" records
+    /// it the same way while the give-back has not landed, the trial kept in force with the crash as its ending (the
+    /// service's own too); "after-reset" then writes the profile back
+    /// unchanged once the GPU is idle, unless a trial written since is in force; "start" is the service's "apply" at start,
+    /// which leaves alone a trial written since the service began. Every one of
     /// them that changes the card or the profile is an entry in the tuning log. Not itself a write: "apply" and "after-reset"
     /// send each write through <see cref="OpWrite"/>, which takes the window and every guard.
     /// </summary>
@@ -117,7 +122,9 @@ public sealed record BrokerRequest(
     public const string OpExperiment = "experiment";
 
     /// <summary>A game's frame rate: <see cref="Kind"/> "start" (<see cref="Value"/> is JSON {seconds, process?}) starts a
-    /// PresentMon capture into the GPU's fps folder and answers its path; "stop" ends it. Not a write: the card is untouched.</summary>
+    /// PresentMon capture into the GPU's fps folder and answers its path (a capture already running ends); "stop"
+    /// (<see cref="Value"/> JSON {path?}) ends the capture writing that path and leaves another one alone, and without a
+    /// path ends whatever runs. Not a write: the card is untouched.</summary>
     public const string OpFps = "fps";
 
     /// <summary>Operations that change the GPU: they take the write window, respect the stability-run lock, and need elevation.</summary>

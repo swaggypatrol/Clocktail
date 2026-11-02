@@ -96,23 +96,39 @@ public class ClockVdemandTests : IDisposable
     }
 
     [Fact]
-    public void Outside_the_standard_range_aborts_before_the_driver()
+    public void Outside_the_old_software_range_reaches_the_driver_and_reads_back()
     {
         ClockDomainsFixture.Seed();
-        foreach (int uv in new[] { 50_001, -25_001 })
+        foreach (int uv in new[] { 50_001, -25_001, ClockVdemand.MinUv, ClockVdemand.MaxUv })
+        {
+            var r = Apply(ClockDomainId.Xbar, uv);
+            Assert.Equal(TxOutcome.Applied, r.Tx.Outcome);
+            Assert.Equal(uv, Demand(1, 1));
+        }
+        Assert.Equal(TxOutcome.NoChange, Apply(ClockDomainId.Sys, 0).Tx.Outcome);
+        Assert.Equal(4, FakeDriver.Sets);
+        Assert.StartsWith("released", Apply(ClockDomainId.Xbar, 0).Ownership);
+        Assert.Empty(_journal.Load()?.Items ?? []);
+    }
+
+    /// <summary>A whole volt either way is a units slip (µV given as mV), refused before the driver; not a tuning range.</summary>
+    [Fact]
+    public void A_demand_past_a_volt_is_a_units_slip_and_aborts_before_the_driver()
+    {
+        ClockDomainsFixture.Seed();
+        foreach (int uv in new[] { 1_000_001, -1_000_001, 20_000_000, int.MinValue, int.MaxValue })
         {
             var r = Apply(ClockDomainId.Xbar, uv);
             Assert.Equal(TxOutcome.Aborted, r.Tx.Outcome);
-            Assert.Contains("outside the supported -25 to +50 mV range", r.Tx.Detail);
+            Assert.Contains("units or typing slip", r.Tx.Detail);
         }
-        Assert.Equal(TxOutcome.NoChange, Apply(ClockDomainId.Sys, 0).Tx.Outcome);
         Assert.Equal(0, FakeDriver.Sets);
         Assert.Null(_journal.Load());
     }
 
-    /// <summary>The setter's rule holds both demand slots of the entry to the standard range, whoever builds the buffer.</summary>
+    /// <summary>The setter's rule holds both demand slots to ±1 V whoever builds the buffer: the same units check, no envelope.</summary>
     [Fact]
-    public void The_policy_refuses_a_demand_outside_the_standard_range()
+    public void The_hardware_layer_refuses_only_a_units_slip()
     {
         byte[] Buf(int slot, int uv)
         {
@@ -125,7 +141,40 @@ public class ClockVdemandTests : IDisposable
         string? Check(byte[] b) => WritePolicySet.Default.Check(Slot.ClockClkDomainsSetControl, b);
         Assert.Null(Check(Buf(1, 50_000)));
         Assert.Null(Check(Buf(0, -25_000)));
-        Assert.Contains("voltage demand", Check(Buf(1, 50_001)));
-        Assert.Contains("voltage demand", Check(Buf(0, -25_001)));
+        Assert.Null(Check(Buf(1, 50_001)));
+        Assert.Null(Check(Buf(0, -25_001)));
+        Assert.Null(Check(Buf(1, 1_000_000)));
+        Assert.Null(Check(Buf(0, -1_000_000)));
+        Assert.Contains("voltage demand", Check(Buf(1, 1_000_001)));
+        Assert.Contains("voltage demand", Check(Buf(0, int.MinValue)));
+        Assert.Contains("voltage demand", Check(Buf(1, int.MaxValue)));
+    }
+
+    [Theory]
+    [InlineData(400_000, 0)]
+    [InlineData(500_000, 0)]
+    [InlineData(500_000, -50_000)]
+    [InlineData(500_000, 100_000)]
+    public void High_xbar_offsets_and_voltage_demand_are_independent(int khz, int uv)
+    {
+        ClockDomainsFixture.Seed();
+        var clocks = new ClockDomainOffsets(ClockDomainsFixture.Client(), _journal, _sentinel, _host);
+        Assert.Equal(TxOutcome.Applied, clocks.Apply(Gpu, ClockDomainId.Xbar, khz).Tx.Outcome);
+        Assert.True(Apply(ClockDomainId.Xbar, uv).Tx.Succeeded);
+        Assert.Equal(khz, ClockDomainsFixture.OffsetKhz(1));
+        Assert.Equal(uv, Demand(1, 1));
+    }
+
+    [Theory]
+    [InlineData((int)FakeDriver.SetMode.RefuseUntouched)]
+    [InlineData((int)FakeDriver.SetMode.ClampField)]
+    public void Driver_rejection_or_silent_clamping_is_never_reported_as_success(int mode)
+    {
+        ClockDomainsFixture.Seed();
+        FakeDriver.Mode = (FakeDriver.SetMode)mode;
+        FakeDriver.Field = ClockDomainsLayout.OffsetAt(1, 0xf) + 8;
+        var result = Apply(ClockDomainId.Xbar, 100_000);
+        Assert.False(result.Tx.Succeeded);
+        Assert.Equal(0, Demand(1, 1));
     }
 }

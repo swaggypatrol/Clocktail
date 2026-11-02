@@ -320,7 +320,8 @@ public class BrokerDispatcherTests : IDisposable
         var d = Power();
         var paths = d.Dispatch(new BrokerRequest(BrokerRequest.OpPing)).Result!.Value.GetProperty("paths");
         Assert.Equal(13, paths.GetArrayLength());
-        Assert.Contains(paths.EnumerateArray(), p => p.GetProperty("kind").GetString() == "rails" && p.GetProperty("checks_after_write").GetString()!.Contains("MAX"));
+        Assert.Contains(paths.EnumerateArray(), p => p.GetProperty("kind").GetString() == "vf" && p.GetProperty("checks_after_write").GetString()!.Contains("curve"));
+        Assert.Contains(paths.EnumerateArray(), p => p.GetProperty("kind").GetString() == "rails" && p.GetProperty("checks_after_write").ValueKind == JsonValueKind.Null);
         Assert.Contains(paths.EnumerateArray(), p => p.GetProperty("kind").GetString() == "fan" && p.GetProperty("checks_after_write").ValueKind == JsonValueKind.Null);
     }
 
@@ -427,16 +428,21 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Single(CrashLog.ReadLast(CrashLog.PathBeside(_sentinel.Path), 5));
     }
 
-    /// <summary>A preset is named, never sent: an unknown name or another card model writes nothing and keeps no profile.</summary>
+    /// <summary>A profile is named, never sent: an unknown name, the removed built-in's included, writes nothing and keeps no profile.</summary>
     [Fact]
-    public void A_preset_for_another_card_or_an_unknown_name_writes_nothing()
+    public void A_missing_profile_including_the_removed_builtin_never_writes_or_creates_a_daily()
     {
         var d = Power();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "fresh startup")).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "resume", Value: "fresh wake")).Ok);
+        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "load")).Ok);
+        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preset", Value: "nonexistent")).Ok);
+        Assert.Empty(_journal.Inspect().Items);
         var other = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preset", Value: "founders"));
         Assert.False(other.Ok);
-        Assert.Contains("this card is fake", other.Error);
-        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preset", Value: "nonexistent")).Ok);
+        Assert.Contains("no saved profile named 'founders' (none is saved yet", other.Error);
         Assert.False(File.Exists(DailyProfile.PathBeside(_journal.Path)));
+        Assert.Equal(0, FakeDriver.Sets);
         Assert.Empty(_journal.Inspect().Items);
     }
 
@@ -705,7 +711,8 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(saved.Ok, saved.Error);
         Assert.Equal("Quiet", saved.Result!.Value.GetProperty("name").GetString());
         Assert.False(saved.Result!.Value.GetProperty("replaced").GetBoolean());
-        Assert.False(d.Dispatch(P("save", "founders")).Ok);                       // a preset's name
+        Assert.True(d.Dispatch(P("save", "founders")).Ok);                        // no built-in names are reserved
+        Assert.True(d.Dispatch(P("forget", "founders")).Ok);
         Assert.False(d.Dispatch(P("save", "  ")).Ok);                             // no name
         Assert.False(d.Dispatch(P("save", "two\nlines")).Ok);
         const string Odd = "CS2 / late night: <quiet> 安静 \U0001F319";   // any name at all, never a file name
@@ -927,6 +934,30 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal([Experiment.Survived, Experiment.Crash], Outcomes());   // nothing written twice
     }
 
+    /// <summary>back_to_daily refused because a stability run holds the card says so, and nothing more: the profile's power
+    /// limit is not a group the driver will not take, left at stock. Before, the refused write dropped its group, the next
+    /// run's put-back was refused too, and the answer said the power limit "stays at stock" over a card still on the trial.</summary>
+    [Fact]
+    public void A_daily_profile_held_off_by_a_stability_run_names_no_group_left_at_stock()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "560000")).Ok);   // kept, not written under the trial's wall
+
+        busy = "clocktail-lab (pid 4242)";
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily"));
+        Assert.Equal(BrokerCode.JudgeBusy, r.Code);
+        Assert.DoesNotContain("stays at stock", r.Error);
+        Assert.Contains("a stability run is in progress", r.Error);
+        Assert.False(r.Result is { } res && res.TryGetProperty("not_applied", out _));
+        Assert.Equal(450_000u, _requests[0xfe]);   // the card still runs the trial
+        Assert.NotNull(TrialNow());
+
+        busy = null;
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily")).Ok);
+        Assert.Equal(560_000u, _requests[0xfe]);
+    }
+
     /// <summary>A new session over a trial the card did not let go of does not begin, and the trial stays in force, so
     /// asking again puts it back first. Until 0.3.7 the first ask took the trial off the record, and the second began the
     /// new session over a card still at the old trial's 450 W.</summary>
@@ -1039,32 +1070,19 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("Trial off the record, not all off the card", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
-    /// <summary>The fan guard's fans back to the curve pass a measurement's judge.lock (the service's own safety action, a
-    /// card too hot under a fixed fan duty); every other write still waits for it.</summary>
+    /// <summary>The service's recoveries after a driver reset are its own: a client sending one is refused. There is no
+    /// service lease that passes a measurement: "clocktail-safety" (the old fan guard's) is a lease like any other, and
+    /// "fans-back" is no request at all.</summary>
     [Fact]
-    public void The_fan_guards_safety_writes_pass_a_measurement_and_nothing_else_does()
+    public void A_client_cannot_send_the_service_s_own_requests_or_pass_a_measurement()
     {
         var d = Power(judge: () => "stress_test (pid 4242)");
-        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000)).Code);
-        BrokerDispatcher.CurrentLease.Value = BrokerDispatcher.SafetyLease;
-        try { Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000)).Ok); }
-        finally { BrokerDispatcher.CurrentLease.Value = null; }
-        Assert.Equal(450_000u, _requests[0xfe]);
-    }
-
-    /// <summary>The fan guard's request and its lease are the service's own, and so are its recoveries after a driver reset:
-    /// a client sending any of them is refused, and a request carrying the lease does not pass the lock with it in-process
-    /// either.</summary>
-    [Fact]
-    public void A_client_cannot_pass_a_measurement_with_the_service_s_safety_lease()
-    {
-        var d = Power(judge: () => "stress_test (pid 4242)");
-        Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000, Lease: BrokerDispatcher.SafetyLease)).Code);
-        Assert.Equal(BrokerCode.BadRequest, d.FromClient(Exp("fans-back", "a client")).Code);
         Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset)).Code);
         Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverResetAgain)).Code);
         Assert.Equal(BrokerCode.BadRequest, d.FromClient(new BrokerRequest(BrokerRequest.OpProfile, Kind: "crashed", Value: "a client")).Code);
-        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000, Lease: BrokerDispatcher.SafetyLease)).Code);
+        Assert.Equal(BrokerCode.BadRequest, d.FromClient(Exp("fans-back", "a client")).Code);
+        Assert.Equal(BrokerCode.JudgeBusy, d.FromClient(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000, Lease: "clocktail-safety")).Code);
+        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000, Lease: "clocktail-safety")).Code);
         Assert.Equal(BrokerCode.JudgeBusy, d.FromClient(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 450_000)).Code);   // an ordinary one meets the judge
         Assert.Equal(575_000u, _requests[0xfe]);
         Assert.Equal(0, FakeDriver.Sets);
@@ -1112,6 +1130,113 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily")).Ok);
         Assert.Null(TrialNow());
         Assert.Equal([Experiment.Crash], Outcomes());
+    }
+
+    /// <summary>A run's crash (stress_test, lab_test) names the trial it measured: each trial has an identity, kept through
+    /// a hand-back, and a crash naming another is refused under the operation lock, so a trial written after the run
+    /// (here the next "try", as set_fan_speed writes one) does not take it. Before, the run looked at the trial in force and
+    /// then recorded the crash in a second request, and a trial with the same settings but a fixed fan duty took it.</summary>
+    [Fact]
+    public void A_run_s_crash_goes_only_to_the_trial_it_names()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"lab"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W, NVVDD 350 A", power_mw = 450_000u, nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+        var measured = TrialNow()!;
+        Assert.False(string.IsNullOrEmpty(measured.Id));
+
+        _host.Now += TimeSpan.FromMinutes(5);
+        Assert.True(d.Dispatch(Exp("release", "the agent disconnected")).Ok);   // the hand-back writes the trial again
+        Assert.NotEqual(measured.At, TrialNow()!.At);
+        Assert.Equal(measured.Id, TrialNow()!.Id);                               // and it is still that trial
+
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "460 W", power_mw = 460_000u, keep_curve = true }))).Ok);
+        var next = TrialNow()!;
+        Assert.NotEqual(measured.Id, next.Id);
+        int points = Outcomes().Count;
+        var refused = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "crash", Key: measured.Id, Value: "lab: 3 errors"));
+        Assert.Equal(BrokerCode.CannotWrite, refused.Code);
+        Assert.Contains("not the one the run measured", refused.Error);
+        Assert.Equal(points, Outcomes().Count);                 // nothing recorded
+        Assert.Equal(next.Id, TrialNow()!.Id);                  // and the trial written since stays on
+        Assert.Equal(460_000u, _requests[0xfe]);
+
+        var named = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "crash", Key: next.Id, Value: "lab: 3 errors"));
+        Assert.True(named.Ok, named.Error);
+        var crash = Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1];
+        Assert.Equal((Experiment.Crash, "460 W"), (crash.Outcome, crash.Change));
+
+        // A trial from a service that gave none (an experiment.json from before) takes no named crash, and mark_crash's,
+        // which names none, as before.
+        new Experiment("lab", null, _host.Now, new ExperimentTrial(_host.Now, "0*127", "+15 MHz", null, null)).Save(Experiment.PathBeside(_journal.Path));
+        Assert.Equal(BrokerCode.CannotWrite, d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "crash", Key: next.Id, Value: "lab")).Code);
+        Assert.True(d.Dispatch(Exp("crash", "the game closed to the desktop")).Ok);
+        Assert.Equal("+15 MHz", Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1].Change);
+    }
+
+    /// <summary>A sweep's pass names the trial it measured too: tune_memory lets go of the card before it marks the step
+    /// stable, and a trial written in between (another agent's) was marked with the step's pass. "stable" checks the
+    /// identity as "crash" does; mark_stable, which names none, marks the trial in force as before.</summary>
+    [Fact]
+    public void A_run_s_pass_goes_only_to_the_trial_it_names()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"lab"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W", power_mw = 450_000u, keep_curve = true }))).Ok);
+        var measured = TrialNow()!;
+        _host.Now += TimeSpan.FromMinutes(1);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "460 W", power_mw = 460_000u, keep_curve = true }))).Ok);
+        var next = TrialNow()!;
+        int points = Outcomes().Count;
+
+        var refused = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "stable", Key: measured.Id, Value: "tune_memory: +1000 MHz pass"));
+        Assert.Equal(BrokerCode.CannotWrite, refused.Code);
+        Assert.Contains("not the one the run measured", refused.Error);
+        Assert.Equal(points, Outcomes().Count);                 // nothing recorded
+        Assert.False(TrialNow()!.Marked);                       // and the trial written since is not marked
+
+        var named = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "stable", Key: next.Id, Value: "tune_memory: +1000 MHz pass"));
+        Assert.True(named.Ok, named.Error);
+        var pass = Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1];
+        Assert.Equal((Experiment.Stable, "460 W"), (pass.Outcome, pass.Change));
+
+        Assert.True(d.Dispatch(Exp("stable", "played an hour")).Ok);   // mark_stable names no trial
+    }
+
+    /// <summary>A worker that starts with a trial in force gives its cells back (the service's own recovery, which leaves the
+    /// trial in force until the daily profile goes on once the GPU is idle): a stable mark then is refused, the card is not
+    /// running it. The start's daily profile ("start") ends that trial, and leaves alone one the agent wrote while it waited.
+    /// Before, the mark was taken, and the start's "apply" ended the agent's new trial as survived and put the profile over it.</summary>
+    [Fact]
+    public void After_a_restart_the_given_back_trial_takes_no_mark_and_the_start_ends_only_it()
+    {
+        TrialAt450(() => null);                                                      // the worker before wrote it
+        var d = Power();                                                             // the next one starts with it in force
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover)).Ok);      // its leftovers, given back
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.NotNull(TrialNow());
+        var mark = d.Dispatch(Exp("stable", "lab_test passed"));
+        Assert.Equal(BrokerCode.CannotWrite, mark.Code);
+        Assert.Contains("not running it", mark.Error);
+        Assert.Empty(Outcomes());
+
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "460 W", power_mw = 460_000u, keep_curve = true }))).Ok);
+        int points = Outcomes().Count;
+        var start = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "start", Value: "the broker started"));
+        Assert.True(start.Ok, start.Error);
+        Assert.Contains("after the service started", start.Result!.Value.GetProperty("skipped").GetString());
+        Assert.Equal("460 W", TrialNow()!.Change);                                   // the agent's trial stays on
+        Assert.Equal(460_000u, _requests[0xfe]);
+        Assert.Equal(points, Outcomes().Count);
+
+        // The trial in force when a service began is the one its start ends.
+        var next = Power();
+        Assert.True(next.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "start", Value: "the broker started")).Ok);
+        Assert.Null(TrialNow());
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Equal(Experiment.Survived, Outcomes()[^1]);
     }
 
     /// <summary>A driver reset after a mark_crash the card held off is that same crash, recorded once (an unattended
@@ -1187,10 +1312,9 @@ public class BrokerDispatcherTests : IDisposable
         Assert.NotNull(TrialNow());
     }
 
-    /// <summary>The service's judge: free with no run; the run's reason otherwise, but for the run's own writes (its lease)
-    /// and the fan guard's.</summary>
+    /// <summary>The service's judge: free with no run; the run's reason otherwise, but for the run's own writes (its lease).</summary>
     [Fact]
-    public void The_judge_lets_through_a_run_s_own_writes_and_the_fan_guard_s()
+    public void The_judge_lets_through_a_run_s_own_writes_and_nothing_else()
     {
         JudgeLock.Info? run = null;
         var judge = BrokerDispatcher.Judge(() => run);
@@ -1203,8 +1327,8 @@ public class BrokerDispatcherTests : IDisposable
             Assert.Null(judge());
             BrokerDispatcher.CurrentLease.Value = "lab-2";
             Assert.NotNull(judge());
-            BrokerDispatcher.CurrentLease.Value = BrokerDispatcher.SafetyLease;
-            Assert.Null(judge());
+            BrokerDispatcher.CurrentLease.Value = "clocktail-safety";
+            Assert.NotNull(judge());
         }
         finally { BrokerDispatcher.CurrentLease.Value = null; }
     }
@@ -1293,6 +1417,65 @@ public class BrokerDispatcherTests : IDisposable
 
     private static BrokerRequest Crashed(DateTimeOffset stopped, uint uv = 0) => new(BrokerRequest.OpProfile, Kind: "crashed",
         Value: "nvlddmkm 153", Uv: uv, HungAt: stopped, AnsweredAt: stopped.AddMilliseconds(-250));
+
+    /// <summary>A reset whose give-back has not landed (here a stability run holds the card) has its crash on record at
+    /// once ("crashed-held"), and the trial stays in force with that ending while the card may still hold it: no stable mark,
+    /// no keep, no "survived" from the next trial. The give-back that lands, and "crashed" after it, close it with no second
+    /// point. A client cannot send it.</summary>
+    [Fact]
+    public void A_reset_whose_give_back_waits_is_on_record_and_its_trial_stays_until_the_card_is_off_it()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+        var stopped = _host.Now.AddSeconds(30);
+        _host.Now = stopped.AddSeconds(5);
+
+        busy = "clocktail-lab (pid 4242)";
+        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Code);
+        Assert.Equal(BrokerCode.BadRequest, d.FromClient(Crashed(stopped) with { Kind = "crashed-held" }).Code);
+        var held = d.Dispatch(Crashed(stopped, 960_000) with { Kind = "crashed-held" });
+        Assert.True(held.Ok, held.Error);
+        Assert.Equal([Experiment.Crash], Outcomes());
+        Assert.Equal((Experiment.Crash, "wall 575 → 450 W"), (TrialNow()!.Ending, TrialNow()!.Change));   // in force, ended
+        Assert.Equal(450_000u, _requests[0xfe]);
+        Assert.Equal(BrokerCode.CannotWrite, d.Dispatch(Exp("stable", "it seemed fine")).Code);
+
+        busy = null;
+        Reset(d, stopped, 960_000);
+        Assert.Null(TrialNow());
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Equal([Experiment.Crash], Outcomes());                                     // recorded once
+        Assert.Equal(960_000u, Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1].CrashUv);
+    }
+
+    /// <summary>"crashed" after "crashed-held" for the same trial writes no second point, and no second "Crash · during trial"
+    /// entry either: the tuning log says once that the trial is off the card, and the answer says the crash was
+    /// on record already. Before, the crash was logged twice with the same evidence.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_crash_on_record_while_its_give_back_waited_is_logged_once(bool hangTime)
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+        var stopped = _host.Now.AddSeconds(30);
+        _host.Now = stopped.AddSeconds(5);
+        BrokerRequest Ask(string kind) => hangTime ? Crashed(stopped) with { Kind = kind }
+            : new BrokerRequest(BrokerRequest.OpProfile, Kind: kind, Value: "nvlddmkm 153");
+
+        busy = "clocktail-lab (pid 4242)";
+        Assert.True(d.Dispatch(Ask("crashed-held")).Ok);
+        busy = null;
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Ok);
+        var closed = d.Dispatch(Ask("crashed"));
+        Assert.True(closed.Ok, closed.Error);
+        Assert.True(closed.Result!.Value.GetProperty("on_record_already").GetBoolean());
+        Assert.Null(TrialNow());
+        Assert.Equal([Experiment.Crash], Outcomes());
+        string log = File.ReadAllText(TuningLog.PathBeside(_journal.Path));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(log, "Crash · during trial"));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(log, "Crash · trial off the card"));
+    }
 
     /// <summary>The responder's answer to a reset whose GPU stopped answering at <paramref name="stopped"/>: what is held
     /// given back, then the crash recorded (DriverResetResponder.RespondFor).</summary>
@@ -1604,23 +1787,7 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("trial-only", p.Result!.Value.GetProperty("not_kept")[0].GetString());
         Assert.Equal(sets, FakeDriver.Sets);
         Assert.False(File.Exists(DailyProfile.PathBeside(_journal.Path)));
-        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preview", Value: "founders")).Ok);   // another model
-    }
-
-    /// <summary>The fan guard's "fans-back" hands back a fixed fan duty only: a lowered current limit lowers power, so it
-    /// stays, and with no fan duty held nothing is written or recorded.</summary>
-    [Fact]
-    public void Fans_back_leaves_a_current_limit_alone()
-    {
-        var d = Power();
-        CurrentLimitsFixture.Install();
-        Assert.True(d.Dispatch(Exp("begin", """{"game":"sweep"}""")).Ok);
-        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "NVVDD 350 A", nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
-        var r = d.Dispatch(Exp("fans-back", "the fan guard: 87 °C"));
-        Assert.True(r.Ok, r.Error);
-        Assert.Equal(0, r.Result!.Value.GetProperty("released").GetArrayLength());
-        Assert.Equal(350_000u, CurrentLimitsFixture.Limit(13));
-        Assert.Empty(Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 10));
+        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preview", Value: "founders")).Ok); // no built-in profiles
     }
 
     /// <summary>A new session while a trial is in force ends that trial as end_session does: its wall goes back to the daily
@@ -1757,7 +1924,7 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Contains("MSVDD REL offset -75 mV", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
-    /// <summary>A trial may carry any other registry write in "writes" (here NVVDD's REL offset, under the fixture's 1.15 V ceiling). It goes through the
+    /// <summary>A trial may carry any other registry write in "writes" (here NVVDD's REL offset, inside the fixture's voltage domain). It goes through the
     /// path's rules, is on the data point, and goes back with the daily profile; the wall and the curve keep their own
     /// fields.</summary>
     [Fact]
@@ -2069,7 +2236,7 @@ public class BrokerDispatcherTests : IDisposable
         Assert.False(r.Result!.Value.GetProperty("journal_cleared").GetBoolean());
     }
 
-    /// <summary>A dispatcher on the 5090-shaped rails with NVVDD's REL at 1.2 V stock, above the 1.15 V ceiling; the
+    /// <summary>A dispatcher on the 5090-shaped rails with NVVDD's REL at 1.2 V stock, the domain maximum itself; the
     /// status follows the control offsets so a write moves what the next read sees.</summary>
     private BrokerDispatcher Rails()
     {
@@ -2174,9 +2341,8 @@ public class BrokerDispatcherTests : IDisposable
     }
 
     /// <summary>
-    /// The write verb hands the path the journal's original for the cell, so a user can put a lowered slot back to a
-    /// stock value above the ceiling (the hardware held it before this program did anything) and the record is
-    /// released; the request itself never supplies an origin.
+    /// The write verb hands the path the journal's original for the cell, so a user can put a lowered slot back to
+    /// stock exactly (the hardware held it before this program did anything) and the record is released; the request itself never supplies an origin.
     /// </summary>
     [Fact]
     public void The_write_verb_hands_the_path_the_journal_origin_so_a_user_restore_lands_and_releases()
@@ -2188,7 +2354,7 @@ public class BrokerDispatcherTests : IDisposable
         Assert.StartsWith("held: original rel=0,alt=0,ov=0,vmin=0", OwnedBy(down));
         Assert.Equal(JsonValueKind.Null, down.Result!.Value.GetProperty("applied")[0].GetProperty("origin").ValueKind);
 
-        var back = d.Dispatch(Write("rails", "NVVDD", "rel=0"));     // 1.2 V again: above the ceiling, but where the hardware stood
+        var back = d.Dispatch(Write("rails", "NVVDD", "rel=0"));     // 1.2 V again: where the hardware stood
         Assert.True(back.Ok, back.Error);
         Assert.Equal("Applied", Outcome(back));
         Assert.StartsWith("released", OwnedBy(back));
@@ -2334,5 +2500,40 @@ public class BrokerDispatcherTests : IDisposable
         Assert.False(r.Result!.Value.GetProperty("switched").GetBoolean());
         Assert.NotNull(DailyProfile.Load(DailyProfile.PathBeside(_journal.Path)));
         Assert.Equal(450_000u, _requests[0xfe]);           // still the trial's: what the answer says is pending
+    }
+
+    private sealed class FakeCapture : Clocktail.Domain.Fps.IFrameCapture
+    {
+        public readonly List<string?> Stops = [];
+        public object Start(string dir, int seconds, string? process) => new { path = Path.Combine(dir, "x.csv") };
+        public object Stop(string? path) { Stops.Add(path); return new { stopped = true }; }
+    }
+
+    /// <summary>A capture has an owner: a stop names the file it is for, so ending one watch does not end a capture that
+    /// another began since. A stop without a path (an older server) still ends whatever runs.</summary>
+    [Fact]
+    public void A_frame_capture_stop_passes_its_path_through()
+    {
+        var capture = new FakeCapture();
+        var d = new BrokerDispatcher(new FakeVf().Install(), new Target(_journal, _sentinel, _gpu), _host, canWrite: true, frames: capture);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpFps, Kind: "stop", Value: """{"path":"C:\\fps\\a.csv"}""")).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpFps, Kind: "stop")).Ok);
+        Assert.Equal(["C:\\fps\\a.csv", null], capture.Stops);
+
+        Assert.True(Clocktail.Domain.Fps.IFrameCapture.StopsIt("C:\\fps\\A.csv", "C:\\fps\\a.csv"));
+        Assert.False(Clocktail.Domain.Fps.IFrameCapture.StopsIt("C:\\fps\\a.csv", "C:\\fps\\b.csv"));   // another's: left alone
+        Assert.True(Clocktail.Domain.Fps.IFrameCapture.StopsIt(null, "C:\\fps\\b.csv"));
+    }
+
+    /// <summary>After a restart of the service it knows of no capture: a stop with a path still runs, so the ETW session the
+    /// old capture left goes, and is not refused as another's.</summary>
+    [Fact]
+    public void A_frame_capture_stop_is_refused_only_while_another_capture_runs()
+    {
+        Assert.False(Clocktail.Domain.Fps.IFrameCapture.LeavesIt("C:\\fps\\a.csv", null, runs: false));                // restarted: nothing known
+        Assert.False(Clocktail.Domain.Fps.IFrameCapture.LeavesIt("C:\\fps\\a.csv", "C:\\fps\\b.csv", runs: false)); // b ended by itself
+        Assert.True(Clocktail.Domain.Fps.IFrameCapture.LeavesIt("C:\\fps\\a.csv", "C:\\fps\\b.csv", runs: true));   // b runs: left alone
+        Assert.False(Clocktail.Domain.Fps.IFrameCapture.LeavesIt("C:\\fps\\a.csv", "C:\\fps\\a.csv", runs: true));
+        Assert.False(Clocktail.Domain.Fps.IFrameCapture.LeavesIt(null, "C:\\fps\\b.csv", runs: true));
     }
 }

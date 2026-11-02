@@ -114,17 +114,17 @@ public class UncoreTests
     }
 
     [Fact]
-    public void Xbar_climbs_the_demand_ladder_then_the_ratio_then_xbar_again_then_the_boost()
+    public void Xbar_climbs_at_the_current_demand_then_the_ratio_and_boost_are_explored()
     {
         // XBAR pays to +400, then flat; the ratio pays up to 0.95 and lets XBAR pay to +450; the boost buys nothing.
         double Speed(UncoreSetting s) => 4780 * (1 + 0.01 * Math.Min(s.XbarMhz, s.Ratio > 0.92 ? 450 : 400) / 50.0) * (1 + 0.5 * (s.Ratio - 0.8999));
         var (search, tried) = Run(Speed);
         Assert.Null(search.Ended);
-        Assert.Equal(new UncoreSetting(450, 50, 58976 + 2 * 1638, 0), search.Best);
-        // +300 needs +20 mV (taken at the +20 level); +350 and up need +50 (the +30 and +40 levels are skipped).
-        Assert.Equal(new UncoreSetting(300, 20, 58976, 0), tried[0]);
-        Assert.Equal(new UncoreSetting(350, 50, 58976, 0), tried[1]);
-        Assert.DoesNotContain(tried, s => s.XbarMhz > 300 && s.DemandMv < 50);
+        Assert.Equal(new UncoreSetting(450, 0, 58976 + 2 * 1638, 0), search.Best);
+        // No mandatory voltage demand: explore the clock at the current voltage first.
+        Assert.Equal(new UncoreSetting(300, 0, 58976, 0), tried[0]);
+        Assert.Equal(new UncoreSetting(350, 0, 58976, 0), tried[1]);
+        Assert.All(tried, s => Assert.Equal(0, s.DemandMv));
         Assert.Contains(tried, s => s.BoostPct == 25);
         Assert.True(tried.Count < 20, $"{tried.Count} comparisons");
     }
@@ -136,7 +136,7 @@ public class UncoreTests
     {
         double Speed(UncoreSetting s) => 4780 * (s.BoostPct >= 25 ? 1.01 * (1 + 0.01 * Math.Min(s.XbarMhz - 250, 100) / 50.0) : 1);
         var (search, tried) = Run(Speed);
-        Assert.Equal(new UncoreSetting(350, 50, 58976, 25), search.Best);
+        Assert.Equal(new UncoreSetting(350, 0, 58976, 25), search.Best);
         Assert.Equal([300, 350], tried.Where(s => s.BoostPct == 0 && s.RatioRaw == 58976 && s.XbarMhz > 250).Select(s => s.XbarMhz));
         Assert.Contains(tried, s => s.BoostPct == 25 && s.XbarMhz == 350);
         Assert.True(tried.Count < 22, $"{tried.Count} comparisons");   // the boost axis takes four 25 % steps where MSVDD took two
@@ -200,7 +200,7 @@ public class UncoreTests
         }, () => false);
         search.Run();
         Assert.Equal(new UncoreSetting(400, 60, 58976, 0), search.Best);
-        Assert.Equal([50, 60], tried.Where(s => s.XbarMhz == 400).Take(2).Select(s => s.DemandMv));
+        Assert.Equal([0, 10, 20, 30, 40, 50, 60], tried.Where(s => s.XbarMhz == 400).Take(7).Select(s => s.DemandMv));
     }
 
     [Fact]
@@ -220,10 +220,9 @@ public class UncoreTests
             start with { BoostPct = 75 }, start with { BoostPct = 125 }]);
         Assert.Equal(start with { BoostPct = 50 }, search.Best);
         Assert.All(against, a => Assert.Equal(start, a));
-        Assert.Equal(3, against.Count);
-        // +400 MHz with +20 mV is the cliff, a boost of 125 % past the driver's 100: logged, not run.
-        Assert.Contains(search.Log, c => c.B.XbarMhz == 400 && c.Why.Contains("needs +50 mV", StringComparison.Ordinal));
-        Assert.Contains(search.Log, c => c.B.BoostPct == 125 && c.Why.Contains("the boost outside 0..100 %", StringComparison.Ordinal));
+        Assert.Equal(4, against.Count);
+        Assert.Contains(search.Log, c => c.B.XbarMhz == 400 && c.Outcome == Comparison.NotBetter);
+        Assert.Contains(search.Log, c => c.B.BoostPct == 125 && c.Why.Contains("0..100 %", StringComparison.Ordinal));
     }
 
     /// <summary>Runs of one setting that disagree were disturbed; when only the candidate's did, its incumbent's agreeing, the

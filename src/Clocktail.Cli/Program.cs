@@ -44,7 +44,7 @@ internal static class Program
                                    voltage-rail offsets: RAIL nvvdd|msvdd, SLOT rel|alt|ov|vmin, signed mV, slots not named stay;
                                    SLOT=mV sets the offset (stock MSVDD REL is already -50, so rel=-25 is a raise), SLOT+=mV adds
                                    to the current one; each slot is printed to stderr as before -> after (delta);
-                                   a raised limit must stay under min(domain max, 1.15 V), and MAX is re-read after the write
+                                   NVIDIA decides acceptance; exact control readback and original-state recording remain
           --allow-raise            with --rail: let an offset go up; without it a request that raises any slot is refused
           --core-offset MHz        P0 core clock offset through the transaction template (journal + sentinel)
           --memory-offset MHz      P0 memory clock offset, same path
@@ -64,7 +64,8 @@ internal static class Program
                                    the daily profile the broker holds: keep saves what the broker holds now; it goes on when the
                                    broker starts (GPU idle) and goes back on unchanged after a display driver reset; off suspends it
                                    (stock at the next start or reset); apply writes it unless suspended; load ends a suspension and
-                                   writes it. Every change is an entry in tuning-log.md beside the profile
+                                   writes it; preset:NAME makes the profile saved under NAME the daily one and writes it (nothing
+                                   ships with Clocktail: only names you saved). Every change is an entry in tuning-log.md beside the profile
           --recover                give back what a dead process still owed (writes only what differs, through the broker or elevated), clear the sentinel
 
         Adapter selection:
@@ -292,7 +293,7 @@ internal static class Program
                     rail = r.Rail.ToString().ToLowerInvariant(), ordinal = r.Ordinal, kind = r.Kind, type = r.Type,
                     domain_index = r.DomainIndex, domain_mask = $"0x{r.DomainMask:x}",
                     offsets_uv = r.Offsets, limits_uv = r.Limits, domain_uv = r.Domain,
-                    ceiling_uv = new { standard = RailRules.Ceiling(r, false), xoc = RailRules.Ceiling(r, true) }, floor_uv = RailRules.Floor(r),
+                    ceiling_uv = RailRules.Ceiling(r), floor_uv = RailRules.Floor(r), step_uv = RailRules.Step(r),
                     writable = r.Writable, not_writable_reason = r.NotWritableReason,
                 }),
             }, Json));
@@ -363,7 +364,7 @@ internal static class Program
 
         if (profileVerb != null)
         {
-            // "preset:NAME" loads a shipped preset as the daily profile.
+            // "preset:NAME" loads the profile saved under NAME as the daily profile (the op's old name; nothing ships).
             var (verb, value) = profileVerb.StartsWith("preset:", StringComparison.OrdinalIgnoreCase) ? ("preset", profileVerb[7..]) : (profileVerb, (string?)null);
             return CliContext.Print(ctx.Perform(new BrokerRequest(BrokerRequest.OpProfile, ctx.StableId, Kind: verb, Value: value)));
         }

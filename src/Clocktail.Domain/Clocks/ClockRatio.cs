@@ -27,8 +27,9 @@ public static class ClockRatio
     public const string Kind = "clockratio";
     public const string Key = "msvdd";
     public const int RatioAt = 0x68, InfoRelations = 8, ControlRelations = 4;
-    /// <summary>The range a write may set, U16.16: 0.5..1.0 (XBAR at half the core, or at the core's clock).</summary>
-    public const uint MinRaw = 0x8000, MaxRaw = 0x10000;
+    /// <summary>The U16.16 field's representable range, not a software tuning envelope; 0 is no ratio at all (and what an
+    /// empty control block reads as), so a write never sets it.</summary>
+    public const uint MinRaw = 1, MaxRaw = uint.MaxValue;
 
     public static string Words(uint raw) => string.Create(CultureInfo.InvariantCulture, $"{raw / 65536.0:0.0000}");
 
@@ -38,7 +39,7 @@ public static class ClockRatio
 
     public static Func<ReadOnlyMemory<byte>, Mutation> Plan(uint raw) => snapshot =>
     {
-        if (raw < MinRaw || raw > MaxRaw) return new Mutation.Abort($"a ratio of {Words(raw)} is outside {Words(MinRaw)}..{Words(MaxRaw)}");
+        if (raw < MinRaw) return new Mutation.Abort("a ratio of 0 is not a ratio: XBAR would have no clock to follow");
         uint now = BinaryPrimitives.ReadUInt32LittleEndian(snapshot.Span[RatioAt..]);
         if (now == 0) return new Mutation.Abort("the driver returned an empty clock propagation control block");
         return now == raw ? new Mutation.Apply([]) : Mutation.Of(Edit.UInt32(RatioAt, raw));
@@ -49,10 +50,11 @@ public static class ClockRatio
     {
         if (!key.Equals(Key, StringComparison.OrdinalIgnoreCase)) throw new ArgumentException($"'{key}' is not a clock ratio (msvdd)");
         var cell = Cell(Relations(hw, gpu));
-        uint? raw = value.Contains('.') && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var r) && r > 0
+        uint? raw = value.Contains('.') && double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var r)
+            && double.IsFinite(r) && Math.Round(r * 65536) is >= 0 and <= uint.MaxValue
             ? (uint)Math.Round(r * 65536)
             : uint.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var u) ? u : null;
-        return raw is { } v ? (cell, Plan(v), null) : (cell, null, $"'{value}' is not a ratio (0.5..1.0, or its U16.16 value)");
+        return raw is { } v ? (cell, Plan(v), null) : (cell, null, $"'{value}' is not a representable U16.16 ratio (above 0)");
     }
 
     public static uint Relations(NvClient hw, GpuSession gpu)

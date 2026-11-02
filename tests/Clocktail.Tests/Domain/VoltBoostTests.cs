@@ -121,18 +121,17 @@ public class VoltBoostTests : IDisposable
     }
 
     [Fact]
-    public void A_boost_that_lifts_max_over_the_ceiling_is_put_back()
+    public void A_boost_that_lifts_MAX_past_1_15_V_stays_applied_and_shows_where_MAX_went()
     {
         // NVVDD MAX 1.140 V; +20 % lifts it by 20 mV to 1.160 V, above the 1.15 V standard ceiling.
         var vb = Setup(Model.IndependentActs, baseMax: 1_140_000);
         var r = vb.Apply(Gpu, BoostPath.Independent, 20);
         Assert.Equal(TxOutcome.Applied, r.Tx.Outcome);
-        Assert.NotNull(r.CeilingRollback);
-        Assert.Contains("ceiling", r.CeilingRollback);
-        Assert.False(r.Succeeded);
-        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(FakeDriver.State[IndepWord].AsSpan(4)));
-        Assert.Equal(1_140_000u, BinaryPrimitives.ReadUInt32LittleEndian(FakeDriver.State[StatusWord].AsSpan(NvvddMax)));
-        Assert.Null(_journal.Load());
+        Assert.True(r.Succeeded);
+        Assert.Equal(20u, BinaryPrimitives.ReadUInt32LittleEndian(FakeDriver.State[IndepWord].AsSpan(4)));
+        Assert.Equal(1_160_000u, BinaryPrimitives.ReadUInt32LittleEndian(FakeDriver.State[StatusWord].AsSpan(NvvddMax)));
+        Assert.Equal(1_160_000u, r.After!.Rails.Single(x => x.Rail == Rail.Nvvdd).MaxUv);
+        Assert.NotNull(_journal.Load());
     }
 
     [Fact]

@@ -772,7 +772,7 @@ public class GameTests
     public void Thermal_checks_also_run_while_the_game_starts_or_loads()
     {
         var starting = new FakeGame { Temp = 86, Silent = _ => true };
-        var result = new GameRunner(starting).Run(Short(), "q2demo1");
+        var result = new GameRunner(starting, new GameTimings(MaxTempC: 85)).Run(Short(), "q2demo1");
         Assert.Contains("thermal stop", result.Why);
         Assert.True((starting.Now - starting.T0).TotalSeconds < 10);
 
@@ -783,7 +783,7 @@ public class GameTests
             loading.Temp = 86;
             loading.Silent = _ => true;
         };
-        result = new GameRunner(loading).Run(Short(120, patterns: [GameCatalog.Play]), "q2demo1");
+        result = new GameRunner(loading, new GameTimings(MaxTempC: 85)).Run(Short(120, patterns: [GameCatalog.Play]), "q2demo1");
         Assert.Contains("thermal stop", result.Why);
         Assert.True((loading.Now - loading.T0).TotalSeconds < 45);
     }

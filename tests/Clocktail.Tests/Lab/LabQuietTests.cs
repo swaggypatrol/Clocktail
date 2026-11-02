@@ -37,4 +37,41 @@ public class LabQuietTests
         Assert.False(LabJob.Recorded(() => { asked++; return (null, false); }, written, LabJob.CrashRecordWait, _ => { }));
         Assert.Equal(31, asked);
     }
+
+    /// <summary>The service puts a driver reset's crash on the trial in force while it cannot give the card back yet
+    /// ("crashed-held"): the trial is still on the card, so a job does not read it as recorded and given back, nor as a
+    /// trial that changed during its measurement. Any other ending, or another write time, is a change.</summary>
+    [Fact]
+    public void A_crash_on_record_with_the_trial_still_in_force_is_the_same_trial()
+    {
+        const string written = "2026-10-24T10:00:00";
+        Assert.True(LabJob.SameTrial(written + " (crash)", written));
+        Assert.True(LabJob.SameTrial(written, written));
+        Assert.False(LabJob.SameTrial(written + " (stable)", written));
+        Assert.False(LabJob.SameTrial("2026-10-24T10:05:00", written));
+        Assert.False(LabJob.SameTrial(null, written));
+
+        var answers = new Queue<(string?, bool)>([(written + " (crash)", true), (written + " (crash)", true), (null, true)]);
+        var slept = TimeSpan.Zero;
+        Assert.True(LabJob.Recorded(() => answers.Dequeue(), written, TimeSpan.FromSeconds(30), t => slept += t));
+        Assert.Equal(TimeSpan.FromSeconds(2), slept);   // waited until the trial left the record
+    }
+
+    /// <summary>A step's result names the trial the job measured: its identity comes from the same "show" as its stamp, and
+    /// the service's refusal of a result (the trial in force is another) is told apart from no answer.</summary>
+    [Fact]
+    public void A_result_names_the_trial_the_show_gave_and_a_refusal_is_not_lost()
+    {
+        static BrokerResponse Show(string trial) => new(true, Result: System.Text.Json.JsonDocument.Parse("{\"experiment\":{\"Trial\":" + trial + "}}").RootElement);
+        Assert.Equal(("2026-11-02T14:00:00Z", "a1"), LabJob.TrialOf(Show("""{"At":"2026-11-02T14:00:00Z","Id":"a1"}""")));
+        Assert.Equal(("2026-11-02T14:00:00Z (crash)", "a1"), LabJob.TrialOf(Show("""{"At":"2026-11-02T14:00:00Z","Id":"a1","Ending":"crash"}""")));
+        Assert.Equal(("2026-11-02T14:00:00Z", null), LabJob.TrialOf(Show("""{"At":"2026-11-02T14:00:00Z"}""")));   // a service before 0.8.2
+        Assert.Equal((null, null), LabJob.TrialOf(Show("null")));
+        Assert.Equal((null, null), LabJob.TrialOf(null));
+
+        Assert.Null(MemorySweep.Refused(new BrokerResponse(true)));
+        Assert.Null(MemorySweep.Refused(null));   // no answer says nothing either way
+        Assert.Contains("not the one the run measured",
+            MemorySweep.Refused(new BrokerResponse(false, "the trial in force is not the one the run measured (another trial was written since): nothing marked", Code: BrokerCode.CannotWrite)));
+    }
 }

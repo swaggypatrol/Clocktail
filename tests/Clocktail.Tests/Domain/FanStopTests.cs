@@ -8,7 +8,7 @@ using Clocktail.Hw;
 namespace Clocktail.Tests.Domain;
 
 /// <summary>F03: the zero-RPM band (Control +0x64 stop, +0x68 start) as the 5090 FE holds it, 43 / 50 °C on policies 0
-/// and 1: only an earlier start is written, a band at least 3 °C wide, and the backstops are not touched.</summary>
+/// and 1: any band is written that is one (stop under start, within 0..120 °C), and the backstops are not touched.</summary>
 [Collection("fake-driver")]
 public class FanStopTests : IDisposable
 {
@@ -52,14 +52,31 @@ public class FanStopTests : IDisposable
     }
 
     [Fact]
-    public void A_later_start_a_narrow_band_and_a_backstop_are_refused()
+    public void Later_starts_narrow_bands_and_low_stops_reach_the_driver_but_uneditable_policies_do_not()
     {
         var hw = FanPolicyFixture.Install();
-        Assert.Contains("no later than the curve's first point", Write(hw, "0", "48:55").Tx.Detail);
-        Assert.Contains("at least 3 °C wide", Write(hw, "0", "44:45").Tx.Detail);
-        Assert.Contains("20 °C at the lowest", Write(hw, "0", "15:45").Tx.Detail);
-        Assert.Equal(0, FakeDriver.Sets);
+        Assert.Equal(TxOutcome.Applied, Write(hw, "0", "48:55").Tx.Outcome);
+        Assert.Equal(TxOutcome.Applied, Write(hw, "0", "44:45").Tx.Outcome);
+        Assert.Equal(TxOutcome.Applied, Write(hw, "0", "15:45").Tx.Outcome);
+        Assert.Equal(3, FakeDriver.Sets);
         Assert.NotNull(WriteRegistry.Find(FanStopWrites.Kind)!.Prepare(hw, Gpu, "4", "40:45", WriteOptions.None).CannotWrite);   // the firmware's backstop
+    }
+
+    /// <summary>Structure, not policy: stop under start, both within 0..120 °C, refused before the driver.</summary>
+    [Theory]
+    [InlineData("50:50", "stop must be under start")]
+    [InlineData("60:45", "stop must be under start")]
+    [InlineData("-5:45", "outside 0..120")]
+    [InlineData("40:130", "outside 0..120")]
+    [InlineData("500:900", "outside 0..120")]
+    public void A_band_that_is_not_one_is_refused_before_the_driver(string band, string why)
+    {
+        var hw = FanPolicyFixture.Install();
+        var r = Write(hw, "0", band);
+        Assert.Equal(TxOutcome.Aborted, r.Tx.Outcome);
+        Assert.Contains(why, r.Tx.Detail);
+        Assert.Equal(0, FakeDriver.Sets);
+        Assert.Equal(TxOutcome.Applied, Write(hw, "0", "0:120").Tx.Outcome);   // the bounds themselves are a band
     }
 
     [Fact]

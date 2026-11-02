@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using Clocktail.Domain.Platform;
 
 namespace Clocktail.Domain.Profiles;
@@ -45,7 +47,11 @@ public sealed record ExperimentTrial(
     /// crash over anything else: on record, so nothing more is recorded for it but a crash after another ending (asked
     /// again, mark_stable, a driver reset after mark_crash, a hand-back or the next trial: none adds a point), and a crash
     /// is never kept. Null: it has not ended.</summary>
-    string? Ending = null);
+    string? Ending = null,
+    /// <summary>The trial's identity, given when it was written ("try") and kept while it stays in force (a hand-back
+    /// writes a new <see cref="At"/>, not a new identity): a run that measured this trial records its crash against this
+    /// identity, so a trial written after the run cannot take it. Null: written by a service that gave none.</summary>
+    string? Id = null);
 
 /// <summary>One data point: how a trial ended in a game.</summary>
 public sealed record DataPoint(
@@ -129,7 +135,7 @@ public sealed record Experiment(string Game, string? Note, DateTimeOffset Starte
 
     /// <summary>The crashes recorded in this session so far.</summary>
     public int CrashesSince(string dataPath) =>
-        ReadLast(dataPath, 1000).Count(p => p.Outcome == Crash && p.At >= StartedAt && p.Game == Game);
+        ReadLast(dataPath, 1000, includeDeleted: true).Count(p => p.Outcome == Crash && p.At >= StartedAt && p.Game == Game);
 
     /// <summary>The trial's data point with this outcome; null when there is no trial.</summary>
     public DataPoint? Point(string outcome, DateTimeOffset at, string? note = null, uint? crashUv = null) =>
@@ -138,21 +144,76 @@ public sealed record Experiment(string Game, string? Note, DateTimeOffset Starte
                 t.FanCurve, t.FanPct, t.MemoryKhz, t.XbarKhz, t.XbarVdemandUv, t.Writes, t.At)
             : null;
 
+    /// <summary>Whether a trial's change was the curve's (adjust_curve, flatten_curve, set_curve, shift_curve, the curve
+    /// editor): its crash is evidence about the curve. Under a trial that moved XBAR, the memory, the wall, a limit or the
+    /// fans the curve was merely on the card. By the change's words: a curve trial's data point also carries the session's
+    /// earlier writes and wall, so the other fields do not tell. A core P0 offset trial moves every point too, but its data
+    /// point's curve does not carry the offset, so it is left out rather than pinned at the wrong clock.</summary>
+    public static bool CurveChange(string change) =>
+        System.Text.RegularExpressions.Regex.IsMatch(change, @"MHz on points|flat top at|whole curve written|curve shifted|curve editor");
+
+    /// <summary>When the data point's trial went on the card: <see cref="DataPoint.TrialAt"/>, or for an older record
+    /// without it, the moment less its minutes (rounded to 0.1 min, so up to 3 s off).</summary>
+    public static DateTimeOffset StartOf(DataPoint point) => point.TrialAt ?? point.At - TimeSpan.FromMinutes(point.Minutes);
+
     public static void Append(string dataPath, DataPoint point)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(dataPath))!);
         File.AppendAllText(dataPath, JsonSerializer.Serialize(point, Line) + "\n");
     }
 
-    /// <summary>The last <paramref name="count"/> data points, oldest first; a line that does not parse is skipped.</summary>
-    public static IReadOnlyList<DataPoint> ReadLast(string dataPath, int count)
+    /// <summary>A stable identity for a complete test record, not just its timestamp or curve point.</summary>
+    public static string PointId(DataPoint point) =>
+        Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(point, Line)));
+
+    public static string DeletedDirectory(string dataPath) => dataPath + ".deleted";
+
+    /// <summary>Delete a test from history without rewriting the broker's append-only journal. One independent marker
+    /// per record makes concurrent deletes and appends safe across servers. The original remains for audit/recovery;
+    /// safety accounting explicitly reads it, so removing history cannot replenish a session's crash budget.</summary>
+    public static void DeletePoint(string dataPath, DataPoint point)
+    {
+        string id = PointId(point);
+        if (!ReadLast(dataPath, int.MaxValue, includeDeleted: true).Any(p => PointId(p) == id))
+            throw new InvalidOperationException("This test record no longer exists; reopen the window.");
+        string dir = DeletedDirectory(dataPath);
+        Directory.CreateDirectory(dir);
+        string path = Path.Combine(dir, id + ".json");
+        FileStream file;
+        try
+        {
+            file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+        }
+        catch (IOException) when (File.Exists(path)) { return; } // already deleted by another window
+        using (file)
+        {
+            // Existence is the commit: even an interrupted metadata write still records the deletion.
+            file.Write(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { deletedAt = DateTimeOffset.UtcNow, point }, Line)));
+            file.Flush(flushToDisk: true);
+        }
+    }
+
+    /// <summary>The last <paramref name="count"/> visible data points, oldest first; a line that does not parse is skipped.
+    /// Safety/recovery callers can include deleted records; ordinary readers see the same history as the editor.</summary>
+    public static IReadOnlyList<DataPoint> ReadLast(string dataPath, int count, bool includeDeleted = false)
     {
         if (!File.Exists(dataPath)) return [];
+        string dir = DeletedDirectory(dataPath);
+        var deleted = !includeDeleted && Directory.Exists(dir)
+            ? Directory.EnumerateFiles(dir, "*.json").Select(p => Path.GetFileNameWithoutExtension(p)).ToHashSet(StringComparer.Ordinal)
+            : [];
         var points = new List<DataPoint>();
-        foreach (var line in File.ReadLines(dataPath))
+        // The broker may append while an editor reads or deletes history. Never lock it out of its journal.
+        using var stream = new FileStream(dataPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        while (reader.ReadLine() is { } line)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
-            try { if (JsonSerializer.Deserialize<DataPoint>(line, Line) is { } p) points.Add(p); }
+            try
+            {
+                if (JsonSerializer.Deserialize<DataPoint>(line, Line) is { } p && (deleted.Count == 0 || !deleted.Contains(PointId(p))))
+                    points.Add(p);
+            }
             catch (JsonException) { }
         }
         return points.Count <= count ? points : points.GetRange(points.Count - count, count);
