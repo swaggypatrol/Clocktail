@@ -1079,6 +1079,9 @@ public sealed partial class CurveEditorForm : Form
             {
                 try { Application.SetHighDpiMode(HighDpiMode.PerMonitorV2); } catch (InvalidOperationException) { }
                 try { SetThreadDpiAwarenessContext(PerMonitorV2); } catch (EntryPointNotFoundException) { }
+                Application.EnableVisualStyles();
+                // The rendering default can only be set before this process's first window; later editors keep it.
+                try { Application.SetCompatibleTextRenderingDefault(false); } catch (InvalidOperationException) { }
                 // An exception in a handler ends the window with its reason (the catch below), not with WinForms' Continue/Quit dialog.
                 try { Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException, true); } catch (InvalidOperationException) { }
                 using var form = new CurveEditorForm(data, save, delete);

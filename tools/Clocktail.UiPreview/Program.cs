@@ -7,6 +7,7 @@ using Clocktail.Mcp.CurveEditor;
 internal static class Program
 {
     [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window, out NativeRect rect);
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
     [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
     private static T Field<T>(CurveEditorForm form, string name) => (T)typeof(CurveEditorForm).GetField(name, Private)!.GetValue(form)!;
@@ -88,7 +89,7 @@ internal static class Program
                 Set(form, "_s", 1.5f); Call(form, "Fonts");
                 Render(form, output, "layout-150pct", new(1980, 1293));
                 Set(form, "_s", 1f); Call(form, "Fonts");
-                form.ClientSize = new(1320, 862);
+                ResizeNative(form, new(1320, 862));
                 // Typed text is committed by focus change before the save request is copied.
                 decimal typed = input.Value + 15;
                 int expectedOffset = CurveModel.Snap((double)typed * 1000);
@@ -158,10 +159,7 @@ internal static class Program
     private static void Render(CurveEditorForm form, string output, string name, Size size)
     {
         Console.WriteLine($"Rendering {name}: {size.Width} × {size.Height}");
-        // Hosted runners have a small desktop. Raise the native tracking maximum, otherwise Windows clamps the HWND
-        // while WinForms temporarily reports the requested client size and a large preview is silently cropped.
-        form.MaximumSize = new(4096, 4096);
-        form.ClientSize = size;
+        ResizeNative(form, size);
         form.PerformLayout(); form.Refresh(); Application.DoEvents();
         Check(GetClientRect(form.Handle, out var native) && native.Right - native.Left == size.Width && native.Bottom - native.Top == size.Height,
             $"{name}: the native window must match the requested client size.");
@@ -174,6 +172,16 @@ internal static class Program
                 if (other != control && other.Visible) Check(!control.Bounds.IntersectsWith(other.Bounds), $"{name}: {control.Name} overlaps {other.Name}.");
         }
         WindowScreenshot(form, output, name);
+    }
+
+    private static void ResizeNative(CurveEditorForm form, Size size)
+    {
+        // WinForms clamps top-level SetBoundsCore to the small runner desktop. Resize the real HWND directly so a
+        // wide / scaled fixture is rendered completely, then verify the native client, rather than a cached size.
+        form.MaximumSize = new(4096, 4096);
+        Check(GetClientRect(form.Handle, out var before), "Could not read the native client rectangle.");
+        int borderWidth = form.Width - (before.Right - before.Left), borderHeight = form.Height - (before.Bottom - before.Top);
+        Check(SetWindowPos(form.Handle, IntPtr.Zero, 0, 0, size.Width + borderWidth, size.Height + borderHeight, 0x0016), "Could not resize the native preview window.");
     }
 
     private static void WindowScreenshot(Form form, string output, string name)
