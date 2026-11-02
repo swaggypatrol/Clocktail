@@ -923,12 +923,23 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     });
 
     /// <summary>One curve point's record across every data point the residency samples cover.</summary>
-    private sealed class PointRecord
+    public sealed class PointRecord
     {
+        /// <summary>The highest offset a stable / survived trial ran the point at, and the lowest a crash under a curve
+        /// trial found it at (kHz).</summary>
         public int? StableKhz, SurvivedKhz, CrashKhz;
+        /// <summary>The highest clock (P90) any stable trial ran the point at, and the lowest a curve-trial crash ran it at.</summary>
         public uint? StableMhz, CrashMhz;
-        public double StableSeconds;
-        public int Crashes;
+        /// <summary>The clock (P90) the card ran the point at in the stable trials at <see cref="StableKhz"/> (the highest
+        /// of them): below the setting when a clock lock, the power limit, temperature or another core offset held it.</summary>
+        public uint? StableRanMhz;
+        /// <summary>The seconds (unix) the point ran under load at <see cref="StableKhz"/> in stable trials: a second
+        /// two marks of one trial both cover counts once.</summary>
+        public readonly HashSet<long> StableCovered = [];
+        public double StableSeconds => StableCovered.Count;
+        /// <summary>Crashes under a curve trial; and crashes under any other trial (memory, XBAR, power, a limit, the fans,
+        /// a core P0 offset), which ran here but are not the curve's evidence.</summary>
+        public int Crashes, OtherCrashes;
     }
 
     private object ByPoint(string dataPath)
@@ -956,44 +967,52 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
                 crashed_at_mhz = v.CrashKhz / 1000.0,
                 crash_clock_mhz = v.CrashMhz,
                 crashes = v.Crashes,
+                crashes_under_other_trials = v.OtherCrashes,
             };
         }).ToList();
     }
 
     /// <summary>Every curve point's record across the data points the residency samples cover: the highest offset a stable
-    /// or survived trial ran it at, the lowest a crash found it at (the curve editor draws these beside its points).</summary>
+    /// or survived trial ran it at, the lowest a crash under a curve trial found it at (the curve editor draws these beside
+    /// its points).</summary>
     private SortedDictionary<int, PointRecord> PointRecords(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve,
         Action<DataPoint, int>? visit = null)
     {
         if (all.Count == 0) return [];
-        var ticks = residency.Between(all.Min(d => d.At - TimeSpan.FromMinutes(d.Minutes)), DateTimeOffset.Now);
+        var ticks = residency.Between(all.Min(Experiment.StartOf), DateTimeOffset.Now);
         return PointRecordsFrom(all, curve, ticks, visit);
     }
 
-    private static SortedDictionary<int, PointRecord> PointRecordsFrom(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve,
-        IReadOnlyList<Residency.Tick> ticks, Action<DataPoint, int>? visit = null)
+    /// <summary><see cref="PointRecords"/> over given samples, counted once per second (<see cref="Residency.OnePerSecond"/>).</summary>
+    public static SortedDictionary<int, PointRecord> PointRecordsFrom(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve,
+        IReadOnlyList<Residency.Tick> samples, Action<DataPoint, int>? visit = null)
     {
         var records = new SortedDictionary<int, PointRecord>();
+        var ticks = Residency.OnePerSecond(samples);
         foreach (var d in all)
         {
-            var start = d.At - TimeSpan.FromMinutes(d.Minutes);
+            var start = Experiment.StartOf(d);
             var during = ticks.Where(t => t.At >= start && t.At <= d.At).ToList();
             if (during.Count < 10) continue;   // before the sampler, or too short to say anything
             int[] offsets;
             try { offsets = VfOffsets.Decode(d.Curve); } catch (FormatException) { continue; }
-            // A crash belongs to where the card was when it fell over, not to the whole trial.
+            // A crash belongs to where the card was when it fell over, not to the whole trial; and to the curve only when
+            // the trial changed the curve (under any other the curve was merely on the card).
             if (d.Outcome == Experiment.Crash)
             {
+                bool curveTrial = Experiment.CurveChange(d.Change);
                 foreach (var (index, clock) in CrashAt(during, d.CrashUv, curve))
                 {
                     int off = offsets.ElementAtOrDefault(index);
                     if (!records.TryGetValue(index, out var rec)) records[index] = rec = new PointRecord();
+                    if (!curveTrial) { rec.OtherCrashes++; continue; }
                     rec.Crashes++;
                     if (rec.CrashKhz is not { } kc || off < kc) rec.CrashKhz = off;
                     if (clock is { } c && (rec.CrashMhz is not { } cm || c < cm)) rec.CrashMhz = c;
                 }
                 continue;
             }
+            int[]? near = null;
             foreach (var s in Stays(during, curve).Where(s => s.Share >= 0.1))
             {
                 if (d.Outcome is Experiment.Stable or Experiment.Survived) visit?.Invoke(d, s.Index);
@@ -1005,8 +1024,13 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
                         if (rec.StableMhz is not { } sm || s.ClockMhz > sm) rec.StableMhz = s.ClockMhz;
                         if (rec.StableKhz is not { } k || off >= k)
                         {
-                            rec.StableSeconds = rec.StableKhz == off ? rec.StableSeconds + s.Samples : s.Samples;
+                            // A higher offset starts the count again; at the same one, the seconds this trial ran here join it.
+                            if (rec.StableKhz != off) { rec.StableCovered.Clear(); rec.StableRanMhz = null; }
                             rec.StableKhz = off;
+                            if (rec.StableRanMhz is not { } r || s.ClockMhz > r) rec.StableRanMhz = s.ClockMhz;
+                            near ??= [.. during.Select(t => Nearest(curve, t.Uv)!.Index)];
+                            for (int i = 0; i < during.Count; i++)
+                                if (near[i] == s.Index) rec.StableCovered.Add(during[i].At.ToUnixTimeSeconds());
                         }
                         break;
                     case Experiment.Survived when rec.SurvivedKhz is not { } ks || off > ks:

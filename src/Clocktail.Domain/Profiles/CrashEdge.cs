@@ -5,7 +5,9 @@ namespace Clocktail.Domain.Profiles;
 /// <summary>
 /// This card's own edge, point by point: for each curve point, the lowest offset (kHz) a crash was recorded at there, from
 /// the crash data points that carry the flight recorder's voltage (the crash goes on the point nearest it, as by_point
-/// puts it). A live line then says how far the curve now sits under what crashed at the point it runs on.
+/// puts it). Only a crash under a curve trial (<see cref="Experiment.CurveChange"/>) sets the edge: under a memory, XBAR,
+/// power, limit, fan or core P0 offset trial the curve was merely on the card, and its offsets there say nothing about where
+/// the curve falls over. A live line then says how far the curve now sits under what crashed at the point it runs on.
 /// </summary>
 public static class CrashEdge
 {
@@ -15,7 +17,7 @@ public static class CrashEdge
         if (curve.Count == 0) return edge;
         foreach (var p in points)
         {
-            if (p.Outcome != Experiment.Crash || p.CrashUv is not { } uv) continue;
+            if (p.Outcome != Experiment.Crash || p.CrashUv is not { } uv || !Experiment.CurveChange(p.Change)) continue;
             int[] offsets;
             try { offsets = VfOffsets.Decode(p.Curve); } catch (FormatException) { continue; }
             var at = curve.MinBy(c => Math.Abs((long)c.VoltageUv - uv))!;

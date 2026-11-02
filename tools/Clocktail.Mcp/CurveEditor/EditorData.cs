@@ -29,8 +29,18 @@ public sealed record HistoryData(IReadOnlyList<CrashMark> Crashes, IReadOnlyList
 }
 
 /// <summary>What the record says about one curve point (data_points' by_point): the clock of the highest offset a trial
-/// marked stable ran it at, for how long, and of the highest a trial survived at.</summary>
-public sealed record EvidenceMark(int Index, double Mv, double? StableMhz, double StableSeconds, double? SurvivedMhz);
+/// marked stable ran it at (the setting, on today's base line), for how long, and of the highest a trial survived at.
+/// <paramref name="StableRanMhz"/>: the clock the card actually ran the point at in those stable trials (P90 of the samples);
+/// null when unknown.</summary>
+public sealed record EvidenceMark(int Index, double Mv, double? StableMhz, double StableSeconds, double? SurvivedMhz, double? StableRanMhz = null)
+{
+    /// <summary>Two of the window's 7.5 MHz clock steps: a stable setting the card ran this much under was not what it proved.</summary>
+    public const double HeldBelowMinMhz = 15;
+
+    /// <summary>How far under the stable setting the card ran in that test (a clock lock, the power limit, temperature or
+    /// another core offset held it there); null when it ran within <see cref="HeldBelowMinMhz"/> of it or is unknown.</summary>
+    public double? HeldBelowMhz => StableMhz is { } set && StableRanMhz is { } ran && set - ran >= HeldBelowMinMhz ? set - ran : null;
+}
 
 /// <summary>Everything the window shows, read once when it opens; the window itself reads nothing from the card.</summary>
 public sealed record EditorData(

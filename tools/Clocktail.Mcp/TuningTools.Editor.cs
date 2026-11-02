@@ -75,13 +75,9 @@ public sealed partial class TuningTools
 #endif
     });
 
-    /// <summary>Whether a trial's change was the curve's (adjust_curve, flatten_curve, set_curve, shift_curve, the editor): its
-    /// crash is evidence about the curve. Under a trial that moved XBAR, the memory, the wall, a limit or the fans the curve was
-    /// merely on the card. By the change's words: a curve trial's data point also carries the session's earlier writes and
-    /// wall, so the other fields do not tell. A core P0 offset trial moves every point too, but its data point's curve does
-    /// not carry the offset, so it is left out rather than pinned at the wrong clock.</summary>
-    public static bool CurveTrialChange(string change) =>
-        System.Text.RegularExpressions.Regex.IsMatch(change, @"MHz on points|flat top at|whole curve written|curve shifted|curve editor");
+    /// <summary>Whether a trial's change was the curve's, so its crash is evidence about the curve (<see cref="Experiment.CurveChange"/>,
+    /// the same rule the live crash edge and data_points' by_point use).</summary>
+    public static bool CurveTrialChange(string change) => Experiment.CurveChange(change);
 
     /// <summary>A trial of the window's own session still on the card: a save the server ended under (the agent left, the
     /// driver went away), for the agent to clear.</summary>
@@ -136,16 +132,17 @@ public sealed partial class TuningTools
     private HistoryData ReadEditorHistory(string dataPath, double[] mv, int[] baseKhz, VfCurveSnapshot curve)
     {
         var all = Experiment.ReadLast(dataPath, int.MaxValue);
-        var ticks = all.Count == 0 ? [] : residency.Between(all.Min(d => d.At - TimeSpan.FromMinutes(d.Minutes)), DateTimeOffset.Now);
+        var ticks = all.Count == 0 ? [] : residency.Between(all.Min(Experiment.StartOf), DateTimeOffset.Now);
         return ProjectEditorHistory(all, mv, baseKhz, curve, ticks);
     }
 
     /// <summary>Rebuild the plotted history from visible tests and their samples, without reading or writing the GPU.
-    /// The same projection runs when opening the window and after deleting a test.</summary>
+    /// The same projection runs when opening the window and after deleting a test. Samples count once per second, however
+    /// many servers' samplers wrote them (<see cref="Residency.OnePerSecond"/>).</summary>
     public static HistoryData ProjectEditorHistory(IReadOnlyList<DataPoint> all, double[] mv, int[] baseKhz,
         VfCurveSnapshot curve, IReadOnlyList<Residency.Tick> samples)
     {
-        var ticks = samples.OrderBy(t => t.At).ToList();
+        var ticks = Residency.OnePerSecond(samples);
         var crashes = new List<CrashMark>();
         var evidence = new List<EvidenceMark>();
         var indices = new Dictionary<DataPoint, HashSet<int>>();
@@ -160,7 +157,7 @@ public sealed partial class TuningTools
             int[] then;
             try { then = VfOffsets.Decode(d.Curve); } catch (FormatException) { continue; }
             if (then.Length != mv.Length) continue;
-            var start = d.At - TimeSpan.FromMinutes(d.Minutes);
+            var start = Experiment.StartOf(d);
             int lo = at.BinarySearch(start), hi = at.BinarySearch(d.At);
             lo = lo < 0 ? ~lo : lo; hi = hi < 0 ? ~hi : hi + 1;
             var during = ticks.GetRange(lo, Math.Max(0, hi - lo));
@@ -179,7 +176,7 @@ public sealed partial class TuningTools
             if (index >= mv.Length || (rec.StableKhz == null && rec.SurvivedKhz == null)) continue;
             evidence.Add(new EvidenceMark(index, mv[index],
                 rec.StableKhz is { } s ? CurveModel.Clock(baseKhz, index, s) / 1000.0 : null, rec.StableSeconds,
-                rec.SurvivedKhz is { } v ? CurveModel.Clock(baseKhz, index, v) / 1000.0 : null));
+                rec.SurvivedKhz is { } v ? CurveModel.Clock(baseKhz, index, v) / 1000.0 : null, rec.StableRanMhz));
         }
         // Older tests without residency still remain selectable from their recorded operating voltage.
         foreach (var d in all)
