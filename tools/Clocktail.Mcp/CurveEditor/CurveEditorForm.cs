@@ -20,11 +20,13 @@ namespace Clocktail.Mcp.CurveEditor;
 public sealed partial class CurveEditorForm : Form
 {
     private static Color C(int rgb, int a = 255) => Color.FromArgb(a, (rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
-    private static readonly Color Bg = C(0x10151c), PlotBg = C(0x141b24), GridMinor = C(0x1f2329), GridMajor = C(0x2a2f37),
-        AxisText = C(0x96a3b5), TextC = C(0xe7edf5), Dim = C(0x8996a8), CurveC = C(0xeef1f5), ChangedC = C(0x73bfff),
-        Accent = C(0x73bfff), Ghost = C(0x8fa3bf), StockC = C(0x58606d), CrashC = C(0xff4d6d), RunC = C(0x2ec4b6),
-        Good = C(0x6bd98f), PanelC = C(0x1b2430), PanelBorder = C(0x324155), Primary = C(0x3d8bff), Err = C(0xff6b6b),
-        Unverified = C(0xefc078);
+    // Warm, Claude-style dark palette: charcoal and cream neutrals with a clay accent; crash, stable and unverified marks
+    // keep hues of their own so the evidence stays readable against the accent.
+    private static readonly Color Bg = C(0x1c1b19), PlotBg = C(0x22211e), GridMinor = C(0x2c2a27), GridMajor = C(0x3a3733),
+        AxisText = C(0xaba69c), TextC = C(0xf0eee6), Dim = C(0x8f8a80), CurveC = C(0xfaf9f5), ChangedC = C(0xe08a6a),
+        Accent = C(0xd97757), Ghost = C(0xb0a596), StockC = C(0x635e56), CrashC = C(0xf2557a), RunC = C(0x7fb3a3),
+        Good = C(0xa3c47e), PanelC = C(0x2a2825), PanelBorder = C(0x48443d), Primary = C(0xc96442), Err = C(0xf07a6a),
+        Unverified = C(0xe9c46a);
 
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 

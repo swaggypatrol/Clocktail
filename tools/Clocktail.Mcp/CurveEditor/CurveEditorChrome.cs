@@ -26,8 +26,8 @@ public sealed partial class CurveEditorForm
                 TabIndex = Controls.Count, Cursor = Cursors.Hand,
             };
             button.FlatAppearance.BorderColor = PanelBorder;
-            button.FlatAppearance.MouseOverBackColor = C(0x29374a);
-            button.FlatAppearance.MouseDownBackColor = C(0x314763);
+            button.FlatAppearance.MouseOverBackColor = C(0x36332f);
+            button.FlatAppearance.MouseDownBackColor = C(0x423e38);
             button.Click += (_, _) => { if (!_busy) click(); };
             _controlTips.SetToolTip(button, tip);
             Controls.Add(button);
@@ -49,7 +49,7 @@ public sealed partial class CurveEditorForm
                 UseVisualStyleBackColor = false,
             };
             box.FlatAppearance.BorderColor = PanelBorder;
-            box.FlatAppearance.CheckedBackColor = C(0x24374b);
+            box.FlatAppearance.CheckedBackColor = C(0x3d3029);
             box.FlatAppearance.MouseOverBackColor = PanelC;
             box.CheckedChanged += (_, _) =>
             {
@@ -103,8 +103,8 @@ public sealed partial class CurveEditorForm
         _saveButton.BackColor = Primary;
         _saveButton.ForeColor = Color.White;
         _saveButton.FlatAppearance.BorderColor = Primary;
-        _saveButton.FlatAppearance.MouseOverBackColor = C(0x559aff);
-        _saveButton.FlatAppearance.MouseDownBackColor = C(0x2872df);
+        _saveButton.FlatAppearance.MouseOverBackColor = C(0xd97757);
+        _saveButton.FlatAppearance.MouseDownBackColor = C(0xb5583a);
         CancelButton = _closeButton;
         ApplyChromeFonts();
         LayoutChrome();
@@ -200,7 +200,7 @@ public sealed partial class CurveEditorForm
             TextLine(g, "Drag a point · Shift: move tail · Scroll: zoom", _small, Dim, new(540 * s, 88 * s, w - 564 * s, 33 * s), StringAlignment.Far);
         if (w / s >= 970)
             TextLine(g, "History snapshot · not live", _small, Dim, new(660 * s, 136 * s, w - 684 * s, 28 * s), StringAlignment.Far);
-        using var pen = new Pen(C(0x253140), s);
+        using var pen = new Pen(C(0x34312d), s);
         g.DrawLine(pen, 24 * s, 168 * s, w - 24 * s, 168 * s);
     }
 
@@ -237,7 +237,7 @@ public sealed partial class CurveEditorForm
             : above > 0 ? $"{above} points at / above a crashed curve setting"
             : changed == 0 ? "GPU unchanged · edits apply only when you save" : $"{changed} points changed · max lift {Signed(MaxLift().Lift)} MHz";
         float right = w - (_done ? 326 : 424) * s;
-        TextLine(g, summary, _small, above > 0 && !_done ? C(0xefc078) : Dim, new(24 * s, h - 58 * s, Math.Max(20, right - 24 * s), 36 * s));
+        TextLine(g, summary, _small, above > 0 && !_done ? Unverified : Dim, new(24 * s, h - 58 * s, Math.Max(20, right - 24 * s), 36 * s));
     }
 
     private void ShowDetails()
@@ -277,7 +277,7 @@ public sealed partial class CurveEditorForm
         foreach (var button in new[] { close, copy })
         {
             button.FlatAppearance.BorderColor = PanelBorder;
-            button.FlatAppearance.MouseOverBackColor = C(0x29374a);
+            button.FlatAppearance.MouseOverBackColor = C(0x36332f);
         }
         copy.Click += (_, _) =>
         {
