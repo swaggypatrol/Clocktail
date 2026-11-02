@@ -461,8 +461,8 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         }
 
         // The trial on the card must still be the one written before the run: a write that got past the lease (or a reset
-        // that put the daily profile back) means the run measured something else.
-        Comparison? Moved() => TrialAt() == stamp ? null : Done(Comparison.Unjudged, "the trial on the card changed during the measurement: the run is not the setting's");
+        // that put the daily profile back) means the run measured something else. A crash on record is the same trial (SameTrial).
+        Comparison? Moved() => SameTrial(TrialAt(), stamp) ? null : Done(Comparison.Unjudged, "the trial on the card changed during the measurement: the run is not the setting's");
 
         // A bad bit with the GPU alive: recorded here, against the candidate.
         Comparison Crash(UncoreRun r)

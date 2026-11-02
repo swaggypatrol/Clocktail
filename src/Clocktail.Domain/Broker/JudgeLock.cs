@@ -20,6 +20,17 @@ public static class JudgeLock
     /// every write after the lock stands down, as before.</param>
     public sealed record Info(int Pid, string? RunId = null, string? Label = null, DateTimeOffset? StartedUtc = null, bool Waits = false);
 
+    /// <summary>
+    /// What <see cref="Live(string, IHost, out string)"/> answers for a lock another process keeps open past its tries: a
+    /// taker checking it (<see cref="TakeOver"/>) or its holder giving it back (<see cref="Release"/>), both of which let
+    /// no one else read it. The run in it cannot be read, so it is busy, and it names no run (pid 0, no RunId): no lease
+    /// matches it. Every Clocktail run waits for the operation in flight, so this one is taken to wait as well.
+    /// </summary>
+    public static readonly Info OpenElsewhere = new(0, Label: "judge.lock is open by another process", Waits: true);
+
+    /// <summary>Whether <paramref name="info"/> is a run read from a lock, not <see cref="OpenElsewhere"/>.</summary>
+    public static bool NamesRun(Info info) => info.Pid > 0;
+
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
     /// <summary>Where the broker looks: the per-user state root (the broker runs elevated as the user, so its
@@ -59,7 +70,8 @@ public static class JudgeLock
     public static string? BusyReason(IEnumerable<string> paths, IHost host, out string trace) =>
         Live(paths, host, out trace) is { } info ? Reason(info) : null;
 
-    /// <summary>The first live run any of <paramref name="paths"/> names, or null; the trace covers every path looked at.</summary>
+    /// <summary>The first live run any of <paramref name="paths"/> names, or null; the trace covers every path looked at. A
+    /// lock open by another process (<see cref="OpenElsewhere"/>) is answered only when no path names a run.</summary>
     public static Info? Live(IEnumerable<string> paths, IHost host, out string trace)
     {
         var traces = new List<string>();
@@ -68,7 +80,7 @@ public static class JudgeLock
         {
             var info = Live(p, host, out var t);
             traces.Add(t);
-            live ??= info;
+            if (info != null && (live == null || !NamesRun(live) && NamesRun(info))) live = info;
         }
         trace = string.Join("; ", traces);
         return live;
@@ -81,19 +93,31 @@ public static class JudgeLock
     /// reached (file present, pid parsed, liveness, any exception), so a wrong "free" can be read off the broker log.</summary>
     public static string? BusyReason(string path, IHost host, out string trace) => Live(path, host, out trace) is { } info ? Reason(info) : null;
 
-    /// <summary>The run <paramref name="path"/> names while its process is alive, or null.</summary>
+    /// <summary>The run <paramref name="path"/> names while its process is alive, or null. A lock another process has open
+    /// so that it cannot be read (a taker checking it, its holder giving it back) is tried again a few times, and if it
+    /// stays open it is <see cref="OpenElsewhere"/>: busy, never free, since the run in it may be live.</summary>
     public static Info? Live(string path, IHost host, out string trace)
     {
         Info? info;
-        try
+        for (int attempt = 1; ; attempt++)
         {
-            if (!File.Exists(path)) { trace = $"{path}: absent"; return null; }
-            info = JsonSerializer.Deserialize<Info>(File.ReadAllText(path), Json);
-        }
-        catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException)
-        {
-            trace = $"{path}: unreadable ({e.GetType().Name}: {e.Message})";
-            return null;
+            try
+            {
+                if (!File.Exists(path)) { trace = $"{path}: absent"; return null; }
+                info = JsonSerializer.Deserialize<Info>(File.ReadAllText(path), Json);
+                break;
+            }
+            catch (IOException e) when (InUse(e))
+            {
+                if (attempt < ReadAttempts) { Thread.Sleep(ReadRetryDelay); continue; }
+                trace = $"{path}: open by another process after {ReadAttempts} tries ({e.Message}), so busy";
+                return OpenElsewhere;
+            }
+            catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException)
+            {
+                trace = $"{path}: unreadable ({e.GetType().Name}: {e.Message})";
+                return null;
+            }
         }
 
         if (info == null || info.Pid <= 0) { trace = $"{path}: no pid"; return null; }
@@ -102,8 +126,16 @@ public static class JudgeLock
         return alive ? info : null;
     }
 
-    public static string Reason(Info info) =>
+    public static string Reason(Info info) => !NamesRun(info) ? info.Label ?? OpenElsewhere.Label! :
         $"pid {info.Pid}{(string.IsNullOrWhiteSpace(info.Label) ? "" : $" '{info.Label}'")}";
+
+    /// <summary>How often <see cref="Live(string, IHost, out string)"/> tries a lock another process has open, and how long
+    /// apart: far longer than a taker or a holder keeps it open to check or delete it.</summary>
+    private const int ReadAttempts = 5;
+    private static readonly TimeSpan ReadRetryDelay = TimeSpan.FromMilliseconds(20);
+
+    /// <summary>A sharing or lock violation: another process has the file open and lets no one read it.</summary>
+    private static bool InUse(IOException e) => (e.HResult & 0xFFFF) is 32 or 33;
 
     /// <summary>How often a lock another process has open is tried again, and how long apart: about half a second in all,
     /// far longer than any taker keeps it open to write or check it.</summary>
@@ -119,13 +151,14 @@ public static class JudgeLock
     /// cannot both create it at one path. A stale lock (its process gone, or no pid in it) is taken over through a handle
     /// no other taker can open at the same time (<see cref="TakeOver"/>), so the file deleted is always the one found
     /// stale, never a lock another taker wrote in between. A lock another process has open (a taker still writing it) is
-    /// tried again, not taken as stale. Once written, the packaged copies are looked at again (<see cref="Settle"/>):
+    /// tried again, not taken as stale, and is not a holder either (<see cref="OpenElsewhere"/>: the loop below finds out
+    /// what is in it). Once written, the packaged copies are looked at again (<see cref="Settle"/>):
     /// a packaged and an unpackaged taker create different files, so creating ours alone does not make it the only one.
     /// </summary>
     public static bool TryAcquire(string path, Info mine, IHost host, string localAppData, out string? heldBy)
     {
         heldBy = null;
-        if (Live(Candidates(path, localAppData), host, out _) is { } other && other.RunId != mine.RunId)
+        if (Live(Candidates(path, localAppData), host, out _) is { } other && NamesRun(other) && other.RunId != mine.RunId)
         {
             heldBy = Reason(other);
             return false;
@@ -191,14 +224,15 @@ public static class JudgeLock
     /// unpackaged one, and it looks in every package's copy. A packaged taker may not see the real file from its copy, so
     /// only one side may see the other. Of two runs the later (by StartedUtc, then RunId) gives its own lock back at once.
     /// The earlier waits up to <paramref name="wait"/> (<see cref="SettleWait"/>) for the later's lock to go, and gives its
-    /// own back if it stays: that run saw nothing and holds the lease. Either way at most one run keeps it.
+    /// own back if it stays: that run saw nothing and holds the lease. Either way at most one run keeps it. A lock another
+    /// process has open a moment (<see cref="OpenElsewhere"/>: often a taker checking ours) names no run and is passed over.
     /// </summary>
     public static bool Settle(string path, Info mine, IHost host, string localAppData, out string? heldBy, TimeSpan? wait = null)
     {
         var until = DateTime.UtcNow + (wait ?? SettleWait);
         while (true)
         {
-            var other = Candidates(path, localAppData).Select(p => Live(p, host, out _)).FirstOrDefault(i => i != null && i.RunId != mine.RunId);
+            var other = Candidates(path, localAppData).Select(p => Live(p, host, out _)).FirstOrDefault(i => i != null && NamesRun(i) && i.RunId != mine.RunId);
             if (other == null) { heldBy = null; return true; }
             if (!Earlier(mine, other) || DateTime.UtcNow >= until)
             {

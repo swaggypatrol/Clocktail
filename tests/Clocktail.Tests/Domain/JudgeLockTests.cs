@@ -200,6 +200,60 @@ public class JudgeLockTests : IDisposable
         Assert.False(File.Exists(_path));
     }
 
+    /// <summary>The handle a taker checks a lock through (<c>TakeOver</c>) and a holder gives it back through (<c>Release</c>):
+    /// it lets others do nothing but delete.</summary>
+    private static FileStream Checking(string path) => new(path, FileMode.Open, FileAccess.Read, FileShare.Delete);
+
+    /// <summary>While another process checks or gives back the lock, the broker cannot read it. Its judge read that as no
+    /// lock, so a write landed under a live run. A lock that stays open is busy, never free, and names no run.</summary>
+    [Fact]
+    public void A_lock_another_process_keeps_open_is_busy_not_free()
+    {
+        File.WriteAllText(_path, """{"Pid":100,"RunId":"r1","Label":"burn"}""");
+        using (Checking(_path))
+        {
+            var info = JudgeLock.Live(_path, _host, out var trace);
+            Assert.NotNull(info);
+            Assert.False(JudgeLock.NamesRun(info));
+            Assert.Null(info.RunId);
+            Assert.Contains("open by another process", trace);
+            Assert.Equal("judge.lock is open by another process", JudgeLock.BusyReason(_path, _host));
+            Assert.Equal("judge.lock is open by another process", BrokerDispatcher.Judge(() => JudgeLock.Live([_path], _host, out _))());
+        }
+        Assert.Contains("burn", JudgeLock.BusyReason(_path, _host));
+    }
+
+    /// <summary>A lock open only a moment (a taker's check is far shorter than the tries) is read once it is free: the run in it.</summary>
+    [Fact]
+    public async Task A_lock_open_a_moment_is_read_once_it_is_free()
+    {
+        File.WriteAllText(_path, """{"Pid":100,"RunId":"r1","Label":"burn"}""");
+        var check = Checking(_path);
+        var closer = Task.Run(async () => { await Task.Delay(30); check.Dispose(); });
+        try { Assert.Contains("burn", JudgeLock.BusyReason(_path, _host)); }
+        finally { await closer; }
+    }
+
+    /// <summary>A lock open elsewhere is not a holder to a taker: a stale one another taker is checking is still taken over
+    /// once it is free, and a run's own fresh lock that a taker is checking is not given back by <c>Settle</c>.</summary>
+    [Fact]
+    public async Task A_lock_open_elsewhere_does_not_refuse_a_taker_or_make_a_run_give_its_own_back()
+    {
+        File.WriteAllText(_path, """{"Pid":999,"RunId":"old"}""");   // its process is gone
+        var check = Checking(_path);
+        var closer = Task.Run(async () => { await Task.Delay(200); check.Dispose(); });
+        try { Assert.True(JudgeLock.TryAcquire(_path, new JudgeLock.Info(100, "run-1"), _host, NoLocal, out var by), by); }
+        finally { await closer; }
+        Assert.Equal("run-1", JudgeLock.Live(_path, _host, out _)!.RunId);
+
+        var mine = new JudgeLock.Info(100, "run-1");
+        check = Checking(_path);
+        closer = Task.Run(async () => { await Task.Delay(200); check.Dispose(); });
+        try { Assert.True(JudgeLock.Settle(_path, mine, _host, NoLocal, out var by), by); }
+        finally { await closer; }
+        Assert.Equal("run-1", JudgeLock.Live(_path, _host, out _)!.RunId);
+    }
+
     private static readonly DateTimeOffset T0 = DateTimeOffset.Parse("2026-11-01T12:00:00Z");
 
     /// <summary>A real %LocalAppData% and one packaged app's cache of it, as <see cref="A_lock_redirected_into_a_packaged_apps_cache_is_seen"/>.</summary>
@@ -245,7 +299,17 @@ public class JudgeLockTests : IDisposable
             var mine = new JudgeLock.Info(100, "run-a", "burn", T0);
             Write(real, mine);
             Write(cached, new JudgeLock.Info(100, "run-b", "lab_test", T0.AddSeconds(1)));
-            var later = Task.Run(async () => { await Task.Delay(100); File.Delete(cached); });
+            // The delete is tried again while the file is open for a read (Settle's look, a scanner): one refused delete
+            // left the later run's lock in place and the test failed now and then.
+            var later = Task.Run(async () =>
+            {
+                await Task.Delay(100);
+                for (int i = 0; ; i++)
+                {
+                    try { File.Delete(cached); return; }
+                    catch (IOException) when (i < 50) { await Task.Delay(20); }
+                }
+            });
             Assert.True(JudgeLock.Settle(real, mine, _host, local, out var by, TimeSpan.FromSeconds(5)));
             later.Wait();
             Assert.Null(by);

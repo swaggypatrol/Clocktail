@@ -157,13 +157,28 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
             ? at.ToString() + (t.TryGetProperty("Ending", out var end) && end.ValueKind == JsonValueKind.String ? $" ({end.GetString()})" : "") : null;
     }
 
+    /// <summary>What <see cref="TrialAt()"/> adds when the service has the trial's crash on record while its give-back waits
+    /// ("crashed-held").</summary>
+    private const string CrashEnding = " (crash)";
+
+    /// <summary>
+    /// Whether two <see cref="TrialAt()"/> answers name the same trial on the card: the same write time, and the same ending,
+    /// except that a crash on record is the same trial still. The service puts a driver reset's crash on the trial in force
+    /// while it cannot give the card back yet, and the card is on that trial until it can; any other ending (someone ended
+    /// the trial during the run) is a change.
+    /// </summary>
+    public static bool SameTrial(string? a, string? b) => WithoutCrash(a) == WithoutCrash(b);
+
+    private static string? WithoutCrash(string? stamp) => stamp is { } s && s.EndsWith(CrashEnding, StringComparison.Ordinal) ? s[..^CrashEnding.Length] : stamp;
+
     /// <summary>How long a job waits, after a run that saw a driver reset, for the service to record the crash.</summary>
     public static readonly TimeSpan CrashRecordWait = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// After a run that saw a driver reset, before anything else of the job's touches the card: waits until the service has
-    /// recorded the crash, which takes the trial written at <paramref name="stamp"/> out of force (<see cref="TrialAt()"/>),
-    /// at most <see cref="CrashRecordWait"/>. The service records it seconds after the reset is logged (it lets the driver
+    /// recorded the crash and given the card back, which takes the trial written at <paramref name="stamp"/> out of force
+    /// (<see cref="TrialAt()"/>; a crash on record with the trial still in force is not that: <see cref="SameTrial"/>), at
+    /// most <see cref="CrashRecordWait"/>. The service records it seconds after the reset is logged (it lets the driver
     /// settle, then gives back what is held: the job must not hold judge.lock while it waits); until 0.3.8 the job's
     /// back_to_daily in between took the trial off the record as survived, and the crash went to the daily profile. True
     /// once recorded.
@@ -171,13 +186,13 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     protected bool CrashRecorded(string? stamp) => Recorded(() => (TrialAt(out bool answered), answered), stamp, CrashRecordWait, Thread.Sleep);
 
     /// <summary><see cref="CrashRecorded"/>'s wait: <paramref name="look"/> asked every second until the service answers
-    /// with a trial other than <paramref name="stamp"/> (no answer says nothing: a busy pipe, a worker handing over after the
-    /// reset), at most <paramref name="within"/>.</summary>
+    /// with a trial other than <paramref name="stamp"/> (<see cref="SameTrial"/>; no answer says nothing: a busy pipe, a
+    /// worker handing over after the reset), at most <paramref name="within"/>.</summary>
     public static bool Recorded(Func<(string? Stamp, bool Answered)> look, string? stamp, TimeSpan within, Action<TimeSpan> sleep)
     {
         for (var waited = TimeSpan.Zero; ; waited += TimeSpan.FromSeconds(1))
         {
-            if (look() is (var now, true) && now != stamp) return true;
+            if (look() is (var now, true) && !SameTrial(now, stamp)) return true;
             if (waited >= within) return false;
             sleep(TimeSpan.FromSeconds(1));
         }

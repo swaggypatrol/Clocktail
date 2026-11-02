@@ -421,7 +421,7 @@ public sealed partial class BrokerDispatcher
                     return Fail($"the trial on the card crashed ({inForce.Change}) and waits for the card to be free to go back: a crash is not kept; back_to_daily", BrokerCode.CannotWrite);
                 if (writes.Count == 0)
                     return Fail(adopt ? "nothing on the card differs from stock or from the daily profile; nothing to keep" : "nothing this broker holds differs from stock; nothing to keep", BrokerCode.CannotWrite);
-                var trialKept = CloseTrial(target, Experiment.Stable, "kept as the daily profile");
+                var trialKept = CloseTrial(target, Experiment.Stable, out _, "kept as the daily profile");
                 string listed = string.Join("; ", writes.Select(w => $"{w.Kind}/{w.Key}={w.Value}"));
                 // What was adopted before stays adopted (a trial over it records it as its original); this keep's own adds to it.
                 IReadOnlyList<ProfileWrite> adoptedAll = [.. (profile?.Adopted ?? []).Where(a => !adopted.Any(n => n.Kind == a.Kind && n.Key == a.Key)), .. adopted];
@@ -652,15 +652,24 @@ public sealed partial class BrokerDispatcher
                 // the person is at the machine and the agent adjusts from there (the user, 2026-10-19).
                 uint? uv = req.Uv > 0 ? req.Uv : null;
                 List<string> how = [];
+                bool appended;
                 var crash = req.HungAt is { } stopped
-                    ? CrashedAt(target, req.Value, uv, req.AnsweredAt ?? stopped, stopped, out how)
-                    : CloseTrial(target, Experiment.Crash, req.Value, uv);
+                    ? CrashedAt(target, req.Value, uv, req.AnsweredAt ?? stopped, stopped, out how, out appended)
+                    : CloseTrial(target, Experiment.Crash, out appended, req.Value, uv);
                 if (profile != null)
                 {
                     profile = profile.Noted(_host.Now, crash != null
                         ? $"{req.Value ?? "driver reset"} during an experiment trial ({crash.Change}): a data point; put back unchanged"
                         : $"{req.Value ?? "driver reset"}: put back unchanged");
                     profile.Save(path);
+                }
+                if (_crashHeld.Remove(target.StableId, out var heldAt) && crash != null && !appended && crash.TrialAt == heldAt)
+                {
+                    // This reset's crash was recorded and logged while the give-back waited ("crashed-held"): no second
+                    // point, and the tuning log says only that the card is off the trial now.
+                    Log(target, $"Crash · trial off the card · {crash.Game}", [
+                        $"The crash of the trial ({crash.Change}) was on record already: the give-back has landed, and the trial is off the card and the record"]);
+                    return Ok(new { success = true, path, profile, point = crash, on_record_already = true, applied = Array.Empty<object>() });
                 }
                 Log(target, crash != null ? $"Crash · during trial · {crash.Game}" : "Crash · daily profile", [
                     $"Evidence: {req.Value ?? "driver reset"}",
@@ -681,9 +690,10 @@ public sealed partial class BrokerDispatcher
                 uint? uv = req.Uv > 0 ? req.Uv : null;
                 List<string> how = [];
                 var crash = req.HungAt is { } stopped
-                    ? CrashedAt(target, req.Value, uv, req.AnsweredAt ?? stopped, stopped, out how, held: true)
+                    ? CrashedAt(target, req.Value, uv, req.AnsweredAt ?? stopped, stopped, out how, out _, held: true)
                     : CrashHeld(target, req.Value, uv);
                 if (crash == null) return Ok(new { success = true, path, profile, point = (DataPoint?)null, applied = Array.Empty<object>() });
+                _crashHeld[target.StableId] = crash.TrialAt;
                 Log(target, $"Crash · during trial · {crash.Game}", [
                     $"Evidence: {req.Value ?? "driver reset"}",
                     req.HungAt is { } hung ? $"The GPU stopped answering at {When(hung)}" : null,
@@ -1412,17 +1422,19 @@ public sealed partial class BrokerDispatcher
     }
 
     /// <summary>Closes the trial in force, if any, with this outcome and returns its data point; null when no trial was in
-    /// force. Recorded as <see cref="Records"/> says (a driver reset after a crash already on record is not a second one).
-    /// The session stays open. Only for a card that keeps what it holds (a keep makes the trial the daily profile) or was
+    /// force. Recorded as <see cref="Records"/> says (a driver reset after a crash already on record is not a second one):
+    /// <paramref name="appended"/> says whether the point was written now. The session stays open. Only for a card that keeps what it holds (a keep makes the trial the daily profile) or was
     /// taken off the trial already (a driver reset); one that has yet to be taken off it leaves through <see cref="Leave"/>.</summary>
-    private DataPoint? CloseTrial(IGpuTarget target, string outcome, string? note = null, uint? crashUv = null)
+    private DataPoint? CloseTrial(IGpuTarget target, string outcome, out bool appended, string? note = null, uint? crashUv = null)
     {
+        appended = false;
         lock (_experiment)
         {
             var path = Experiment.PathBeside(target.Journal.Path);
             if (Experiment.Load(path) is not { Trial: { } trial } exp) return null;
             var point = Records(trial, outcome) ? exp.Point(outcome, _host.Now, note, crashUv) : null;
             if (point != null) Experiment.Append(Experiment.DataPathBeside(target.Journal.Path), point);
+            appended = point != null;
             Gone(target, exp, trial with { Ending = point != null ? outcome : trial.Ending ?? outcome });
             (exp with { Trial = null }).Save(path);
             return point ?? exp.Point(outcome, _host.Now, note, crashUv);
@@ -1477,6 +1489,11 @@ public sealed partial class BrokerDispatcher
     /// written in the same tick. Under the operation lock, as every recovery and every trial write is.</summary>
     private readonly Dictionary<string, string?> _givenBack = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>The trial (its write time) whose crash each GPU's "crashed-held" logged, until the "crashed" after it: that
+    /// one logs only that the card is off the trial, not the crash again. In memory: a reset the next worker answers is
+    /// logged in full. Under the operation lock, as both requests are.</summary>
+    private readonly Dictionary<string, DateTimeOffset?> _crashHeld = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Whether a recovery took the card off <paramref name="trial"/> (it was in force when one ran).</summary>
     private bool GivenBack(IGpuTarget target, ExperimentTrial trial) =>
         _givenBack.GetValueOrDefault(target.StableId) is { } back && back == Identity(trial);
@@ -1496,10 +1513,12 @@ public sealed partial class BrokerDispatcher
     /// when no trial was on the card then. <paramref name="held"/>: the give-back has not landed ("crashed-held"), so the
     /// card may still hold the trial in force: nothing leaves the record, and the trial in force that crashed stays in force
     /// with its ending on record (<see cref="ExperimentTrial.Ending"/>), as <see cref="Leave"/> keeps one held off.
+    /// <paramref name="appended"/>: whether the point was written now, not on record already.
     /// </summary>
-    private DataPoint? CrashedAt(IGpuTarget target, string? note, uint? crashUv, DateTimeOffset answered, DateTimeOffset stopped, out List<string> lines, bool held = false)
+    private DataPoint? CrashedAt(IGpuTarget target, string? note, uint? crashUv, DateTimeOffset answered, DateTimeOffset stopped, out List<string> lines, out bool appended, bool held = false)
     {
         lines = [];
+        appended = false;
         lock (_experiment)
         {
             string path = Experiment.PathBeside(target.Journal.Path), data = Experiment.DataPathBeside(target.Journal.Path);
@@ -1530,7 +1549,8 @@ public sealed partial class BrokerDispatcher
             if (onCard != null)
             {
                 point = new Experiment(game!, null, onCard.At, onCard).Point(Experiment.Crash, stopped, note, crashUv)!;
-                if (Records(onCard, Experiment.Crash)) Experiment.Append(data, point);
+                appended = Records(onCard, Experiment.Crash);
+                if (appended) Experiment.Append(data, point);
                 if (gone >= 0) list![gone] = list[gone] with { Trial = onCard with { Ending = Experiment.Crash } };
             }
             if (held)
