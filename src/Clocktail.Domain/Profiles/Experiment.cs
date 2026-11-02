@@ -140,6 +140,18 @@ public sealed record Experiment(string Game, string? Note, DateTimeOffset Starte
                 t.FanCurve, t.FanPct, t.MemoryKhz, t.XbarKhz, t.XbarVdemandUv, t.Writes, t.At)
             : null;
 
+    /// <summary>Whether a trial's change was the curve's (adjust_curve, flatten_curve, set_curve, shift_curve, the curve
+    /// editor): its crash is evidence about the curve. Under a trial that moved XBAR, the memory, the wall, a limit or the
+    /// fans the curve was merely on the card. By the change's words: a curve trial's data point also carries the session's
+    /// earlier writes and wall, so the other fields do not tell. A core P0 offset trial moves every point too, but its data
+    /// point's curve does not carry the offset, so it is left out rather than pinned at the wrong clock.</summary>
+    public static bool CurveChange(string change) =>
+        System.Text.RegularExpressions.Regex.IsMatch(change, @"MHz on points|flat top at|whole curve written|curve shifted|curve editor");
+
+    /// <summary>When the data point's trial went on the card: <see cref="DataPoint.TrialAt"/>, or for an older record
+    /// without it, the moment less its minutes (rounded to 0.1 min, so up to 3 s off).</summary>
+    public static DateTimeOffset StartOf(DataPoint point) => point.TrialAt ?? point.At - TimeSpan.FromMinutes(point.Minutes);
+
     public static void Append(string dataPath, DataPoint point)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(dataPath))!);

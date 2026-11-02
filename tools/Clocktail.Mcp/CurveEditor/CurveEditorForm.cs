@@ -884,6 +884,8 @@ public sealed class CurveEditorForm : Form
             if (_d.Evidence.FirstOrDefault(e => e.Index == i) is { } ev)
             {
                 if (ev.StableMhz is { } st) lines.Add(($"Highest marked stable: {Fmt(st)} MHz ({Duration((int)ev.StableSeconds)}){(now > st + 0.01 ? $"; now {now - st:0} higher" : "")}", now > st + 0.01 ? Accent : Good));
+                if (ev.HeldBelowMhz is { } held && ev.StableRanMhz is { } ranSt)
+                    lines.Add(($"Held below the setting in that test: ran {Fmt(ranSt)} MHz (P90, {held:0} lower)", Dim));
                 if (ev.SurvivedMhz is { } sv && (ev.StableMhz is not { } st2 || sv > st2)) lines.Add(($"Highest survived: {Fmt(sv)} MHz", Dim));
             }
             var crashes = _d.Crashes.Where(c => c.Index == i).ToList();
