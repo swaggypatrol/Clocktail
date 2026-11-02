@@ -254,7 +254,9 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                                 : $"the service did not write {offset:+0;-0;0} MHz: {w.Error}", offset);
                         Thread.Sleep(3000);
                     }
-                    stamp = TrialAt(out _, out trialId);
+                    stamp = TrialAt(out bool answered, out trialId);
+                    if (!answered || trial && string.IsNullOrWhiteSpace(trialId))
+                        return Finish(SweepStatus.Failed, "the service could not identify the trial to measure: no measurement started; update the service and rerun", offset);
                     // A step that writes nothing measures the daily profile: no trial may be in force then (one another
                     // agent wrote during the warm-up would be measured as this offset).
                     if (!trial && stamp != null)

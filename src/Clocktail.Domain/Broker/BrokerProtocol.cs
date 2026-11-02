@@ -26,8 +26,8 @@ public sealed record BrokerRequest(
     bool AllowCreate = false,
     bool TakeOver = false,
     /// <summary>For <see cref="OpWrite"/> and <see cref="OpProve"/>: the cell's key within its kind. For
-    /// <see cref="OpExperiment"/> "crash": the identity of the trial the run measured
-    /// (<see cref="Clocktail.Domain.Profiles.ExperimentTrial.Id"/>); the crash is refused when another trial is in force.</summary>
+    /// <see cref="OpExperiment"/> "stable" or "crash": the identity of the trial the run measured
+    /// (<see cref="Clocktail.Domain.Profiles.ExperimentTrial.Id"/>); the result is refused when another trial is in force.</summary>
     string? Key = null,
     /// <summary>For <see cref="OpWrite"/>: the value in the cell's canonical encoding.</summary>
     string? Value = null,
@@ -50,7 +50,10 @@ public sealed record BrokerRequest(
     /// the crash is the trial's that was on the card then, even one taken off the record since. Null when not known
     /// (0.3.8).</summary>
     DateTimeOffset? HungAt = null,
-    DateTimeOffset? AnsweredAt = null)
+    DateTimeOffset? AnsweredAt = null,
+    /// <summary>The complete profile snapshot approved by the person. keep/adopt/preset check it under the operation
+    /// lock before changing the card or saved profile; a changed snapshot requires a new preview and confirmation.</summary>
+    string? ExpectedProfileFingerprint = null)
 {
     public const string OpPing = "ping";
     /// <summary>Guarded game-test session: info, begin, check, lever, finish and interrupted-run recovery.</summary>
@@ -93,7 +96,8 @@ public sealed record BrokerRequest(
     /// it the same way while the give-back has not landed, the trial kept in force with the crash as its ending (the
     /// service's own too); "after-reset" then writes the profile back
     /// unchanged once the GPU is idle, unless a trial written since is in force; "start" is the service's "apply" at start,
-    /// which leaves alone a trial written since the service began. Every one of
+    /// which leaves alone a trial written since the service began; "finish-job" is an automatic job's cleanup, naming
+    /// its owner in <see cref="Lease"/>, and leaves another owner's trial unchanged. Every one of
     /// them that changes the card or the profile is an entry in the tuning log. Not itself a write: "apply" and "after-reset"
     /// send each write through <see cref="OpWrite"/>, which takes the window and every guard.
     /// </summary>

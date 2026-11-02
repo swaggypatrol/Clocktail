@@ -51,7 +51,10 @@ public sealed record ExperimentTrial(
     /// <summary>The trial's identity, given when it was written ("try") and kept while it stays in force (a hand-back
     /// writes a new <see cref="At"/>, not a new identity): a run that measured this trial records its crash against this
     /// identity, so a trial written after the run cannot take it. Null: written by a service that gave none.</summary>
-    string? Id = null);
+    string? Id = null,
+    /// <summary>The automatic job that wrote this trial. Retained across hand-backs, so an old job's cleanup cannot
+    /// end a trial another agent wrote, even when the job lost the response to its own write.</summary>
+    string? JobId = null);
 
 /// <summary>One data point: how a trial ended in a game.</summary>
 public sealed record DataPoint(
