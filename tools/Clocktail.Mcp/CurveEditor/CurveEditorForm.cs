@@ -602,7 +602,7 @@ public sealed partial class CurveEditorForm : Form
         _hoverCrash = _showCrashes.Checked && _hover == null && _hoverLine == 0 ? CrashAt(e.Location) : null;
         _hoverEvidence = _showEvidence.Checked && _hover == null && _hoverCrash == null && _hoverLine == 0 ? EvidenceAt(e.Location) : null;
         _hoverRun = _showHistory.Checked && _hover == null && _hoverCrash == null && _hoverEvidence == null && _hoverLine == 0 && _plot.Contains(e.Location) ? RunAt(e.Location) : null;
-        Cursor = _busy ? Cursors.WaitCursor : _hoverLine != 0 ? Cursors.SizeWE : _hover is { } h && Draggable(h) ? Cursors.SizeNS : Cursors.Default;
+        Cursor = _busy ? Cursors.WaitCursor : !_done && _hoverLine != 0 ? Cursors.SizeWE : !_done && _hover is { } h && Draggable(h) ? Cursors.SizeNS : Cursors.Default;
         if (before != (_hover, _hoverCrash, _hoverRun, _hoverEvidence, _hoverLine)) Invalidate();
     }
 
@@ -618,6 +618,15 @@ public sealed partial class CurveEditorForm : Form
         Cursor = Cursors.Default;
         Invalidate();
         if (menu) HistoryMenu(e.Location);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        _hover = _hoverCrash = _hoverRun = _hoverEvidence = null;
+        _hoverLine = 0;
+        if (_drag == null && _dragLine == 0 && _pan == null && !_busy) Cursor = Cursors.Default;
+        Invalidate();
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
@@ -825,6 +834,7 @@ public sealed partial class CurveEditorForm : Form
     /// <summary>A draggable label at the top of a band line.</summary>
     private RectangleF Tab(Graphics g, float x, string label, bool right, bool hot)
     {
+        if (x < _plot.Left || x > _plot.Right) return RectangleF.Empty;
         float s = _s;
         var sz = g.MeasureString(label, _small);
         float bw = sz.Width + 12 * s, bh = sz.Height + 6 * s;

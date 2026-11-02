@@ -26,7 +26,8 @@ internal static class Program
             Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            string output = Path.GetFullPath(args.Length == 2 && args[0] == "--output" ? args[1] : "out/ui-preview");
+            int outputArg = Array.IndexOf(args, "--output");
+            string output = Path.GetFullPath(outputArg >= 0 ? args[outputArg + 1] : "out/ui-preview");
             Directory.CreateDirectory(output);
             var data = Fixture();
             SaveRequest? saved = null;
@@ -127,6 +128,17 @@ internal static class Program
                 form.Close();
             }
             Console.WriteLine("Windows editor smoke checks passed; synthetic previews: " + output);
+            if (args.Contains("--emit-previews"))
+                foreach (string name in new[] { "edited", "compact", "layout-150pct", "save-error", "save-details" })
+                {
+                    // Optional review transport when the consumer can read logs but cannot download binary artifacts.
+                    // Short lines avoid log-line truncation. Only deterministic synthetic fixtures are rendered here.
+                    Console.WriteLine("CLOCKTAIL_PREVIEW_BEGIN " + name);
+                    string encoded = Convert.ToBase64String(File.ReadAllBytes(Path.Combine(output, name + ".png")));
+                    for (int i = 0; i < encoded.Length; i += 1024)
+                        Console.WriteLine("CLOCKTAIL_PREVIEW_DATA " + encoded.Substring(i, Math.Min(1024, encoded.Length - i)));
+                    Console.WriteLine("CLOCKTAIL_PREVIEW_END " + name);
+                }
             return 0;
         }
         catch (Exception e) { Console.Error.WriteLine(e); return 1; }

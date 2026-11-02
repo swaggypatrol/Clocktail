@@ -120,6 +120,7 @@ public sealed partial class CurveEditorForm
     {
         if (_undoButton == null) return;
         foreach (Control control in Controls) control.Font = _body;
+        if (_historyMenu != null) _historyMenu.Font = _body;
         if (_saveButton != null) _saveButton.Font = _bold;
     }
 

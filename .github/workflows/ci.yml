@@ -7,6 +7,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      visual_logs:
+        description: Include synthetic previews in logs for environments without artifact downloads
+        type: boolean
+        default: false
 
 jobs:
   test:
@@ -32,7 +37,7 @@ jobs:
       - name: Windows editor smoke checks and previews (synthetic data, no GPU)
         if: runner.os == 'Windows' && !cancelled()
         timeout-minutes: 3
-        run: dotnet run --project tools/Clocktail.UiPreview -c Release -- --output out/ui-preview
+        run: dotnet run --project tools/Clocktail.UiPreview -c Release -- --output out/ui-preview ${{ inputs.visual_logs && '--emit-previews' || '' }}
       - name: Editor previews
         if: runner.os == 'Windows' && always()
         uses: actions/upload-artifact@v4
