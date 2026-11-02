@@ -271,11 +271,9 @@ public sealed partial class TuningTools
         CancellationToken cancellationToken = default)
     {
         if (OutsideBoard(watts) is { } outside) return Out(new { success = false, error = $"the request is {outside}" });
-        return await Asked(server, string.Create(CultureInfo.InvariantCulture,
-            $"Set the second board power request (F8) to {watts:0.#} W for a test: ending the test puts it back to the board's maximum, but once made the request itself cannot be deleted until the next restart."),
-            confirm, cancellationToken, () =>
+        uint mw = (uint)Math.Round(watts * 1000);
+        return await Asked(server, PowerCapQuestion(mw), confirm, cancellationToken, () =>
         {
-            uint mw = (uint)Math.Round(watts * 1000);
             var f8 = card.WithDriver(PowerRequestsReader.Read).Additional;
             string from = f8.Present ? string.Create(CultureInfo.InvariantCulture, $"{f8.Mw / 1000.0:0.#} W") : "absent";
             return Trial(string.Create(CultureInfo.InvariantCulture, $"F8 power request {from} → {mw / 1000.0:0.#} W"), reason,
@@ -283,16 +281,24 @@ public sealed partial class TuningTools
         });
     }
 
+    /// <summary>set_power_cap's question, with the request to the milliwatt it writes: the confirm code is bound to the
+    /// question's words, so a yes to one wattage is never a yes to another that rounds to the same tenth of a watt.</summary>
+    public static string PowerCapQuestion(uint mw) => string.Create(CultureInfo.InvariantCulture,
+        $"Set the second board power request (F8) to {mw / 1000.0:0.###} W for a test: ending the test puts it back to the board's maximum, but once made the request itself cannot be deleted until the next restart.");
+
+    /// <summary>set_daily_power_limit's question, with the limit to the milliwatt it writes (see <see cref="PowerCapQuestion"/>).</summary>
+    public static string DailyPowerLimitQuestion(uint mw) => string.Create(CultureInfo.InvariantCulture,
+        $"Set your graphics card's daily power limit to {mw / 1000.0:0.###} W, now and after every start.");
+
     [McpServerTool(Name = "set_daily_power_limit", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "After explicit approval, create or update this user's daily ordinary power limit using this board's reported range. No stock wattage or default daily wall is supplied. The service reads back and reapplies only the user-selected value." + " " + AsksItself)]
     public async Task<string> SetDailyPowerLimit(McpServer server, [Description("The daily power limit, W.")] double watts,
         [Description(ConfirmCode)] string? confirm = null, CancellationToken cancellationToken = default)
     {
         if (OutsideBoard(watts) is { } outside) return Out(new { success = false, error = $"the daily power limit is {outside}" });
-        return await Asked(server, string.Create(CultureInfo.InvariantCulture, $"Set your graphics card's daily power limit to {watts:0.#} W, now and after every start."),
-            confirm, cancellationToken, () =>
+        uint mw = (uint)Math.Round(watts * 1000);
+        return await Asked(server, DailyPowerLimitQuestion(mw), confirm, cancellationToken, () =>
         {
-            uint mw = (uint)Math.Round(watts * 1000);
             var r = card.Broker(BrokerRequest.OpProfile, "wall", mw.ToString(CultureInfo.InvariantCulture));
             if (!r.Ok) return Reply(r);
             var after = ReadAfter(out var unread);
