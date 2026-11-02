@@ -236,11 +236,12 @@ public sealed partial class CurveEditorForm
 
     private void ShowDetails()
     {
+        using var detailFont = (Font)_body.Clone();
         using var dialog = new Form
         {
             Text = "Clocktail · Draft and save details", ShowIcon = false, BackColor = Bg, ForeColor = TextC,
             StartPosition = FormStartPosition.CenterParent, Size = new(720, 470), MinimumSize = new(480, 320),
-            Font = _body, AutoScaleMode = AutoScaleMode.Dpi,
+            Font = detailFont, AutoScaleMode = AutoScaleMode.Dpi,
         };
         string details = _status + "\r\n\r\n";
         if (_saveError != null) details += "Save result\r\n" + _saveError + "\r\n\r\n";

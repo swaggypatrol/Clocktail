@@ -141,7 +141,10 @@ public sealed partial class CurveEditorForm : Form
 
     private void Fonts()
     {
-        _body?.Dispose(); _small?.Dispose(); _title?.Dispose(); _bold?.Dispose();
+        // WinForms keeps an equal Font instance instead of replacing it. Rebuilding the same fonts on handle creation
+        // would therefore leave native child controls holding disposed instances.
+        if (_body != null && Math.Abs(_body.Size - 13 * _s) < 0.01f) { LayoutChrome(); return; }
+        var old = (_body, _small, _title, _bold);
         const string face = "Segoe UI";
         _body = new Font(face, 13 * _s, GraphicsUnit.Pixel);
         _bold = new Font(face, 13 * _s, FontStyle.Bold, GraphicsUnit.Pixel);
@@ -149,6 +152,7 @@ public sealed partial class CurveEditorForm : Form
         _title = new Font(face, 23 * _s, FontStyle.Bold, GraphicsUnit.Pixel);
         ApplyChromeFonts();
         LayoutChrome();
+        old._body?.Dispose(); old._small?.Dispose(); old._title?.Dispose(); old._bold?.Dispose();
     }
 
     protected override void OnShown(EventArgs e)
