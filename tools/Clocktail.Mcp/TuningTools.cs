@@ -769,16 +769,16 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             confirm, cancellationToken, () => Applied(card.Broker(BrokerRequest.OpProfile, "load"), null));
 
     [McpServerTool(Name = "preview_daily", ReadOnly = true, Destructive = false, Idempotent = true, OpenWorld = false), Description(
-        "Read-only preview of what keep_as_daily would retain, including exclusions, or what a named user-saved profile would load. adopt=true previews eligible settings left by another utility. No built-in tuning profile exists.")]
+        "Read-only preview of what keep_as_daily would retain, including exclusions, or what a named user-saved profile would load. adopt=true previews eligible settings left by another utility. Its values_fingerprint is the one keep_as_daily and load_preset name in their question. No built-in tuning profile exists.")]
     public string PreviewDaily(
         [Description("A preset's or saved profile's name; omit for keep_as_daily.")] string? name = null,
         [Description("Preview keep_as_daily adopt=true: another tool's settings kept too.")] bool adopt = false) =>
-        adopt ? Older(card.Broker(BrokerRequest.OpProfile, "preview-adopt")) : Reply(card.Broker(BrokerRequest.OpProfile, "preview", name));
+        adopt ? Older(card.Broker(BrokerRequest.OpProfile, "preview-adopt"), Previewed) : Previewed(card.Broker(BrokerRequest.OpProfile, "preview", name));
 
     /// <summary>A reply, unless the service is too old for the op (0.4.0's adopt): then that, and how to update it.</summary>
-    private static string Older(BrokerAnswer r) => r.Code == BrokerCode.BadRequest
+    private static string Older(BrokerAnswer r, Func<BrokerAnswer, string>? reply = null) => r.Code == BrokerCode.BadRequest
         ? Out(new { success = false, error = "the service is older than this server and cannot adopt another tool's settings: call install_service (with the person's OK) to update it", code = r.Code })
-        : Reply(r);
+        : (reply ?? Reply)(r);
 
     [McpServerTool(Name = "keep_as_daily", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(
         "After explicit approval, make eligible settings measured on this GPU the user's own daily profile. Show preview_daily first. Temporary trial controls are excluded as shown in that preview. adopt=true can include eligible settings left by another utility. Service startup and reset recovery reapply only this user-kept profile." + " " + AsksItself)]
@@ -816,13 +816,47 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             ? Out(new { success = false, error = no.Error, code = no.Code, question = no.Question, confirm = no.ConfirmCode, written = WriteOutcome.None })
             : Guard(then);
 
-    /// <summary>A profile preview's changes in a few words ("V/F curve, memory offset"), for the person's question.</summary>
-    private static string Changes(BrokerAnswer preview)
+    /// <summary>
+    /// A profile preview's changes for the person's question: the settings in a few words, then the values' fingerprint
+    /// ("V/F curve, memory offset; values fingerprint 3FA9C1"). The confirm code is bound to the question's words, so
+    /// with the fingerprint a yes given for these values is not a yes for others: a curve or offset written to the card
+    /// (or a profile saved again under the name) between the asking call and the confirmed call makes another question,
+    /// and the old code no longer matches.
+    /// </summary>
+    public static string Changes(BrokerAnswer preview)
     {
         var names = preview.Result is { } r && r.TryGetProperty("changes", out var c) && c.ValueKind == JsonValueKind.Array
             ? c.EnumerateArray().Select(x => Setting(Str(x, "kind"), Str(x, "key"))).Distinct().ToList() : [];
-        return names.Count == 0 ? "no change from the daily profile" : string.Join(", ", names);
+        return $"{(names.Count == 0 ? "no change from the daily profile" : string.Join(", ", names))}; values fingerprint {Fingerprint(preview)}";
     }
+
+    /// <summary>
+    /// Six hex characters of a SHA-256 over what a profile preview would make the daily profile: its source (keep, adopt
+    /// or a saved profile's name), each change's kind/key=becomes and what it drops, sorted. preview_daily shows it as
+    /// values_fingerprint, and keep_as_daily and load_preset put it in their question.
+    /// </summary>
+    public static string Fingerprint(BrokerAnswer preview)
+    {
+        List<string> lines = [];
+        if (preview.Result is { } r)
+        {
+            lines.Add($"source={Raw(r, "source")}");
+            if (r.TryGetProperty("changes", out var c) && c.ValueKind == JsonValueKind.Array)
+                lines.AddRange(c.EnumerateArray().Select(x => $"{Raw(x, "kind")}/{Raw(x, "key")}={Raw(x, "becomes")}"));
+            if (r.TryGetProperty("dropped", out var d) && d.ValueKind == JsonValueKind.Array)
+                lines.AddRange(d.EnumerateArray().Select(x => $"dropped {x.GetRawText()}"));
+        }
+        lines.Sort(StringComparer.Ordinal);
+        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", lines)));
+        return Convert.ToHexString(hash, 0, 3);
+    }
+
+    /// <summary>A field's JSON text as it came (any kind of value), or empty when it is missing.</summary>
+    private static string Raw(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) ? v.GetRawText() : "";
+
+    /// <summary>A profile preview's answer with its <see cref="Fingerprint"/>, so the person can match the question to it.</summary>
+    private static string Previewed(BrokerAnswer r) => r.Ok ? Merge(Reply(r), new { values_fingerprint = Fingerprint(r) }) : Reply(r);
 
     private static string Setting(string? kind, string? key) => (kind, key) switch
     {

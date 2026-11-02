@@ -54,7 +54,8 @@ public static class Consent
     /// <summary>
     /// The question in the agent's chat: a call with no code (or one that is not this question's) is answered with the
     /// question and a new code; a call with the code the person's yes was given for goes ahead, once. The code is bound
-    /// to the question's words, which name the change, so a yes to one change never lets another through.
+    /// to the question's words, which name the change and its values (a profile's by the fingerprint preview_daily shows,
+    /// a wattage to the milliwatt), so a yes to one change never lets another through, nor the same settings with other values.
     /// </summary>
     public static Refusal? Chat(string what, string? confirm, DateTimeOffset now)
     {
