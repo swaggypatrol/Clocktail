@@ -20,9 +20,6 @@ public sealed partial class TuningTools
 {
     /// <summary>watch: the longest stretch one call samples (CLOCKTAIL_MCP_MAX_WATCH_S); it blocks for it.</summary>
     public static readonly int MaxWatchSeconds = Env("CLOCKTAIL_MCP_MAX_WATCH_S", 600);
-    /// <summary>watch: a sample counts as under load from this utilization and board power (menus and loading screens do not).</summary>
-    public const uint LoadedUtilPct = 50;
-    public const double LoadedW = 120;
 
     [McpServerTool(Name = "set_fan_curve", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Set three encoded points on each editable fan policy as a trial. Use this board's own fan topology and RPM pairing; explicit RPM values are user choices. No stock-relative minimum duty or full-speed temperature is imposed.")]
@@ -323,7 +320,7 @@ public sealed partial class TuningTools
             try { samples.Add(card.ReadSample()); } catch (InvalidOperationException) { }
             Thread.Sleep(500);
         }
-        var loaded = samples.Where(s => s.Telemetry is { GpuUtilPercent: >= LoadedUtilPct, PowerWatts: >= LoadedW }).ToList();
+        var loaded = samples.Where(s => s.Telemetry is { } t && LiveWatch.IsLoaded(t)).ToList();   // the live watch's rule
         double? atWall = loaded.Count == 0 ? null : Math.Round(100.0 * loaded.Count(s =>
             s.Telemetry is { PowerWatts: { } w, PowerEnforcedWatts: { } l } && w >= l - Limiter.WallBandW) / loaded.Count);
         double? p50Mv = Pct(loaded.Select(s => s.NvvddUv / 1000.0), 0.5);
@@ -338,7 +335,7 @@ public sealed partial class TuningTools
             $"Watched {seconds} s: {loaded.Count} of {samples.Count} samples under load. P50 {p50.clock_mhz} MHz @ NVVDD {p50.nvvdd_mv} mV (curve point {point?.index}), " +
             $"P90 {WatchStats(loaded, 0.9).clock_mhz} MHz, P10 {WatchStats(loaded, 0.1).clock_mhz} MHz; MSVDD {p50.msvdd_mv} mV, XBAR {p50.xbar_mhz} / SYS {p50.sys_mhz} MHz, board {p50.board_w} W, " +
             $"{atWall} % of the time on the wall, max {loaded.Max(s => s.Telemetry?.TemperatureC)} °C, VRAM {p50.vram_used_gib} GiB; limit reasons [{string.Join(", ", reasons)}]")
-            + (frames != null ? $"; {FrameFeed.Words(fps)}" : "") + LocksWords(locksMet)
+            + (frames != null ? $"; {FrameFeed.Words(fps)}" : "") + LocksWords(locksMet) + LocksUnreadWords(locks)
             + (note != null ? $". Playing: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
         return Out(new
@@ -353,9 +350,10 @@ public sealed partial class TuningTools
             curve_point = point,
             limit_reasons = reasons,
             pstates = PStates(loaded),
-            efficiency = Efficiency(loaded, fps?.AvgFps),
+            efficiency = WatchEfficiency(samples, loaded, fps?.AvgFps),
             curve_shift = CurveShift(curve, ReadCurveOrNull(), point?.index, loaded),
             clock_locks = locksMet,
+            clock_locks_unread = locks == null ? LocksUnread : null,
             fps = FrameFeed.Show(fps) ?? (object)new
             {
                 unavailable = noFrames ?? (process != null ? $"no frames from {process}: is that the game's process name?" : "no application drew frames: was the game running?"),
@@ -364,6 +362,14 @@ public sealed partial class TuningTools
             note = loaded.Count == 0 ? "no sample was under load: was the game running in the foreground?" : null,
         });
     });
+
+    /// <summary>
+    /// watch's efficiency: its frame rate is the whole capture's (menus and loading screens included), so with one, the
+    /// power it is set against is the whole watch's too; without one, the samples under load.
+    /// </summary>
+    public static object? WatchEfficiency(IReadOnlyList<Card.Sample> all, IReadOnlyList<Card.Sample> loaded, double? wholeFps) =>
+        wholeFps == null ? Efficiency(loaded, null)
+        : Efficiency(all, wholeFps, over: "the whole watch, idle samples too: its frame rate covers every frame of it, menus and loading screens included");
 
     private sealed record WatchStat(double? clock_mhz, double? nvvdd_mv, double? msvdd_mv, double? xbar_mhz, double? sys_mhz, double? video_mhz,
         double? board_w, double? temp_c, double? vram_used_gib, double? memory_c);

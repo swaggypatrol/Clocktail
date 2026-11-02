@@ -519,7 +519,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         bool trial = hold.Trial != null;   // in force when the run began: the trial it measured
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Stress nvgwls -l {load}, {seconds} s: {verdict} (exit code {(code?.ToString(CultureInfo.InvariantCulture) ?? "none")}). P50 {p50Mhz} MHz @ NVVDD {p50Mv} mV (curve point {pointIndex}), XBAR {P(held.Select(s => s.Mhz(AllClocksLayout.Xbar)), 0.5)} / SYS {P(held.Select(s => s.Mhz(AllClocksLayout.Sys)), 0.5)} MHz, board {p50W} W, NVVDD {p50NvW} W, MSVDD {p50MsMv} mV / {p50MsW} W; max {held.Max(s => s.Telemetry?.TemperatureC)} °C; limit reasons [{string.Join(", ", reasons)}]; {held.Count} samples; per sample {csv}")
-            + LocksWords(locksMet) + (note != null ? $". Purpose: {note}" : "");
+            + LocksWords(locksMet) + LocksUnreadWords(locks) + (note != null ? $". Purpose: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
         bool crashRecorded = failed && RecordCrash(hold, resets, $"nvgwls -l {load} {seconds} s: {verdict}");
         return Out(new
@@ -540,6 +540,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             curve_point = pointIndex,
             curve_shift = shift,
             clock_locks = locksMet,
+            clock_locks_unread = locks == null ? LocksUnread : null,
             samples_csv = csv,
             trial_in_force = trial,
             crash_recorded = crashRecorded,
@@ -585,7 +586,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// them) and, with a frame rate, frames per second per 100 W, the figure a power-limit sweep compares (manual
     /// 'power-thermal'). Null without board power.
     /// </summary>
-    public static object? Efficiency(IReadOnlyList<Card.Sample> samples, double? avgFps, double? p50Mhz = null)
+    public static object? Efficiency(IReadOnlyList<Card.Sample> samples, double? avgFps, double? p50Mhz = null, string? over = null)
     {
         var w = samples.Where(s => s.Telemetry?.PowerWatts is not null).ToList();
         if (w.Count == 0) return null;
@@ -601,6 +602,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             energy_wh = Math.Round(wh, 2),
             fps_per_100w = avgFps is { } f && avgW > 0 ? Math.Round(f / avgW * 100, 2) : (double?)null,
             mhz_per_w = p50Mhz is { } m && avgW > 0 ? Math.Round(m / avgW, 2) : (double?)null,
+            over,
         };
     }
 
@@ -1201,6 +1203,14 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             : l.Value == Clocktail.Domain.Clocks.ClientLimitsLayout.BoostLockUv ? Clocktail.Domain.Limiter.CurveTop(curve.Points, maxUv)?.EffectiveKhz / 1000.0
             : Nearest(curve, l.Value)?.EffectiveKhz / 1000.0);
     }
+
+    /// <summary>An unreadable clock-lock record (<see cref="Card.ClockLocks"/> null) is not "no lock": the run's clocks may
+    /// be a lock's, not the curve's.</summary>
+    public const string LocksUnread = "the clock-lock record could not be read: a lock may be in force";
+
+    /// <summary><see cref="LocksUnread"/> as a clause for a summary line when <paramref name="locks"/> could not be read; empty
+    /// otherwise.</summary>
+    public static string LocksUnreadWords(IReadOnlyList<Clocktail.Domain.Clocks.ClientLimit>? locks) => locks == null ? "; " + LocksUnread : "";
 
     /// <summary>The lock outcomes in one clause for a summary line; empty when none was in force.</summary>
     public static string LocksWords(IReadOnlyList<Clocktail.Domain.Clocks.ClockLockOutcome>? met) =>

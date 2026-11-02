@@ -4,7 +4,7 @@ Validate this GPU's settings with tests and real workloads; there is no universa
 `stress_test` runs NVIDIA's nvgwls when it is installed and usable. Its load parameter controls the stress workload.
 `lab_test` checks core, memory and cache results exactly. Burn, light and pulse cover different loads; solo isolates high curve points; leap exercises heavy-to-light transitions.
 Verify that the intended clock/voltage point actually ran. An inconclusive test is not a pass.
-`watch` and `live_start` / `live_read` / `live_stop` measure the user's workload and frame times without injecting into the game.
+`watch` and `live_start` / `live_read` / `live_stop` measure the user's workload and frame times without injecting into the game. The live watch's whole-run frame rate (`fps_under_load`) covers only its windows under load; `fps_whole_capture` includes menus and loading screens.
 `game_test` is optional automation for Quake II RTX. It needs matching supported devices, an open session and the required local game installation. Its seed allows repeatable comparisons.
 ## Failure handling
 A data error, device loss, driver reset or confirmed crash belongs to the trial that ran, not a later setting.

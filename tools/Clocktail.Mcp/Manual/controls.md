@@ -36,7 +36,7 @@ Core and memory P0 writes can reset V/F point offsets; the curve is restored in 
 A memory offset's units are those of the driver interface; preserve units when comparing it with telemetry.
 
 ## Clock locks
-`set_clock_lock` writes the client limit record that nvidia-smi locked clocks and Afterburner's L also use (NVAPI's partner "Client" interface, stable across architectures). A cap, floor, point lock or Boost Lock is a request, not a hard P-state lock: the driver still lowers the clock for power, temperature and voltage, and XBAR, SYS and Video are not held with the core. A lock outlives the program that set it; `card_settings` and `gpu_status` show any in force. `stress_test`, `watch` and `live_read` report `clock_locks` against the clock that actually ran.
+`set_clock_lock` writes the client limit record that nvidia-smi locked clocks and Afterburner's L also use (NVAPI's partner "Client" interface, stable across architectures). A cap, floor, point lock or Boost Lock is a request, not a hard P-state lock: the driver still lowers the clock for power, temperature and voltage, and XBAR, SYS and Video are not held with the core. A lock outlives the program that set it; `card_settings` and `gpu_status` show any in force. `stress_test`, `watch` and `live_read` report `clock_locks` against the clock that actually ran; the live watch reports one entry per period a lock was in force.
 
 ## Clock domains and voltage
 Topology identifies available domains and their rails. Clock offset, voltage demand, propagation ratio and boost are independent requests, not mandatory pairings.

@@ -4,6 +4,7 @@ using System.Text;
 using Clocktail.Core.Gpu;
 using Clocktail.Domain;
 using Clocktail.Domain.Broker;
+using Clocktail.Domain.Clocks;
 using Clocktail.Domain.Power;
 using Clocktail.Domain.Profiles;
 using Clocktail.Domain.Rails;
@@ -23,15 +24,23 @@ namespace Clocktail.Mcp;
 /// </summary>
 public sealed class LiveWatch(Card card) : IDisposable
 {
-    /// <summary>Loaded = this busy and drawing this much (watch's rule): menus and loading screens say nothing about a curve.</summary>
+    /// <summary>Loaded = this busy and drawing this much (watch's rule too): menus and loading screens say nothing about a
+    /// curve. The power is <see cref="LoadedShare"/> of the limit in force, at most <see cref="LoadedW"/> (the reference
+    /// card's figure at its 575 W), so a smaller or power-limited card at full use counts as loaded.</summary>
     public const int LoadedUtilPct = 50, LoadedW = 120;
+    public const double LoadedShare = 0.25;
     /// <summary>Not loaded for this long ends a stretch of load; a shorter dip (a loading screen, a menu) does not.</summary>
     public static readonly TimeSpan LoadGap = TimeSpan.FromSeconds(3);
     /// <summary>No answer from the card for this long is reported: a hang, or a driver reset under way.</summary>
     public static readonly TimeSpan SilentAfter = TimeSpan.FromSeconds(3);
     /// <summary>A V/F hang as the reference card showed it: the clock frozen high at full utilization while the power falls
-    /// (3105-3180 MHz at 100 %, 125-200 W) for the ~30 s before the driver resets. Readings like that for this long are reported.</summary>
+    /// (3105-3180 MHz at 100 %, 125-200 W of its 575 W) for the ~30 s before the driver resets. A sample looks like it at
+    /// this utilization and clock, the same clock as the one before, under <see cref="HangShare"/> of the board's default
+    /// power limit (at most <see cref="HangMaxW"/>, the reference card's figure) and, once a window under load has been
+    /// read, under <see cref="HangDropShare"/> of that window's median power: a steady clock at steady power (a flat
+    /// curve, a clock lock) is not a hang. Readings like that for <see cref="SilentAfter"/> are reported.</summary>
     public const int HangUtilPct = 95, HangMaxW = 250, HangMinMhz = 2000;
+    public const double HangShare = 0.45, HangDropShare = 0.7;
     /// <summary>Hot from here (NVIDIA's own slowdown starts near 90 °C); reported again only after it cools under the second.</summary>
     public const double HotC = 85, CoolAgainC = 82;
     /// <summary>The longest watch (CLOCKTAIL_MCP_MAX_LIVE_H): a forgotten one ends on its own.</summary>
@@ -42,10 +51,19 @@ public sealed class LiveWatch(Card card) : IDisposable
     /// <summary>One sample: what the card ran, and the curve point its voltage sits on (the curve read every window).</summary>
     public sealed record Point(DateTimeOffset At, uint? ClockMhz, double? NvvddMv, double? MsvddMv, double? XbarMhz, double? BoardW,
         double? LimitW, double? TempC, uint? UtilPct, double? FanPct, string HeldBy, int? CurvePoint, bool Loaded,
-        double? SysMhz = null, double? VideoMhz = null, string? Locks = null)
+        double? SysMhz = null, double? VideoMhz = null, string? Locks = null, int? LockSpan = null)
     {
         public bool OnWall => BoardW is { } w && LimitW is { } l && w >= l - Limiter.WallBandW;
     }
+
+    /// <summary>One stretch of the watch under one clock lock: its locks in words (<see cref="Key"/>), and the curve and
+    /// NVVDD MAX last read while it was in force (a point lock's or Boost Lock's target is a point on that curve). To is
+    /// null while it is in force.</summary>
+    public sealed record LockSpan(int Id, string Key, IReadOnlyList<ClientLimit> Locks, VfCurveSnapshot? Curve, uint? MaxUv,
+        DateTimeOffset From, DateTimeOffset? To = null);
+
+    /// <summary>A lock period's samples under load (<see cref="Point.LockSpan"/>) against its locks.</summary>
+    public sealed record LockSpanOutcome(string Locks, DateTimeOffset From, DateTimeOffset? To, int Samples, IReadOnlyList<ClockLockOutcome> Outcomes);
 
     private sealed class Run
     {
@@ -60,7 +78,11 @@ public sealed class LiveWatch(Card card) : IDisposable
         public int ReadUpTo;
         public readonly List<Point> Loaded = [];
         public readonly Queue<Point> Recent = new();
-        public int Samples, Stretches, Silences;
+        /// <summary>Silences: the card did not answer (the watchdog). SuspectedHangs: it answered, with readings that look
+        /// like a hang (<see cref="HangLike"/>).</summary>
+        public int Samples, Stretches, Silences, SuspectedHangs;
+        /// <summary>Time under load, from the samples' own times (<see cref="LoadedStep"/>).</summary>
+        public TimeSpan LoadedTime;
         /// <summary>When the card last answered, and since when it has not (set by the watchdog, cleared by the sampler).</summary>
         public DateTimeOffset LastAnswer;
         public DateTimeOffset? SilentSince;
@@ -70,12 +92,10 @@ public sealed class LiveWatch(Card card) : IDisposable
         public string? Summary;
         /// <summary>The game's frame rate (the broker's capture); null when it could not start.</summary>
         public FrameFeed? Frames;
-        /// <summary>The client clock limits in force as last read (once a window), the curve and NVVDD MAX they were read
-        /// with, and their words as one key (null for none) that each sample carries.</summary>
-        public IReadOnlyList<Clocktail.Domain.Clocks.ClientLimit>? Locks;
-        public VfCurveSnapshot? Curve;
-        public uint? MaxUv;
-        public string? LocksKey;
+        /// <summary>Each period under a clock lock so far (<see cref="Track"/>, once a window); the last is open while its
+        /// lock is in force. LocksRead: the clock-lock record was readable at least once.</summary>
+        public IReadOnlyList<LockSpan> Spans = [];
+        public bool LocksRead;
     }
 
     private readonly object _gate = new();
@@ -172,11 +192,22 @@ public sealed class LiveWatch(Card card) : IDisposable
         {
             run.EndReason ??= "live_stop";
             run.Stop.Cancel();
-            run.Loop?.Wait(TimeSpan.FromSeconds(10));
         }
+        var (summary, waiting) = StopAnswer(run.Loop, TimeSpan.FromSeconds(10), () => { lock (run) return run.Summary; }, () => SummaryLine(run));
         List<string> fresh;
         lock (run) { fresh = run.Lines.Skip(run.ReadUpTo).ToList(); run.ReadUpTo = run.Lines.Count; }
-        return new { success = true, ended = run.EndReason, summary = run.Summary, lines = fresh.TakeLast(20), totals = Totals(run), log = run.LogPath, csv = run.CsvPath };
+        return new { success = true, ended = run.EndReason, summary, still_waiting = waiting, lines = fresh.TakeLast(20), totals = Totals(run), log = run.LogPath, csv = run.CsvPath };
+    }
+
+    /// <summary>What live_stop says once it has waited up to <paramref name="wait"/> for the sampler to finish: its summary,
+    /// or, while the sampler still sits in a driver call (a hung GPU keeps it there through the whole TDR delay), the run
+    /// so far and a word on why.</summary>
+    public static (string Summary, string? Waiting) StopAnswer(Task? loop, TimeSpan wait, Func<string?> finished, Func<string> soFar)
+    {
+        bool done = loop == null || loop.Wait(wait);
+        if (done && finished() is { } summary) return (summary, null);
+        return (soFar(), done ? null : "the sampler is still waiting on the driver (a hang, or a driver reset under way): this summary is the run so far. " +
+            "The watch ends, with its note in the tuning log, once the driver answers; live_start works again after that");
     }
 
     public void Dispose()
@@ -186,7 +217,8 @@ public sealed class LiveWatch(Card card) : IDisposable
         if (run is not { Ended: null }) return;
         run.EndReason ??= "the server stopped";
         run.Stop.Cancel();
-        run.Loop?.Wait(TimeSpan.FromSeconds(5));
+        // A sampler stuck in a driver call finishes after the server: the capture must not outlive it.
+        if (run.Loop?.Wait(TimeSpan.FromSeconds(5)) == false) run.Frames?.Stop();
     }
 
     private void Sample(Run run)
@@ -203,7 +235,16 @@ public sealed class LiveWatch(Card card) : IDisposable
         DateTimeOffset? notLoadedSince = null, hangSince = null;
         uint? hangMhz = null;
         DateTimeOffset loadSince = default, windowStart = default;
+        DateTimeOffset? lastAt = null;
+        double? windowW = null;   // the last window's median power under load, before any hang-like stretch
         var window = new List<Point>();
+        void Line()
+        {
+            if (window.Count == 0) return;
+            Emit(run, WindowLine(window, curve, edge) + Fps(run));
+            if (hangSince == null) windowW = Pct(window.Select(p => p.BoardW), 0.5);
+            window.Clear();
+        }
         long next = 0;
         try
         {
@@ -217,21 +258,29 @@ public sealed class LiveWatch(Card card) : IDisposable
                     try { curve = card.WithDriver(VfReader.Read); maxUv = card.WithDriver(RailsReader.Read).Get(Rail.Nvvdd)?.Limits.MaxUv; }
                     catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
                     if (curve != null) edge = Edge(curve);
-                    // A lock set or released mid-watch (set_clock_lock, nvidia-smi -lgc, Afterburner's L) changes what the clocks mean.
-                    // An unreadable record is not a released lock: the last reading stands.
+                    // A lock set or released mid-watch (set_clock_lock, nvidia-smi -lgc, Afterburner's L) changes what the clocks mean:
+                    // each lock period is checked on its own. An unreadable record is not a released lock: the last reading stands.
                     var locks = card.ClockLocks();
-                    string? key, was;
+                    LockSpan? was, open, closed = null;
+                    List<Point>? loaded = null;
                     lock (run)
                     {
-                        was = run.LocksKey;
-                        if (locks != null) { run.Locks = locks; run.LocksKey = locks.Count > 0 ? string.Join(", ", locks.Select(l => l.Describe())) : null; }
-                        key = run.LocksKey;
-                        run.Curve = curve;
-                        run.MaxUv = maxUv;
+                        was = OpenSpan(run.Spans);
+                        run.Spans = Track(run.Spans, locks, curve, maxUv, now);
+                        run.LocksRead |= locks != null;
+                        open = OpenSpan(run.Spans);
+                        if (was != null && open?.Id != was.Id) { closed = run.Spans.First(x => x.Id == was.Id); loaded = [.. run.Loaded]; }
                     }
-                    if (key != was)
-                        Emit(run, key != null ? $"🔒 clock lock in force: {key}. The driver still lowers the clock under it for power, temperature and voltage: the lines show what ran"
-                            : "🔓 no clock lock in force any more");
+                    if (closed != null && loaded != null)
+                    {
+                        var met = LocksBySpan([closed], loaded)![0];
+                        string period = string.Create(CultureInfo.InvariantCulture, $"{closed.From:HH:mm:ss}-{closed.To:HH:mm:ss}, {met.Samples} samples under load");
+                        Emit(run, open?.Key == closed.Key ? $"🔒 the curve moved under the clock lock. Until now ({period}): {OutcomeWords(met)}. From here it is checked against its new point"
+                            : open == null ? $"🔓 no clock lock in force any more. While it was ({period}): {OutcomeWords(met)}"
+                            : $"🔓 the clock lock changed. While the last one was in force ({period}): {OutcomeWords(met)}");
+                    }
+                    if (open != null && open.Key != was?.Key)
+                        Emit(run, $"🔒 clock lock in force: {open.Key}. The driver still lowers the clock under it for power, temperature and voltage: the lines show what ran");
                     shapeAt = now;
                 }
                 Card.Sample? s = null;
@@ -242,20 +291,20 @@ public sealed class LiveWatch(Card card) : IDisposable
                     DateTimeOffset? silent;
                     lock (run) { silent = run.SilentSince; run.SilentSince = null; run.LastAnswer = answered; }
                     if (silent is { } since) Emit(run, string.Create(CultureInfo.InvariantCulture, $"🔁 the card answers again after {(answered - since).TotalSeconds:0} s"));
-                    string? locksKey;
-                    lock (run) locksKey = run.LocksKey;
-                    var p = ToPoint(s, t, curve, maxUv) with { Locks = locksKey };
-                    bool hangLike = p is { UtilPct: >= HangUtilPct, BoardW: < HangMaxW, ClockMhz: >= HangMinMhz } && (hangMhz == null || hangMhz == p.ClockMhz);
-                    if (hangLike)
+                    LockSpan? span;
+                    lock (run) span = OpenSpan(run.Spans);
+                    var p = ToPoint(s, t, curve, maxUv) with { Locks = span?.Key, LockSpan = span?.Id };
+                    if (HangLike(p, hangMhz, HangFloorW(t), windowW))
                     {
                         hangSince ??= now;
                         hangMhz = p.ClockMhz;
                         if (!hangReported && now - hangSince >= SilentAfter)
                         {
                             hangReported = true;
-                            lock (run) run.Silences++;
+                            lock (run) run.SuspectedHangs++;
+                            string from = windowW is { } ww ? string.Create(CultureInfo.InvariantCulture, $", down from {ww:0} W") : "";
                             Emit(run, string.Create(CultureInfo.InvariantCulture,
-                                $"⛔ the clock is frozen at {p.ClockMhz} MHz / {p.NvvddMv:0} mV at full utilization with only {p.BoardW:0} W: the card has probably hung (a V/F hang looks like this for ~30 s before the driver resets). The last full-load sample before it, in the CSV, is the failure point"));
+                                $"⛔ the clock is frozen at {p.ClockMhz} MHz / {p.NvvddMv:0} mV at full utilization with only {p.BoardW:0} W{from}: the card has probably hung (a V/F hang looks like this for ~30 s before the driver resets). The last full-load sample before it, in the CSV, is the failure point"));
                         }
                     }
                     else
@@ -269,6 +318,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                     lock (run)
                     {
                         run.Samples++;
+                        if (p.Loaded) run.LoadedTime += LoadedStep(lastAt, p.At, run.IntervalMs);
                         run.Recent.Enqueue(p);
                         while (run.Recent.Count > 0 && p.At - run.Recent.Peek().At > KeepRecent) run.Recent.Dequeue();
                     }
@@ -278,6 +328,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                         Emit(run, string.Create(CultureInfo.InvariantCulture, $"🌡️ {p.TempC:0} °C: hot. NVIDIA's own slowdown starts near 90 °C; the fan curve or a lower wall brings it down"));
                     }
                     else if (p.TempC < CoolAgainC) hot = false;
+                    lastAt = p.At;
 
                     if (p.Loaded)
                     {
@@ -287,6 +338,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                             inLoad = true;
                             loadSince = windowStart = now;
                             window.Clear();
+                            windowW = null;   // a new stretch of load: its own power is the reference
                             // The frames start with the clocks: not the menu or loading screen before this stretch.
                             try { run.Frames?.StartWindow(); } catch (IOException) { }
                             lock (run) run.Stretches++;
@@ -300,16 +352,14 @@ public sealed class LiveWatch(Card card) : IDisposable
                         notLoadedSince ??= now;
                         if (now - notLoadedSince >= LoadGap)
                         {
-                            if (window.Count > 0) Emit(run, WindowLine(window, curve, edge) + Fps(run));
-                            window.Clear();
+                            Line();
                             inLoad = false;
                             Emit(run, $"⏸️ load stopped after {Duration(notLoadedSince.Value - loadSince)}");
                         }
                     }
                     if (inLoad && now - windowStart >= every)
                     {
-                        if (window.Count > 0) Emit(run, WindowLine(window, curve, edge) + Fps(run));
-                        window.Clear();
+                        Line();
                         windowStart = now;
                     }
                 }
@@ -325,7 +375,7 @@ public sealed class LiveWatch(Card card) : IDisposable
         }
         finally
         {
-            if (inLoad && window.Count > 0) Emit(run, WindowLine(window, curve, edge) + Fps(run));
+            if (inLoad) Line();
             Finish(run);
         }
     }
@@ -354,12 +404,14 @@ public sealed class LiveWatch(Card card) : IDisposable
     private void Finish(Run run)
     {
         run.EndReason ??= "live_stop";
+        lock (run) if (OpenSpan(run.Spans) is { } open) run.Spans = [.. run.Spans.SkipLast(1), open with { To = DateTimeOffset.Now }];
+        string summary = SummaryLine(run);   // before the capture is stopped: one that ended by itself says so, this one does not
         run.Frames?.Stop();
-        string summary = SummaryLine(run);
         Emit(run, $"⏹️ live watch ended ({run.EndReason}). {summary}");
         lock (run) { run.Summary = summary; run.Ended = DateTimeOffset.Now; }
         run.Watchdog?.Dispose();
-        try { run.Log.Dispose(); run.Csv.Dispose(); } catch (IOException) { }
+        lock (run)   // a watchdog tick that came in before Ended writes under this lock too
+            try { run.Log.Dispose(); run.Csv.Dispose(); } catch (IOException) { }
         if (run.EndReason != "the server stopped")
             try { card.Broker(BrokerRequest.OpExperiment, "note", $"Live watch: {summary}"); } catch (Exception) { }
     }
@@ -372,8 +424,98 @@ public sealed class LiveWatch(Card card) : IDisposable
         return new Point(s.At, t.GraphicsClockMhz, s.NvvddUv / 1000.0, s.MsvddUv / 1000.0, s.Mhz(AllClocksLayout.Xbar), t.PowerWatts,
             t.PowerEnforcedWatts ?? t.PowerLimitWatts, t.TemperatureC, t.GpuUtilPercent, t.FanPercent.Count > 0 ? t.FanPercent.Average(x => (double)x) : null,
             Limiter.Key(Limiter.Holding(reading, maxUv, top?.EffectiveKhz)), point,
-            t is { GpuUtilPercent: >= LoadedUtilPct, PowerWatts: >= LoadedW }, s.Mhz(AllClocksLayout.Sys), s.Mhz(AllClocksLayout.Video));
+            IsLoaded(t), s.Mhz(AllClocksLayout.Sys), s.Mhz(AllClocksLayout.Video));
     }
+
+    /// <summary>The board power from which a busy card counts as loaded: <see cref="LoadedShare"/> of the limit in force, at
+    /// most <see cref="LoadedW"/>; <see cref="LoadedW"/> when no limit is read.</summary>
+    public static double LoadFloorW(TelemetrySnapshot t) =>
+        (t.PowerEnforcedWatts ?? t.PowerLimitWatts ?? t.PowerDefaultWatts) is { } l && l > 0 ? Math.Min(LoadedW, LoadedShare * l) : LoadedW;
+
+    /// <summary>Under load: busy (<see cref="LoadedUtilPct"/>) and drawing at least <see cref="LoadFloorW"/>.</summary>
+    public static bool IsLoaded(TelemetrySnapshot t) => t is { GpuUtilPercent: >= LoadedUtilPct, PowerWatts: { } w } && w >= LoadFloorW(t);
+
+    /// <summary>The board power under which frozen readings look like a hang: <see cref="HangShare"/> of the board's default
+    /// limit, at most <see cref="HangMaxW"/>; <see cref="HangMaxW"/> when no limit is read.</summary>
+    public static double HangFloorW(TelemetrySnapshot t) =>
+        (t.PowerDefaultWatts ?? t.PowerEnforcedWatts ?? t.PowerLimitWatts) is { } l && l > 0 ? Math.Min(HangMaxW, HangShare * l) : HangMaxW;
+
+    /// <summary>A sample that looks like a V/F hang (<see cref="HangUtilPct"/>): full use, a high clock that has not moved
+    /// since the last hang-like sample (<paramref name="frozenMhz"/>, null for the first), under <paramref name="floorW"/>,
+    /// and, when the last window's median power is known (<paramref name="windowW"/>), well under it.</summary>
+    public static bool HangLike(Point p, uint? frozenMhz, double floorW, double? windowW) =>
+        p is { UtilPct: >= HangUtilPct, ClockMhz: >= HangMinMhz, BoardW: { } w } && w < floorW
+        && (windowW is not { } m || w < HangDropShare * m) && (frozenMhz == null || frozenMhz == p.ClockMhz);
+
+    /// <summary>The time one sample under load stands for: since the sample before it (<paramref name="prev"/>; a read slower
+    /// than the interval stands for longer), at most two intervals (a gap the card did not answer in is not time under
+    /// load), and one interval for the first sample.</summary>
+    public static TimeSpan LoadedStep(DateTimeOffset? prev, DateTimeOffset at, int intervalMs)
+    {
+        var one = TimeSpan.FromMilliseconds(intervalMs);
+        if (prev is not { } b || at <= b) return one;
+        var d = at - b;
+        return d > 2 * one ? 2 * one : d;
+    }
+
+    private static LockSpan? OpenSpan(IReadOnlyList<LockSpan> spans) => spans.Count > 0 && spans[^1].To == null ? spans[^1] : null;
+
+    /// <summary>The locks as one key, in words; null for none.</summary>
+    public static string? Key(IReadOnlyList<ClientLimit> locks) => locks.Count > 0 ? string.Join(", ", locks.Select(l => l.Describe())) : null;
+
+    /// <summary>
+    /// The lock periods after one read of the clock-lock record (<paramref name="locks"/>; null when it was unreadable, and
+    /// then the last reading stands). A different lock, or none, closes the open period at <paramref name="now"/>, and a
+    /// lock opens the next. A point lock or Boost Lock is checked against a point on the curve, so a change of the curve's
+    /// offsets, its voltage demand or NVVDD MAX under one closes its period too. Otherwise the open period keeps the
+    /// newest curve (its clocks move with temperature).
+    /// </summary>
+    public static IReadOnlyList<LockSpan> Track(IReadOnlyList<LockSpan> spans, IReadOnlyList<ClientLimit>? locks, VfCurveSnapshot? curve,
+        uint? maxUv, DateTimeOffset now)
+    {
+        var open = OpenSpan(spans);
+        string? key = locks == null ? open?.Key : Key(locks);
+        curve ??= open?.Curve;
+        maxUv ??= open?.MaxUv;
+        var list = spans.ToList();
+        if (open != null)
+        {
+            bool moved = open.Locks.Any(l => l is { Domain: 6, Mode: 3 }) && (!SameShape(open.Curve, curve) || open.MaxUv != maxUv);
+            if (key == open.Key && !moved)
+            {
+                list[^1] = open with { Curve = curve, MaxUv = maxUv };
+                return list;
+            }
+            list[^1] = open with { To = now };
+        }
+        if (key != null) list.Add(new LockSpan(list.Count + 1, key, locks ?? open!.Locks, curve, maxUv, now));
+        return list;
+    }
+
+    /// <summary>Same offsets and voltage demand on every point (temperature moves only the effective clocks); an unread
+    /// curve on either side is taken as the same.</summary>
+    private static bool SameShape(VfCurveSnapshot? a, VfCurveSnapshot? b) => a == null || b == null
+        || (a.DemandShiftUv == b.DemandShiftUv && a.Points.Select(x => x.OffsetKhz).SequenceEqual(b.Points.Select(x => x.OffsetKhz)));
+
+    /// <summary>Each lock period against the samples under load taken in it; null when no lock was in force at any read.</summary>
+    public static IReadOnlyList<LockSpanOutcome>? LocksBySpan(IReadOnlyList<LockSpan> spans, IReadOnlyList<Point> loaded)
+    {
+        if (spans.Count == 0) return null;
+        return spans.Select(s =>
+        {
+            var mine = loaded.Where(p => p.LockSpan == s.Id).ToList();
+            return new LockSpanOutcome(s.Key, s.From, s.To, mine.Count,
+                TuningTools.LocksMet(s.Locks, mine.Select(p => (double?)p.ClockMhz), s.Curve, s.MaxUv) ?? []);
+        }).ToList();
+    }
+
+    private static string OutcomeWords(LockSpanOutcome s) => string.Join("; ", s.Outcomes.Select(m => $"{m.What}: {m.Words}"));
+
+    /// <summary>The lock periods in clauses for a summary line: "; clock lock 20:14-20:31: maximum clock 2400 MHz: held ...";
+    /// empty when none was in force.</summary>
+    public static string SpanWords(IReadOnlyList<LockSpanOutcome>? spans) => spans is not { Count: > 0 } ? "" : string.Concat(spans.Select(s =>
+        string.Create(CultureInfo.InvariantCulture, $"; clock lock {s.From:HH:mm}-{(s.To is { } to ? to.ToString("HH:mm", CultureInfo.InvariantCulture) : "now")}: ")
+        + OutcomeWords(s)));
 
     /// <summary>One window under load, the way the reference card's runs were read: clock range and median, the voltage and
     /// the curve point it sat on, MSVDD and XBAR, power against the wall, temperature, fans, and what held the clock.</summary>
@@ -412,17 +554,25 @@ public sealed class LiveWatch(Card card) : IDisposable
     private object Totals(Run run)
     {
         List<Point> l;
-        int samples, stretches, silences;
-        lock (run) { l = [.. run.Loaded]; samples = run.Samples; stretches = run.Stretches; silences = run.Silences; }
+        int samples, stretches, silences, hangs;
+        TimeSpan underLoad;
+        IReadOnlyList<LockSpan> spans;
+        bool locksRead;
+        lock (run)
+        {
+            l = [.. run.Loaded]; samples = run.Samples; stretches = run.Stretches; silences = run.Silences; hangs = run.SuspectedHangs;
+            underLoad = run.LoadedTime; spans = run.Spans; locksRead = run.LocksRead;
+        }
         var clocks = l.Where(p => p.ClockMhz != null).Select(p => (double)p.ClockMhz!.Value).ToList();
         return new
         {
             started = run.Started.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
             minutes = Math.Round(((run.Ended ?? DateTimeOffset.Now) - run.Started).TotalMinutes, 1),
-            under_load_min = Math.Round(l.Count * run.IntervalMs / 60000.0, 1),
+            under_load_min = Math.Round(underLoad.TotalMinutes, 1),
             stretches_of_load = stretches,
             samples,
             card_stopped_answering = silences,
+            looked_hung = hangs,
             p10_mhz = Pct(clocks, 0.1),
             p50_mhz = Pct(clocks, 0.5),
             p90_mhz = Pct(clocks, 0.9),
@@ -431,7 +581,15 @@ public sealed class LiveWatch(Card card) : IDisposable
             p50_xbar_mhz = Pct(l.Select(p => p.XbarMhz), 0.5),
             p50_sys_mhz = Pct(l.Select(p => p.SysMhz), 0.5),
             p50_video_mhz = Pct(l.Select(p => p.VideoMhz), 0.5),
-            clock_locks = LocksMet(run, l),
+            clock_locks = LocksBySpan(spans, l)?.Select(s => new
+            {
+                locks = s.Locks,
+                from = s.From.ToString("HH:mm:ss", CultureInfo.InvariantCulture),
+                to = s.To?.ToString("HH:mm:ss", CultureInfo.InvariantCulture),
+                samples_under_load = s.Samples,
+                outcomes = s.Outcomes,
+            }).ToList(),
+            clock_locks_unread = locksRead ? null : TuningTools.LocksUnread,
             p50_board_w = Pct(l.Select(p => p.BoardW), 0.5),
             max_board_w = l.Count == 0 ? null : Round1(l.Max(p => p.BoardW)),
             max_temp_c = l.Count == 0 ? null : Round1(l.Max(p => p.TempC)),
@@ -440,7 +598,9 @@ public sealed class LiveWatch(Card card) : IDisposable
                 .Select(g => new { point = g.Key, mv = Pct(g.Select(p => p.NvvddMv), 0.5), p50_mhz = Pct(g.Where(p => p.ClockMhz != null).Select(p => (double)p.ClockMhz!.Value).ToList(), 0.5), pct = Math.Round(100.0 * g.Count() / l.Count) }),
             held_by = l.GroupBy(p => p.HeldBy).OrderByDescending(g => g.Count())
                 .Select(g => new { what = Words(g.Key), pct = Math.Round(100.0 * g.Count() / l.Count) }),
-            fps = FrameFeed.Show(SafeTotal(run)),
+            fps_under_load = FrameFeed.Show(SafePlayed(run)),
+            fps_whole_capture = FrameFeed.Show(SafeTotal(run)),
+            fps_capture_ended = run.Frames?.EndedAt?.ToString("HH:mm:ss", CultureInfo.InvariantCulture),
             fps_csv = run.Frames?.Path,
         };
     }
@@ -448,37 +608,32 @@ public sealed class LiveWatch(Card card) : IDisposable
     private string SummaryLine(Run run)
     {
         List<Point> l;
-        int stretches, silences;
-        lock (run) { l = [.. run.Loaded]; stretches = run.Stretches; silences = run.Silences; }
+        int stretches, silences, hangs;
+        TimeSpan underLoad;
+        IReadOnlyList<LockSpan> spans;
+        lock (run) { l = [.. run.Loaded]; stretches = run.Stretches; silences = run.Silences; hangs = run.SuspectedHangs; underLoad = run.LoadedTime; spans = run.Spans; }
         var minutes = ((run.Ended ?? DateTimeOffset.Now) - run.Started).TotalMinutes;
-        if (l.Count == 0) return string.Create(CultureInfo.InvariantCulture, $"{minutes:0.#} min, never under load") + (run.Note != null ? $". Playing: {run.Note}" : "");
+        string answers = (silences > 0 ? $"; the card stopped answering {silences} time(s)" : "")
+            + (hangs > 0 ? $"; the readings looked like a hang (clock frozen at full use, power down) {hangs} time(s)" : "");
+        if (l.Count == 0) return string.Create(CultureInfo.InvariantCulture, $"{minutes:0.#} min, never under load") + answers + (run.Note != null ? $". Playing: {run.Note}" : "");
         var clocks = l.Where(p => p.ClockMhz != null).Select(p => (double)p.ClockMhz!.Value).ToList();
         int? point = Mode(l.Select(p => p.CurvePoint));
         var held = string.Join(", ", l.GroupBy(p => p.HeldBy).OrderByDescending(g => g.Count()).Take(3).Select(g => $"{Words(g.Key)} {100.0 * g.Count() / l.Count:0} %"));
         return string.Create(CultureInfo.InvariantCulture,
-            $"{minutes:0.#} min, {l.Count * run.IntervalMs / 60000.0:0.#} min of it under load in {stretches} stretch(es). P50 {Pct(clocks, 0.5):0} MHz @ {Pct(l.Select(p => p.NvvddMv), 0.5):0} mV (point {point}), " +
+            $"{minutes:0.#} min, {underLoad.TotalMinutes:0.#} min of it under load in {stretches} stretch(es). P50 {Pct(clocks, 0.5):0} MHz @ {Pct(l.Select(p => p.NvvddMv), 0.5):0} mV (point {point}), " +
             $"P10 {Pct(clocks, 0.1):0}, P90 {Pct(clocks, 0.9):0}; {100.0 * l.Count(p => p.OnWall) / l.Count:0} % on the wall; max {l.Max(p => p.TempC):0} °C, {l.Max(p => p.BoardW):0} W; {held}")
-            + (silences > 0 ? $"; the card stopped answering {silences} time(s)" : "")
-            + (run.Frames != null ? $"; {FrameFeed.Words(SafeTotal(run))}" : "") + TuningTools.LocksWords(LocksMet(run, l))
+            + answers
+            + (run.Frames is { } f ? $"; under load {FrameFeed.Words(SafePlayed(run), f.EndedAt)}" : "") + SpanWords(LocksBySpan(spans, l))
             + (run.Note != null ? $". Playing: {run.Note}" : "");
-    }
-
-    /// <summary>The lock in force as last read against the samples under load taken while it was; null when none is.</summary>
-    private static IReadOnlyList<Clocktail.Domain.Clocks.ClockLockOutcome>? LocksMet(Run run, List<Point> loaded)
-    {
-        IReadOnlyList<Clocktail.Domain.Clocks.ClientLimit>? locks;
-        VfCurveSnapshot? curve;
-        uint? maxUv;
-        string? key;
-        lock (run) { locks = run.Locks; curve = run.Curve; maxUv = run.MaxUv; key = run.LocksKey; }
-        if (key == null) return null;
-        return TuningTools.LocksMet(locks, loaded.Where(p => p.Locks == key).Select(p => (double?)p.ClockMhz), curve, maxUv);
     }
 
     private static Clocktail.Domain.Fps.FrameStats.App? SafeTotal(Run run)
     {
         try { return run.Frames?.Total(); } catch (IOException) { return null; }
     }
+
+    /// <summary>The game's frame rate over the windows under load (no menus, loading screens or desktop between them).</summary>
+    private static Clocktail.Domain.Fps.FrameStats.App? SafePlayed(Run run) => run.Frames?.Played();
 
     private static string Row(Point p) => string.Create(CultureInfo.InvariantCulture,
         $"{p.At:HH:mm:ss.ff} {p.ClockMhz} MHz {p.NvvddMv:0} mV {p.BoardW:0} W {p.TempC:0} °C {p.UtilPct} % {p.HeldBy}");
@@ -496,8 +651,12 @@ public sealed class LiveWatch(Card card) : IDisposable
     private static void Emit(Run run, string text)
     {
         string line = $"{DateTime.Now:HH:mm:ss} {text}";
-        lock (run) run.Lines.Add(line);
-        try { run.Log.WriteLine(line); } catch (Exception e) when (e is IOException or ObjectDisposedException) { }
+        // The sampler and the watchdog's timer both write: one at a time, and in the order of Lines.
+        lock (run)
+        {
+            run.Lines.Add(line);
+            try { run.Log.WriteLine(line); } catch (Exception e) when (e is IOException or ObjectDisposedException) { }
+        }
     }
 
     /// <summary>The log and the CSV, shared for reading while they are written (tail -F, an editor), flushed every line.</summary>

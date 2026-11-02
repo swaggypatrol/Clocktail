@@ -14,5 +14,6 @@ Compare power with this board's own request and firmware limit; inspect rail cur
 Use reported temperature headroom and throttle reasons rather than assuming a universal temperature threshold.
 Memory clocks may be reported in different units by different interfaces; preserve units.
 A held core clock says nothing about the other domains: read XBAR, SYS and Video beside it. Under a clock lock, compare the lock with the sampled clock (`clock_locks`), not with its readback.
+The live watch and `watch` count a sample as under load when the card is busy and draws a quarter of its power limit in force, at most 120 W: the floor scales with this card, it is not a fixed wattage. The live watch's `card_stopped_answering` counts the times the card gave no reading for 3 s. `looked_hung` counts the times it answered with a frozen clock at full use and power well under its own load. That looks like a V/F hang, but it is not proof of one: a driver reset in `data_points` is.
 GPC voltage sensors, memory temperature, connector power, PCIe information and frame statistics may be unavailable on some boards or layouts. Missing is not zero.
 Validation-history information is provenance, not a model whitelist or proof that all controls work on every card.
