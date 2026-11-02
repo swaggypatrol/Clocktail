@@ -635,9 +635,17 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         }
     }
 
-    /// <summary>The fields of a trial that say nothing about what the card runs: when and why it was written, how it ended,
-    /// the operating point at the write, and what a hand-back takes off it (a fixed fan duty, current limits).</summary>
-    private static readonly HashSet<string> NotSettings = ["At", "Change", "Marked", "Ending", "AtUv", "AtMhz", "FanPct", "NvvddMa", "MsvddMa", "Writes"];
+    /// <summary>The fields of a trial that say nothing about what the card runs: when and why it was written, its identity
+    /// (<see cref="TrialId"/>), how it ended, the operating point at the write, and what a hand-back takes off it (a fixed
+    /// fan duty, current limits).</summary>
+    private static readonly HashSet<string> NotSettings = ["At", "Id", "Change", "Marked", "Ending", "AtUv", "AtMhz", "FanPct", "NvvddMa", "MsvddMa", "Writes"];
+
+    /// <summary>The identity of the trial in force, from a "show" or "quiet" answer (ExperimentTrial.Id, kept through a
+    /// hand-back); null when no trial is in force, the answer cannot be read, or the service gave the trial none.</summary>
+    public static string? TrialId(BrokerAnswer show) =>
+        show.Ok && show.Result is { } r && r.TryGetProperty("experiment", out var e) && e.ValueKind == JsonValueKind.Object
+        && e.TryGetProperty("Trial", out var t) && t.ValueKind == JsonValueKind.Object
+        && t.TryGetProperty("Id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
 
     /// <summary>
     /// The settings the trial in force runs, from a "show" or "quiet" answer: every field but when and why it was written

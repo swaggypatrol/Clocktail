@@ -33,10 +33,12 @@ public sealed partial class TuningTools
 
     /// <summary>One measurement's hold on the card (<see cref="HoldCard"/>): judge.lock, given back when disposed. Trial: the
     /// settings of the trial in force once the card was quiet (<see cref="TrialSettings"/>; null for none), the one the run
-    /// measures; Known: the service could be asked then (one that could not be reached says nothing about it).</summary>
-    private sealed class CardHold(string path, string runId, string? trial, bool known) : IDisposable
+    /// measures; TrialId: that trial's identity (<see cref="TrialId"/>; null for none, or from a service that gives none);
+    /// Known: the service could be asked then (one that could not be reached says nothing about it).</summary>
+    private sealed class CardHold(string path, string runId, string? trial, string? trialId, bool known) : IDisposable
     {
         public string? Trial => trial;
+        public string? TrialId => trialId;
         public bool Known => known;
         public void Dispose() => JudgeLock.Release(path, runId);
     }
@@ -61,7 +63,7 @@ public sealed partial class TuningTools
         {
             var quiet = Quiet(k => card.Broker(BrokerRequest.OpExperiment, k), QuietTries, Thread.Sleep, out bool older);
             if (older && !olderToo) JudgeLock.Release(lockPath, runId);
-            return new CardHold(lockPath, runId, TrialSettings(quiet), quiet.Code != BrokerCode.BrokerUnreachable);
+            return new CardHold(lockPath, runId, TrialSettings(quiet), TrialId(quiet), quiet.Code != BrokerCode.BrokerUnreachable);
         }
         catch { JudgeLock.Release(lockPath, runId); throw; }
     }
@@ -74,13 +76,28 @@ public sealed partial class TuningTools
     /// with other settings now is not blamed. The crash's data point is on record even when the daily profile could not go
     /// back on yet (the card held busy): true then too, so nobody records it again.
     /// </summary>
-    private bool RecordCrash(CardHold hold, int? resets, string what)
+    private bool RecordCrash(CardHold hold, int? resets, string what) =>
+        RecordCrash((kind, value, key) => card.Broker(BrokerRequest.OpExperiment, kind, value, key), hold.Trial, hold.TrialId, hold.Known, resets, what, Thread.Sleep);
+
+    /// <summary>
+    /// <see cref="RecordCrash(CardHold, int?, string)"/> over the service's experiment op (<paramref name="experiment"/>: kind,
+    /// value, key). With the measured trial's identity (<paramref name="measuredId"/>) the crash goes in one request that
+    /// names it, and the service refuses it when another trial is in force: the run gave judge.lock back before this, so a
+    /// look and then a record in two requests could blame a trial written in between. Without one (a service that gives
+    /// trials none) the trial in force must have the measured settings (<see cref="TrialSettings"/>) and no identity.
+    /// </summary>
+    public static bool RecordCrash(Func<string, string?, string?, BrokerAnswer> experiment, string? measured, string? measuredId, bool known,
+        int? resets, string what, Action<TimeSpan> sleep)
     {
-        if (hold.Known && hold.Trial == null) return false;
-        if (resets > 0 && TrialClosedWithin(() => TrialInForce(card.Broker(BrokerRequest.OpExperiment, "show")), ServiceRecordsWithin, Thread.Sleep))
+        if (known && measured == null) return false;
+        if (resets > 0 && TrialClosedWithin(() => TrialInForce(experiment("show", null, null)), ServiceRecordsWithin, sleep))
             return true;
-        if (TrialSettings(card.Broker(BrokerRequest.OpExperiment, "show")) is not { } now || hold.Known && now != hold.Trial) return false;
-        var c = card.Broker(BrokerRequest.OpExperiment, "crash", what);
+        if (measuredId == null)
+        {
+            var show = experiment("show", null, null);
+            if (TrialSettings(show) is not { } now || known && (now != measured || TrialId(show) != null)) return false;
+        }
+        var c = experiment("crash", what, measuredId);
         return c.Ok || c.Result is { } res && res.TryGetProperty("point", out var p) && p.ValueKind == JsonValueKind.Object;
     }
 

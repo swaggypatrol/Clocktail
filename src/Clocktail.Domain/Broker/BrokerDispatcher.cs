@@ -861,7 +861,8 @@ public sealed partial class BrokerDispatcher
                         FanCurve: fanCurve ?? under?.FanCurve, FanPct: fanPct == 0 ? null : fanPct ?? under?.FanPct, MemoryKhz: memoryKhz ?? under?.MemoryKhz,
                         XbarKhz: xbarKhz ?? under?.XbarKhz, XbarVdemandUv: xbarVdemand ?? under?.XbarVdemandUv,
                         Writes: extra.Count == 0 ? under?.Writes
-                            : [.. (under?.Writes ?? []).Where(b => !extra.Any(n => n.Kind == b.Kind && n.Key == b.Key)), .. extra]);
+                            : [.. (under?.Writes ?? []).Where(b => !extra.Any(n => n.Kind == b.Kind && n.Key == b.Key)), .. extra],
+                        Id: Guid.NewGuid().ToString("n"));
                     (exp with { Trial = trial }).Save(path);
                     Log(target, $"Trial · {exp.Game}", [
                         $"Change: {change}",
@@ -892,7 +893,12 @@ public sealed partial class BrokerDispatcher
             case "crash":
             {
                 // The game fell to the desktop with no driver reset: nothing the broker can see, so the player says so.
-                if (Experiment.Load(path)?.Trial == null) return Fail("no trial is in force; nothing to mark", BrokerCode.CannotWrite);
+                // Key: the identity of the trial a run measured (stress_test, lab_test), checked here under the operation
+                // lock, so a trial written after the run cannot take its crash. Without one (mark_crash), the trial in force.
+                var inForce = Experiment.Load(path)?.Trial;
+                if (inForce == null) return Fail("no trial is in force; nothing to mark", BrokerCode.CannotWrite);
+                if (req.Key is { Length: > 0 } measured && inForce.Id != measured)
+                    return Fail("the trial in force is not the one the run measured (another trial was written since): nothing recorded", BrokerCode.CannotWrite);
                 var (point, r, left, _) = LeaveBack(target, Experiment.Crash, req.Value ?? "the game crashed (reported by the player)", out var writes);
                 Log(target, $"Crash · reported · {point!.Game}", [   // the player, or a stress run that failed
                     $"What happened: {point.Note}",

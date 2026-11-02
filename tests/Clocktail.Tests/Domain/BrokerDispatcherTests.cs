@@ -1108,6 +1108,49 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal([Experiment.Crash], Outcomes());
     }
 
+    /// <summary>A run's crash (stress_test, lab_test) names the trial it measured: each trial has an identity, kept through
+    /// a hand-back, and a crash naming another is refused under the operation lock, so a trial written after the run
+    /// (here the next "try", as set_fan_speed writes one) does not take it. Before, the run looked at the trial in force and
+    /// then recorded the crash in a second request, and a trial with the same settings but a fixed fan duty took it.</summary>
+    [Fact]
+    public void A_run_s_crash_goes_only_to_the_trial_it_names()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"lab"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W, NVVDD 350 A", power_mw = 450_000u, nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+        var measured = TrialNow()!;
+        Assert.False(string.IsNullOrEmpty(measured.Id));
+
+        _host.Now += TimeSpan.FromMinutes(5);
+        Assert.True(d.Dispatch(Exp("release", "the agent disconnected")).Ok);   // the hand-back writes the trial again
+        Assert.NotEqual(measured.At, TrialNow()!.At);
+        Assert.Equal(measured.Id, TrialNow()!.Id);                               // and it is still that trial
+
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "460 W", power_mw = 460_000u, keep_curve = true }))).Ok);
+        var next = TrialNow()!;
+        Assert.NotEqual(measured.Id, next.Id);
+        int points = Outcomes().Count;
+        var refused = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "crash", Key: measured.Id, Value: "lab: 3 errors"));
+        Assert.Equal(BrokerCode.CannotWrite, refused.Code);
+        Assert.Contains("not the one the run measured", refused.Error);
+        Assert.Equal(points, Outcomes().Count);                 // nothing recorded
+        Assert.Equal(next.Id, TrialNow()!.Id);                  // and the trial written since stays on
+        Assert.Equal(460_000u, _requests[0xfe]);
+
+        var named = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "crash", Key: next.Id, Value: "lab: 3 errors"));
+        Assert.True(named.Ok, named.Error);
+        var crash = Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1];
+        Assert.Equal((Experiment.Crash, "460 W"), (crash.Outcome, crash.Change));
+
+        // A trial from a service that gave none (an experiment.json from before) takes no named crash, and mark_crash's,
+        // which names none, as before.
+        new Experiment("lab", null, _host.Now, new ExperimentTrial(_host.Now, "0*127", "+15 MHz", null, null)).Save(Experiment.PathBeside(_journal.Path));
+        Assert.Equal(BrokerCode.CannotWrite, d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "crash", Key: next.Id, Value: "lab")).Code);
+        Assert.True(d.Dispatch(Exp("crash", "the game closed to the desktop")).Ok);
+        Assert.Equal("+15 MHz", Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1].Change);
+    }
+
     /// <summary>A driver reset after a mark_crash the card held off is that same crash, recorded once (an unattended
     /// session's budget counts it once); the reset took the card off the trial, so it leaves the record.</summary>
     [Fact]

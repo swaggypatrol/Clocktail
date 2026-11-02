@@ -25,7 +25,9 @@ public sealed record BrokerRequest(
     int Khz = 0,
     bool AllowCreate = false,
     bool TakeOver = false,
-    /// <summary>For <see cref="OpWrite"/> and <see cref="OpProve"/>: the cell's key within its kind.</summary>
+    /// <summary>For <see cref="OpWrite"/> and <see cref="OpProve"/>: the cell's key within its kind. For
+    /// <see cref="OpExperiment"/> "crash": the identity of the trial the run measured
+    /// (<see cref="Clocktail.Domain.Profiles.ExperimentTrial.Id"/>); the crash is refused when another trial is in force.</summary>
     string? Key = null,
     /// <summary>For <see cref="OpWrite"/>: the value in the cell's canonical encoding.</summary>
     string? Value = null,
