@@ -39,8 +39,8 @@ public sealed record SweepStatus(string Job, string State, DateTime StartedUtc, 
 public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<string>? log = null)
     : LabJob(spec.StableId, spec.Pci, spec.GraceSeconds, jobDir, labExe)
 {
-    /// <summary>Bandwidth under the best step before it by more than this (0.5 %), at two steps in a row: the memory is
-    /// retrying. It need not rise: on the reference card +0/+179/+358 gave 1437/1440/1439 GB/s, the crossbar and not the DRAM
+    /// <summary>Bandwidth under the best step before it by more than this (0.5 %), at two steps in a row: the memory got
+    /// slower (error retries past its edge, or a warmer card: the words name both). It need not rise: on the reference card +0/+179/+358 gave 1437/1440/1439 GB/s, the crossbar and not the DRAM
     /// setting the rate (XBAR +250 gave 1455 → 1474), so a rule that wanted bandwidth to follow the memory clock would stop a
     /// healthy sweep. One step under is noise as often as not: +1558 read 1.2 % under +1358 and +1658 was the best yet.</summary>
     public const double BandwidthFall = 0.005;
@@ -78,11 +78,18 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
         if (NotInForce(prev.OffsetMhz, prev.MemMhz, last) is { } why) return new(why, false, Unjudged: true);
         int n = steps.Count - 1;
         if (Under(steps, n) is { } u && Under(steps, n - 1) is { } u0)
-            return new(Inv($"bandwidth stayed under the best step's: {u0.Gbps:0.#} then {u.Gbps:0.#} GB/s ({u0.Pct:+0.0;-0.0} %, {u.Pct:+0.0;-0.0} %): the memory is retrying"), true);
+            return new(Inv($"bandwidth stayed under the best step's: {u0.Gbps:0.#} then {u.Gbps:0.#} GB/s ({u0.Pct:+0.0;-0.0} %, {u.Pct:+0.0;-0.0} %){Warmer(u.FromC, last.TempP50)}: slower two steps running. {SlowerWhy}"), true);
         if (Over(steps, n) is { } o && Rising(steps, n) && (Over(steps, n - 1) != null || Rising(steps, n - 1)))
-            return new(Inv($"latency rose again to {o.Ns:0.#} ns, {o.Pct:+0.0} % over the lowest step's {o.Lowest:0.#}, after rising at {prev.OffsetMhz:+0;-0;0} MHz too: a timing change rises once and then falls with the clock; this kept rising, the memory is retrying"), true);
+            return new(Inv($"latency rose again to {o.Ns:0.#} ns, {o.Pct:+0.0} % over the lowest step's {o.Lowest:0.#}, after rising at {prev.OffsetMhz:+0;-0;0} MHz too{Warmer(o.FromC, last.TempP50)}: a timing change rises once and then falls with the clock; this kept rising. {SlowerWhy}"), true);
         return null;
     }
+
+    /// <summary>What a slowdown that lasted can be: the sweep measured speed, not its cause. The steps run back to back, so the
+    /// card is warmer at each, and heat slows the memory too.</summary>
+    private const string SlowerWhy = "Past GDDR7's edge that is error retries (EDR), but a warmer card reads the same: run lab_test memory at the best step's offset again to tell";
+
+    /// <summary>The GPU's temperature at the step compared with and at this one, for the words; empty when either is unknown.</summary>
+    private static string Warmer(double? fromC, double? toC) => fromC is { } a && toC is { } b ? Inv($", GPU {a:0} → {b:0} °C") : "";
 
     /// <summary>Why a step's offset was not in force: NVML's memory clock follows the offset 1:1 (13801 → 14159 MHz at +358 on
     /// the reference card), so a clock that rose less than half the step from where it was means the offset is not in force
@@ -118,22 +125,24 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     {
         int n = steps.Count - 1;
         if (n < 1 || Edge(steps) != null) return null;
-        if (Under(steps, n) is { } u) return Inv($"bandwidth {u.Pct:+0.0;-0.0} % under the best step's {u.Best:0.#} GB/s, once: noise or the start of retrying; the next step says which");
+        if (Under(steps, n) is { } u) return Inv($"bandwidth {u.Pct:+0.0;-0.0} % under the best step's {u.Best:0.#} GB/s{Warmer(u.FromC, steps[n].TempP50)}, once: noise, a warmer card or the start of error retries; the next step says whether it lasts");
         if (Over(steps, n) is { } o && Rising(steps, n))
-            return Inv($"latency {o.Pct:+0.0} % over the lowest step's {o.Lowest:0.#} ns, once: a timing change falls with the clock at the next step, retrying keeps rising");
+            return Inv($"latency {o.Pct:+0.0} % over the lowest step's {o.Lowest:0.#} ns{Warmer(o.FromC, steps[n].TempP50)}, once: a timing change falls with the clock at the next step; error retries or a warming card keep it rising");
         return null;
     }
 
-    private static (double Gbps, double Best, double Pct)? Under(IReadOnlyList<SweepStep> steps, int i)
+    /// <summary>Bandwidth under the best step before <paramref name="i"/>: this step's, the best, the change, and the best step's temperature.</summary>
+    private static (double Gbps, double Best, double Pct, double? FromC)? Under(IReadOnlyList<SweepStep> steps, int i)
     {
         if (i < 1 || steps[i].Gbps is not { } g || steps.Take(i).Max(s => s.Gbps) is not { } best || g >= best * (1 - BandwidthFall)) return null;
-        return (g, best, (g / best - 1) * 100);
+        return (g, best, (g / best - 1) * 100, steps.Take(i).First(s => s.Gbps == best).TempP50);
     }
 
-    private static (double Ns, double Lowest, double Pct)? Over(IReadOnlyList<SweepStep> steps, int i)
+    /// <summary>Latency over the lowest step before <paramref name="i"/>: this step's, the lowest, the change, and the lowest step's temperature.</summary>
+    private static (double Ns, double Lowest, double Pct, double? FromC)? Over(IReadOnlyList<SweepStep> steps, int i)
     {
         if (i < 1 || steps[i].LatencyNs is not { } l || steps.Take(i).Min(s => s.LatencyNs) is not { } low || l <= low * (1 + LatencyRise)) return null;
-        return (l, low, (l / low - 1) * 100);
+        return (l, low, (l / low - 1) * 100, steps.Take(i).First(s => s.LatencyNs == low).TempP50);
     }
 
     private static bool Rising(IReadOnlyList<SweepStep> steps, int i) =>
@@ -151,6 +160,15 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 return onset > 0 ? steps[onset - 1].OffsetMhz : null;
             }
         return steps[^1].OffsetMhz;
+    }
+
+    /// <summary>Whether the first stop in the steps was a slowdown that lasted (the two-step rules), not a failure or a step
+    /// that could not be judged: the best offset then rests on speed alone, which a warmer card lowers too.</summary>
+    public static bool SlowedDown(IReadOnlyList<SweepStep> steps)
+    {
+        for (int i = 0; i < steps.Count; i++)
+            if (Edge(steps.Take(i + 1).ToList()) is { } e) return e.BeganAtStepBefore;
+        return false;
     }
 
     public static SweepStep Step(int offsetMhz, LabResult r, int? resets)
@@ -287,7 +305,9 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
         if (_wrote && DailyBack("tune_memory finished") is { } notBack) why += "; " + notBack;
         int? best = Best(_steps);
         string? next = state == SweepStatus.Done && best is { } b
-            ? Inv($"the edge's side is {b:+0;-0;0} MHz (the step before any slowdown that lasted). Read the steps for where bandwidth stops rising: past that an offset buys latency only, which frames may not feel: judge it in frames, not in the lab's numbers. Tell the person; set_memory_offset there in steps of at most 250 MHz, judge it against the daily offset with a memory-sensitive benchmark A B B A (a ray-traced one, as Speedway), their games have the last word, keep_as_daily (ask); if a game fails, step down")
+            ? Inv($"the edge's side is {b:+0;-0;0} MHz (the step before any slowdown that lasted). ") + (SlowedDown(_steps)
+                ? Inv($"A slowdown stopped it, and a warmer card slows the memory as error retries do: at {b:+0;-0;0} MHz, a lab_test memory as slow as the stopping step's means heat, not the edge. ")
+                : "") + ("Read the steps for where bandwidth stops rising: past that an offset buys latency only, which frames may not feel: judge it in frames, not in the lab's numbers. Tell the person; set_memory_offset there in steps of at most 250 MHz, judge it against the daily offset with a memory-sensitive benchmark A B B A (a ray-traced one, as Speedway), their games have the last word, keep_as_daily (ask); if a game fails, step down")
             : null;
         Save(state, at, why, next, best);
         log?.Invoke($"{state}: {why}");

@@ -243,6 +243,47 @@ public class LabTests
         Assert.Equal(50, MemorySweep.Best(steps));
     }
 
+    /// <summary>Two passing steps slower than the best, the clock following the offset and the card warming by 8 °C: the sweep
+    /// still stops and keeps the step before, but the words say what was measured and both causes it fits, not that the
+    /// memory is retrying, which in 0.8.1 they stated as a fact.</summary>
+    [Fact]
+    public void A_lasting_slowdown_names_heat_beside_error_retries_and_stops_all_the_same()
+    {
+        var steps = new List<SweepStep>
+        {
+            S(0, 1000, 500, 13801) with { TempP50 = 60 }, S(100, 990, 499, 13901) with { TempP50 = 64 }, S(200, 989, 498, 14001) with { TempP50 = 68 },
+        };
+        var edge = MemorySweep.Edge(steps);
+        Assert.NotNull(edge);
+        Assert.True(edge.BeganAtStepBefore);
+        Assert.Equal(0, MemorySweep.Best(steps));
+        Assert.True(MemorySweep.SlowedDown(steps));
+        Assert.Contains("GPU 60 → 68 °C", edge.Why);
+        Assert.Contains("warmer card", edge.Why);
+        Assert.Contains("run lab_test memory at the best step's offset again", edge.Why);
+        Assert.DoesNotContain("the memory is retrying", edge.Why);
+        Assert.Contains("warmer card", MemorySweep.Watch(steps.Take(2).ToList()));
+    }
+
+    [Fact]
+    public void Latency_that_keeps_rising_names_heat_too()
+    {
+        var steps = new List<SweepStep> { S(758, 1734, 463.3, 14559), S(858, 1745, 460.6, 14659) with { TempP50 = 61 }, S(958, 1749, 477.7, 14759), S(1058, 1750, 481.0, 14859) with { TempP50 = 70 } };
+        var why = MemorySweep.Signal(steps);
+        Assert.Contains("GPU 61 → 70 °C", why);
+        Assert.Contains("warmer card", why);
+        Assert.DoesNotContain("the memory is retrying", why);
+    }
+
+    /// <summary>A failure stops the sweep without a slowdown: the best offset does not rest on speed then.</summary>
+    [Fact]
+    public void A_failure_is_not_a_slowdown()
+    {
+        var steps = new List<SweepStep> { S(0, 1500, 500, 13801), S(50, 1505, 499, 13851), S(100, 1510, 498, 13901, LabResult.Fail) };
+        Assert.False(MemorySweep.SlowedDown(steps));
+        Assert.False(MemorySweep.SlowedDown(steps.Take(2).ToList()));
+    }
+
     /// <summary>A timing change and then retrying: latency jumps, and instead of falling with the clock it rises again.</summary>
     [Fact]
     public void Latency_that_jumps_and_rises_again_stops_the_sweep_and_the_best_is_before_the_jump()

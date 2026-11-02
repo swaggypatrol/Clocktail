@@ -118,7 +118,7 @@ public sealed partial class TuningTools
         double? stopC = null;
         string? hotWhy = null;
         int grace = (OperatingSystem.IsWindows() ? Clocktail.Domain.Platform.TdrSettings.Read() : null)?.StressGraceS ?? 30;
-        int? code = null;
+        int? code = null, memoryOffset = null;
         bool hot = false, hung = false;
         using var children = OperatingSystem.IsWindows() ? new KillOnCloseJob() : null;
         Process? p = null;
@@ -151,6 +151,8 @@ public sealed partial class TuningTools
                 if (hot || hung) break;
             }
             if (!hot && !hung) code = p.ExitCode;
+            // Read while the card is still held, so the memory history files the run under the offset it measured.
+            if (code != null && list.Contains("memory")) memoryOffset = MemoryOffsetMhz();
         }
         finally
         {
@@ -173,6 +175,14 @@ public sealed partial class TuningTools
         double? busyAfter = lab is { } l7 && l7.TryGetProperty("busy_after_pct", out var ba) && ba.ValueKind == JsonValueKind.Number ? ba.GetDouble() : null;
         bool shared = lab is { } l8 && l8.TryGetProperty("shared", out var sh) && sh.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? sh.GetBoolean() : others > 4096 || busy > 50 || busyAfter > 10;
+        // The lab stops itself at the person's maxTempC (it samples every 100 ms, this loop every 500 ms, so it is usually
+        // first): the same thermal stop as one seen here, not an inconclusive run with nothing to do next.
+        if (!hot && !hung && LabStoppedHot(lab, out double? labC))
+        {
+            hot = true;
+            stopC = labC ?? samples.LastOrDefault()?.Telemetry?.TemperatureC;
+            hotWhy = Nvgwls.HotWhy(stopC, maxC);
+        }
         // The card's failure is a bad bit, a dead context or a driver reset; a lab that hung with no reset (a GPU hang brings
         // one within the TDR delay), crashed or wrote nothing is the runner's, and says nothing about the setting.
         bool failed = resets > 0 || labVerdict == "fail";
@@ -192,11 +202,14 @@ public sealed partial class TuningTools
         }
         double? mv = P50(held.Select(s => s.NvvddUv / 1000.0)), mhz = P50(held.Select(s => (double?)s.Telemetry?.GraphicsClockMhz));
         int? pointIndex = mv is { } m && Nearest(before.Curve, (uint)(m * 1000)) is { } pt ? pt.Index : null;
+        double? xbarMhz = P50(held.Select(s => s.Mhz(Clocktail.Domain.Power.AllClocksLayout.Xbar)));
 
-        // ST02: each memory run is kept by memory offset and buffer, and compared with the last one like it.
+        // ST02: each memory run that passed clean is kept by its setup (SameMemorySetup), and compared with the last one like it.
         object? memoryVsLast = null;
-        if (lab is { } r && !failed && !shared && Phase(r, "memory") is { } mem)
-            memoryVsLast = KeepMemoryRun(mem, Phase(r, "latency"), r.TryGetProperty("buffer_mib", out var bm) ? bm.GetInt64() : 0);
+        if (lab is { } r && Phase(r, "memory") is { } mem)
+            memoryVsLast = KeepsMemoryRun(labVerdict, failed, shared, hot, hung)
+                ? KeepMemoryRun(mem, Phase(r, "latency"), r.TryGetProperty("buffer_mib", out var bm) ? bm.GetInt64() : 0, memoryOffset, xbarMhz)
+                : new { kept = false, note = "not kept or compared: only a run that passed, whole and with the GPU to itself, is a reference for later runs" };
 
         bool trial = hold.Trial != null;   // in force when the run began: the trial it measured
         string summary = string.Create(CultureInfo.InvariantCulture,
@@ -221,7 +234,7 @@ public sealed partial class TuningTools
                 board_w = P50(held.Select(s => s.Telemetry?.PowerWatts)),
                 temp_max_c = held.Max(s => s.Telemetry?.TemperatureC),
                 memory_c = P50(held.Select(s => s.MemoryC)),
-                xbar_mhz = P50(held.Select(s => s.Mhz(Clocktail.Domain.Power.AllClocksLayout.Xbar))),
+                xbar_mhz = xbarMhz,
             },
             memory_vs_last = memoryVsLast,
             trial_in_force = trial,
@@ -243,17 +256,66 @@ public sealed partial class TuningTools
     private static double? Num(JsonElement? e, string name) =>
         e is { } o && o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : null;
 
-    /// <summary>Appends this memory run to the card's lab/memory.jsonl and compares it with the last one at the same memory
-    /// offset, buffer and P-state: bandwidth or latency moving the wrong way at the same setting is the memory retrying, or a
-    /// hotter card (the temperatures are beside it).</summary>
-    private object? KeepMemoryRun(JsonElement mem, JsonElement? lat, long bufferMib)
+    /// <summary>The memory offset on the card, MHz (P0's), or null when the driver could not be read.</summary>
+    private int? MemoryOffsetMhz()
     {
-        int? offset = null;
-        try { offset = card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Memory)?.DeltaKhz / 1000; } catch (Exception e) when (e is InvalidOperationException or DriverBusyException) { }
+        try { return card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Memory)?.DeltaKhz / 1000; }
+        catch (Exception e) when (e is InvalidOperationException or DriverBusyException) { return null; }
+    }
+
+    /// <summary>Whether lab_test keeps a run's memory phase as the reference later runs are compared with: only a run that
+    /// passed, and was not cut short (too hot, hung), failed or shared. In 0.8.1 an inconclusive run was kept too, a memory
+    /// phase the lab had stopped at the temperature limit among them, and the next run at the offset was compared with its
+    /// part of a minute.</summary>
+    public static bool KeepsMemoryRun(string labVerdict, bool failed, bool shared, bool hot, bool hung) =>
+        labVerdict == "pass" && !failed && !shared && !hot && !hung;
+
+    /// <summary>Whether the lab stopped the run itself at the temperature limit (its JSON's interrupted is "temperature"), and
+    /// the hottest its phases saw (temp_max; null when none says).</summary>
+    public static bool LabStoppedHot(JsonElement? lab, out double? atC)
+    {
+        atC = null;
+        if (lab is not { ValueKind: JsonValueKind.Object } l || !l.TryGetProperty("interrupted", out var i)
+            || i.ValueKind != JsonValueKind.String || i.GetString() != "temperature") return false;
+        if (l.TryGetProperty("phases", out var ps) && ps.ValueKind == JsonValueKind.Array)
+            atC = ps.EnumerateArray().Select(p => Num(p, "temp_max")).Max();
+        return true;
+    }
+
+    /// <summary>The share of the crossbar clock two memory runs may differ by and still compare (1 %). On the reference card
+    /// XBAR +250 moved bandwidth 1455 → 1474 GB/s, over the ~1 % the comparison reads as slower.</summary>
+    public const double XbarSameShare = 0.01;
+
+    /// <summary>Whether a kept memory run (<paramref name="was"/>, a memory.jsonl line) was measured on the setup this one
+    /// (<paramref name="now"/>) was, so their speeds compare: the same memory offset, buffer, P-state and driver, and a crossbar
+    /// clock within <see cref="XbarSameShare"/> (both unknown counts as the same). A line kept by 0.8.1 or before has no
+    /// driver or crossbar clock and matches nothing.</summary>
+    public static bool SameMemorySetup(JsonObject was, JsonObject now)
+    {
+        static double? N(JsonNode? n) => n is JsonValue v && v.GetValueKind() == JsonValueKind.Number
+            ? double.Parse(v.ToJsonString(), CultureInfo.InvariantCulture) : null;
+        static string? S(JsonNode? n) => n is JsonValue v && v.GetValueKind() == JsonValueKind.String ? v.GetValue<string>() : null;
+        if (N(was["driver"]) is not { } d || d != N(now["driver"])) return false;
+        if (N(was["offset_mhz"]) != N(now["offset_mhz"]) || N(was["buffer_mib"]) != N(now["buffer_mib"]) || S(was["pstate"]) != S(now["pstate"])) return false;
+        return (N(was["xbar_mhz"]), N(now["xbar_mhz"])) switch
+        {
+            (null, null) => true,
+            ({ } a, { } b) => Math.Abs(a - b) <= XbarSameShare * Math.Max(a, b),
+            _ => false,
+        };
+    }
+
+    /// <summary>Appends this memory run to the card's lab/memory.jsonl and compares it with the last one on the same setup
+    /// (<see cref="SameMemorySetup"/>): bandwidth or latency moving the wrong way on the same setup is the memory slower there,
+    /// from error retries or a hotter card (the temperatures are beside it). <paramref name="offsetMhz"/>: the memory offset
+    /// read while the run held the card; <paramref name="xbarMhz"/>: the crossbar clock's P50 over the run.</summary>
+    private object? KeepMemoryRun(JsonElement mem, JsonElement? lat, long bufferMib, int? offsetMhz, double? xbarMhz)
+    {
         var entry = new JsonObject
         {
-            ["at"] = DateTimeOffset.Now, ["offset_mhz"] = offset, ["buffer_mib"] = bufferMib,
+            ["at"] = DateTimeOffset.Now, ["offset_mhz"] = offsetMhz, ["buffer_mib"] = bufferMib,
             ["pstate"] = mem.TryGetProperty("p_state", out var ps) ? ps.GetString() : null,
+            ["xbar_mhz"] = xbarMhz, ["driver"] = card.DriverVersion,
             ["mem_mhz"] = Num(mem, "mem_mhz_p50"), ["gbps"] = Num(mem, "gbps"), ["latency_ns"] = Num(lat, "latency_ns"), ["temp_c"] = Num(mem, "temp_p50"),
             ["patterns"] = mem.TryGetProperty("patterns", out var pat) ? JsonNode.Parse(pat.GetRawText()) : null,
         };
@@ -262,10 +324,10 @@ public sealed partial class TuningTools
         JsonObject? last = null;
         if (File.Exists(path))
             foreach (var line in File.ReadLines(path).Reverse())
-                if (JsonNode.Parse(line) is JsonObject o && (int?)o["offset_mhz"] == offset && (long?)o["buffer_mib"] == bufferMib && (string?)o["pstate"] == (string?)entry["pstate"])
+                if (JsonNode.Parse(line) is JsonObject o && SameMemorySetup(o, entry))
                 { last = o; break; }
         File.AppendAllText(path, entry.ToJsonString() + "\n");
-        if (last == null) return new { first = true, note = "the first memory run kept at this offset, buffer and P-state: later runs are compared with it" };
+        if (last == null) return new { first = true, note = "the first memory run kept at this memory offset, buffer, P-state, crossbar clock and driver: later runs on the same are compared with it" };
         static double? Pct(double? now, double? was) => now is { } n && was is > 0 ? Math.Round((n / was.Value - 1) * 100, 2) : null;
         return new
         {
@@ -273,7 +335,7 @@ public sealed partial class TuningTools
             gbps = (double?)entry["gbps"], gbps_last = (double?)last["gbps"], gbps_change_pct = Pct((double?)entry["gbps"], (double?)last["gbps"]),
             latency_ns = (double?)entry["latency_ns"], latency_last = (double?)last["latency_ns"], latency_change_pct = Pct((double?)entry["latency_ns"], (double?)last["latency_ns"]),
             temp_c = (double?)entry["temp_c"], temp_last = (double?)last["temp_c"],
-            note = "same offset, buffer and P-state: bandwidth down or latency up by more than ~1 % is the memory retrying (or a hotter card)",
+            note = "same memory offset, buffer, P-state, crossbar clock and driver: bandwidth down or latency up by more than ~1 % means the memory got slower here, from error retries or a hotter card (the temperatures are beside it)",
         };
     }
 
