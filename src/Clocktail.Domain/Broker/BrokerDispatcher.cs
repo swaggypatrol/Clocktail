@@ -1831,7 +1831,7 @@ public sealed partial class BrokerDispatcher
                 return Ok(_frames.Start(dir, seconds, Text(a, "process")));
             }
             case "stop":
-                return Ok(_frames.Stop());
+                return Ok(_frames.Stop(Text(Args(req.Value), "path")));   // no path (an older client): whatever runs
             default:
                 return Fail($"unknown fps request '{req.Kind}' (start, stop)", BrokerCode.BadRequest);
         }

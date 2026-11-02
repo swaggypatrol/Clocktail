@@ -84,8 +84,8 @@ public sealed class LiveWatch(Card card) : IDisposable
     public bool Running { get { lock (_gate) return _run is { Ended: null }; } }
 
     /// <summary>The running live watch's frame capture file, for a watch to follow instead of starting its own (which would
-    /// end this one's); null when none runs.</summary>
-    public string? FramePath { get { lock (_gate) return _run is { Ended: null, Frames: { } f } ? f.Path : null; } }
+    /// end this one's); null when none runs, or its capture has ended (its 4 h ran out before the watch's 6 h).</summary>
+    public string? FramePath { get { lock (_gate) return _run is { Ended: null, Frames: { EndedAt: null } f } ? f.Path : null; } }
 
     /// <summary>The longest frame-rate capture the service runs.</summary>
     public const int MaxFrameSeconds = 4 * 3600;
@@ -347,7 +347,7 @@ public sealed class LiveWatch(Card card) : IDisposable
     private static string Fps(Run run)
     {
         if (run.Frames is not { } f) return "";
-        try { return " · " + FrameFeed.Words(f.TakeWindow()); }
+        try { return " · " + FrameFeed.Words(f.TakeWindow(), f.EndedAt); }
         catch (IOException) { return ""; }
     }
 

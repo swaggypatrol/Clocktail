@@ -111,7 +111,9 @@ public sealed record BrokerRequest(
     public const string OpExperiment = "experiment";
 
     /// <summary>A game's frame rate: <see cref="Kind"/> "start" (<see cref="Value"/> is JSON {seconds, process?}) starts a
-    /// PresentMon capture into the GPU's fps folder and answers its path; "stop" ends it. Not a write: the card is untouched.</summary>
+    /// PresentMon capture into the GPU's fps folder and answers its path (a capture already running ends); "stop"
+    /// (<see cref="Value"/> JSON {path?}) ends the capture writing that path and leaves another one alone, and without a
+    /// path ends whatever runs. Not a write: the card is untouched.</summary>
     public const string OpFps = "fps";
 
     /// <summary>Operations that change the GPU: they take the write window, respect the stability-run lock, and need elevation.</summary>

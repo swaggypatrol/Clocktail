@@ -2308,4 +2308,27 @@ public class BrokerDispatcherTests : IDisposable
         Assert.NotNull(DailyProfile.Load(DailyProfile.PathBeside(_journal.Path)));
         Assert.Equal(450_000u, _requests[0xfe]);           // still the trial's: what the answer says is pending
     }
+
+    private sealed class FakeCapture : Clocktail.Domain.Fps.IFrameCapture
+    {
+        public readonly List<string?> Stops = [];
+        public object Start(string dir, int seconds, string? process) => new { path = Path.Combine(dir, "x.csv") };
+        public object Stop(string? path) { Stops.Add(path); return new { stopped = true }; }
+    }
+
+    /// <summary>A capture has an owner: a stop names the file it is for, so ending one watch does not end a capture that
+    /// another began since. A stop without a path (an older server) still ends whatever runs.</summary>
+    [Fact]
+    public void A_frame_capture_stop_passes_its_path_through()
+    {
+        var capture = new FakeCapture();
+        var d = new BrokerDispatcher(new FakeVf().Install(), new Target(_journal, _sentinel, _gpu), _host, canWrite: true, frames: capture);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpFps, Kind: "stop", Value: """{"path":"C:\\fps\\a.csv"}""")).Ok);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpFps, Kind: "stop")).Ok);
+        Assert.Equal(["C:\\fps\\a.csv", null], capture.Stops);
+
+        Assert.True(Clocktail.Domain.Fps.IFrameCapture.StopsIt("C:\\fps\\A.csv", "C:\\fps\\a.csv"));
+        Assert.False(Clocktail.Domain.Fps.IFrameCapture.StopsIt("C:\\fps\\a.csv", "C:\\fps\\b.csv"));   // another's: left alone
+        Assert.True(Clocktail.Domain.Fps.IFrameCapture.StopsIt(null, "C:\\fps\\b.csv"));
+    }
 }
