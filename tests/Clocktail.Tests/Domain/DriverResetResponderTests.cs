@@ -40,8 +40,9 @@ public class DriverResetResponderTests
         Assert.Equal(BrokerRequest.RecoverAfterDriverReset, _asked[1].Kind);   // the first never reached recovery
         Assert.Equal(BrokerRequest.RecoverAfterDriverResetAgain, _asked[2].Kind);   // the second did: recorded once, and still the reset's (the trial is "crashed"'s)
         Assert.Contains("vf/core Written", _log[^4]);
-        // The crash on record and the limit at once, the profile once idle.
-        Assert.Equal(["crashed", "apply-power", "after-reset"], _profile.Select(p => p.Kind));
+        // The crash on record while the give-back waits (the trial kept in force), again once it lands (which closes the
+        // trial), and the limit at once, the profile once idle.
+        Assert.Equal(["crashed-held", "crashed", "apply-power", "after-reset"], _profile.Select(p => p.Kind));
         Assert.Contains("none kept", _log[^1]);
     }
 
@@ -54,13 +55,28 @@ public class DriverResetResponderTests
         Assert.InRange(_asked.Count, 150, 181);
     }
 
+    /// <summary>A give-back that never lands (a cell refused, every try for 15 min) still leaves the crash on record, once,
+    /// with the hang's time. Before, the crash was recorded only after a clean give-back, so this one left no data point and
+    /// its trial could be marked stable, or recorded as survived by the next trial.</summary>
+    [Fact]
+    public void A_give_back_that_never_lands_still_leaves_the_crash_on_record_once()
+    {
+        var r = Responder(_ => Recovered(false, "Refused"));
+        var hang = (_now.AddSeconds(-5), _now.AddSeconds(-4));
+        Assert.False(r.Respond("nvlddmkm 153", null, new Dictionary<string, (DateTimeOffset, DateTimeOffset)> { ["gpu-A"] = hang }));
+        var held = Assert.Single(_profile);
+        Assert.Equal(("crashed-held", hang.Item2, hang.Item1), (held.Kind, held.HungAt!.Value, held.AnsweredAt!.Value));
+        Assert.Contains("not given back after 15 min", _log[^1]);
+    }
+
     [Fact]
     public void A_refusal_that_waiting_cannot_fix_is_not_retried()
     {
         var r = Responder(_ => new BrokerResponse(false, "not elevated", Code: BrokerCode.NeedsAdmin));
         Assert.False(r.Respond("nvlddmkm 153"));
         Assert.Single(_asked);
-        Assert.Empty(_profile);   // nothing given back, so no profile goes on top of an unknown state
+        // Nothing given back, so no profile goes on top of an unknown state; the crash is on record all the same.
+        Assert.Equal(["crashed-held"], _profile.Select(p => p.Kind));
     }
 
     [Fact]

@@ -1388,6 +1388,36 @@ public class BrokerDispatcherTests : IDisposable
     private static BrokerRequest Crashed(DateTimeOffset stopped, uint uv = 0) => new(BrokerRequest.OpProfile, Kind: "crashed",
         Value: "nvlddmkm 153", Uv: uv, HungAt: stopped, AnsweredAt: stopped.AddMilliseconds(-250));
 
+    /// <summary>A reset whose give-back has not landed (here a stability run holds the card) has its crash on record at
+    /// once ("crashed-held"), and the trial stays in force with that ending while the card may still hold it: no stable mark,
+    /// no keep, no "survived" from the next trial. The give-back that lands, and "crashed" after it, close it with no second
+    /// point. A client cannot send it.</summary>
+    [Fact]
+    public void A_reset_whose_give_back_waits_is_on_record_and_its_trial_stays_until_the_card_is_off_it()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+        var stopped = _host.Now.AddSeconds(30);
+        _host.Now = stopped.AddSeconds(5);
+
+        busy = "clocktail-lab (pid 4242)";
+        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Code);
+        Assert.Equal(BrokerCode.BadRequest, d.FromClient(Crashed(stopped) with { Kind = "crashed-held" }).Code);
+        var held = d.Dispatch(Crashed(stopped, 960_000) with { Kind = "crashed-held" });
+        Assert.True(held.Ok, held.Error);
+        Assert.Equal([Experiment.Crash], Outcomes());
+        Assert.Equal((Experiment.Crash, "wall 575 → 450 W"), (TrialNow()!.Ending, TrialNow()!.Change));   // in force, ended
+        Assert.Equal(450_000u, _requests[0xfe]);
+        Assert.Equal(BrokerCode.CannotWrite, d.Dispatch(Exp("stable", "it seemed fine")).Code);
+
+        busy = null;
+        Reset(d, stopped, 960_000);
+        Assert.Null(TrialNow());
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Equal([Experiment.Crash], Outcomes());                                     // recorded once
+        Assert.Equal(960_000u, Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1].CrashUv);
+    }
+
     /// <summary>The responder's answer to a reset whose GPU stopped answering at <paramref name="stopped"/>: what is held
     /// given back, then the crash recorded (DriverResetResponder.RespondFor).</summary>
     private void Reset(BrokerDispatcher d, DateTimeOffset stopped, uint uv = 0)

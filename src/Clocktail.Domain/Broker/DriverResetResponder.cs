@@ -10,7 +10,7 @@
 /// trial by then. There is no step-down: the person is at the
 /// machine when a game crashes, and the agent adjusts through the MCP server (the user, 2026-10-19). The give-back is a
 /// write like any other, so it waits for the window and for a stability run to let go rather than going around either,
-/// and it retries until <see cref="GiveUpAfter"/>.
+/// and it retries until <see cref="GiveUpAfter"/>; the crash is on record from the first attempt that does not land.
 /// </summary>
 public sealed class DriverResetResponder(
     Func<BrokerRequest, BrokerResponse> perform,
@@ -82,13 +82,17 @@ public sealed class DriverResetResponder(
     private bool RespondFor(string gpuId, string evidence, uint crashUv, (DateTimeOffset Answered, DateTimeOffset Stopped)? hung = null)
     {
         var deadline = now() + GiveUpAfter;
-        bool recorded = false;
+        bool recorded = false, crashOnRecord = false;
         while (true)
         {
             // Only the first attempt that reaches recovery records the crash; a retry is the same reset, and says so: a plain
             // recovery would take the trial off the record before "crashed" could record its crash.
             var r = perform(new BrokerRequest(BrokerRequest.OpRecover, gpuId, Kind: recorded ? BrokerRequest.RecoverAfterDriverResetAgain : BrokerRequest.RecoverAfterDriverReset, Value: evidence));
             recorded |= r.Result != null;
+            // A give-back that has not landed (held off, refused): the crash on record all the same, its trial kept in force
+            // while the card may still hold it ("crashed-held"), so that nothing marks it stable or records it as survived
+            // meanwhile, and a give-back that never lands still leaves its data point. "crashed" closes it once one lands.
+            if (!r.Ok && !crashOnRecord) crashOnRecord = RecordHeld(gpuId, evidence, crashUv, hung);
             if (r.Ok)
             {
                 log($"gpu {gpuId}: driver reset ({evidence}): {Summary(r)}");
@@ -186,6 +190,15 @@ public sealed class DriverResetResponder(
         var c = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: "crashed", Value: evidence, Uv: crashUv,
             HungAt: hung?.Stopped, AnsweredAt: hung?.Answered));
         log($"gpu {gpuId}: crash recorded {when}: {(c.Ok ? CrashSummary(c) : c.Error ?? "failed")}");
+    }
+
+    /// <summary>The crash recorded while its give-back waits ("crashed-held"); true once the service has it.</summary>
+    private bool RecordHeld(string gpuId, string evidence, uint crashUv, (DateTimeOffset Answered, DateTimeOffset Stopped)? hung)
+    {
+        var c = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: "crashed-held", Value: evidence, Uv: crashUv,
+            HungAt: hung?.Stopped, AnsweredAt: hung?.Answered));
+        log($"gpu {gpuId}: crash recorded before the give-back landed: {(c.Ok ? CrashSummary(c) : c.Error ?? "failed")}");
+        return c.Ok;
     }
 
     private static string CrashSummary(BrokerResponse r) =>
