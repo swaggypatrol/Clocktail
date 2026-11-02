@@ -105,10 +105,22 @@ public static class JudgeLock
     public static string Reason(Info info) =>
         $"pid {info.Pid}{(string.IsNullOrWhiteSpace(info.Label) ? "" : $" '{info.Label}'")}";
 
+    /// <summary>How often a lock another process has open is tried again, and how long apart: about half a second in all,
+    /// far longer than any taker keeps it open to write or check it.</summary>
+    private const int Attempts = 20;
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(25);
+
+    /// <summary>How long <see cref="Settle"/> waits for a later run to give back the lock it wrote in a packaged copy.</summary>
+    public static readonly TimeSpan SettleWait = TimeSpan.FromSeconds(1);
+
     /// <summary>
     /// Takes the measurement lease: writes <paramref name="mine"/> to <paramref name="path"/> unless a live run holds it
-    /// there or in a packaged copy (<paramref name="heldBy"/> names it). A stale lock (its process gone) is taken over.
-    /// Created exclusively, so two takers that both found it free cannot both hold it.
+    /// there or in a packaged copy (<paramref name="heldBy"/> names it). The file is created exclusively, so two takers
+    /// cannot both create it at one path. A stale lock (its process gone, or no pid in it) is taken over through a handle
+    /// no other taker can open at the same time (<see cref="TakeOver"/>), so the file deleted is always the one found
+    /// stale, never a lock another taker wrote in between. A lock another process has open (a taker still writing it) is
+    /// tried again, not taken as stale. Once written, the packaged copies are looked at again (<see cref="Settle"/>):
+    /// a packaged and an unpackaged taker create different files, so creating ours alone does not make it the only one.
     /// </summary>
     public static bool TryAcquire(string path, Info mine, IHost host, string localAppData, out string? heldBy)
     {
@@ -119,36 +131,109 @@ public static class JudgeLock
             return false;
         }
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        for (int attempt = 0; attempt < 3; attempt++)
+        for (int attempt = 0; attempt < Attempts; attempt++)
         {
             try
             {
-                using var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                JsonSerializer.Serialize(fs, mine);
-                return true;
+                using (var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    JsonSerializer.Serialize(fs, mine);
             }
-            catch (IOException) when (File.Exists(path))
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
-                if (Live(path, host, out _) is { } holder)
+                switch (TakeOver(path, mine, host, out var holder))
                 {
-                    if (holder.RunId == mine.RunId) return true;
-                    heldBy = Reason(holder);
-                    return false;
+                    case Found.Mine: return true;
+                    case Found.Live: heldBy = Reason(holder!); return false;
+                    case Found.InUse: Thread.Sleep(RetryDelay); break;
                 }
-                try { File.Delete(path); } catch (IOException) { }   // stale: its process is gone
+                continue;   // stale and deleted: create ours now
             }
+            return Settle(path, mine, host, localAppData, out heldBy);
         }
-        heldBy = "judge.lock could not be created";
+        heldBy = "judge.lock could not be created or taken over: another process keeps it open, or it cannot be deleted";
         return false;
     }
 
-    /// <summary>Gives the lease back: deletes the lock when it is still <paramref name="runId"/>'s.</summary>
-    public static void Release(string path, string runId)
+    private enum Found { Mine, Live, Taken, InUse }
+
+    /// <summary>
+    /// The lock at <paramref name="path"/>, read through a handle that lets others do nothing but delete: while it is open
+    /// no other taker can open, rewrite or replace the file, so when it names no live run the file deleted (while the
+    /// handle is still open) is the one just read. A file that cannot be opened (another taker has it open, or it is
+    /// being deleted) or deleted (read-only) is in use, not stale: nothing is deleted then.
+    /// </summary>
+    private static Found TakeOver(string path, Info mine, IHost host, out Info? holder)
     {
+        holder = null;
         try
         {
-            if (File.Exists(path) && JsonSerializer.Deserialize<Info>(File.ReadAllText(path), Json)?.RunId == runId) File.Delete(path);
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Delete);
+            holder = Parse(fs);
+            if (holder is { Pid: > 0 } && host.IsProcessAlive(holder.Pid, holder.StartedUtc))
+                return holder.RunId == mine.RunId ? Found.Mine : Found.Live;
+            File.Delete(path);   // stale: its process is gone, or it names none
+            return Found.Taken;
         }
-        catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException) { }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return Found.InUse; }
+    }
+
+    private static Info? Parse(Stream s)
+    {
+        try { return JsonSerializer.Deserialize<Info>(s, Json); }
+        catch (JsonException) { return null; }
+    }
+
+    /// <summary>
+    /// After <paramref name="mine"/> is written at <paramref name="path"/>: whether it keeps the lease. A packaged and an
+    /// unpackaged taker write different files (<see cref="Candidates"/>), so both can find nothing live and both create
+    /// theirs. Each looks again once its own is written. The one that creates second sees the first one's: a packaged
+    /// taker cannot create its copy once the real file is there (it sees that file at its own path), so the second is the
+    /// unpackaged one, and it looks in every package's copy. A packaged taker may not see the real file from its copy, so
+    /// only one side may see the other. Of two runs the later (by StartedUtc, then RunId) gives its own lock back at once.
+    /// The earlier waits up to <paramref name="wait"/> (<see cref="SettleWait"/>) for the later's lock to go, and gives its
+    /// own back if it stays: that run saw nothing and holds the lease. Either way at most one run keeps it.
+    /// </summary>
+    public static bool Settle(string path, Info mine, IHost host, string localAppData, out string? heldBy, TimeSpan? wait = null)
+    {
+        var until = DateTime.UtcNow + (wait ?? SettleWait);
+        while (true)
+        {
+            var other = Candidates(path, localAppData).Select(p => Live(p, host, out _)).FirstOrDefault(i => i != null && i.RunId != mine.RunId);
+            if (other == null) { heldBy = null; return true; }
+            if (!Earlier(mine, other) || DateTime.UtcNow >= until)
+            {
+                Release(path, mine.RunId!);
+                heldBy = Reason(other);
+                return false;
+            }
+            Thread.Sleep(RetryDelay);
+        }
+    }
+
+    /// <summary>The order both sides of <see cref="Settle"/> agree on: earlier StartedUtc first (none counts as earliest),
+    /// then RunId.</summary>
+    private static bool Earlier(Info a, Info b)
+    {
+        int c = Nullable.Compare(a.StartedUtc, b.StartedUtc);
+        return c != 0 ? c < 0 : string.CompareOrdinal(a.RunId, b.RunId) < 0;
+    }
+
+    /// <summary>Gives the lease back: deletes the lock when it is still <paramref name="runId"/>'s. The check and the delete go
+    /// through one handle, as in <see cref="TakeOver"/>, so a lock another run took over in between is never deleted. A lock
+    /// another process has open a moment (a reader, a taker looking at it) is tried again, so the run's own lock is not
+    /// left behind with its live pid.</summary>
+    public static void Release(string path, string runId)
+    {
+        for (int attempt = 0; attempt < Attempts; attempt++)
+        {
+            try
+            {
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Delete);
+                if (Parse(fs)?.RunId == runId) File.Delete(path);
+                return;
+            }
+            catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return; }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Thread.Sleep(RetryDelay); }
+        }
     }
 }
