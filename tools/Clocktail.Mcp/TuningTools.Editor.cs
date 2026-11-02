@@ -13,7 +13,7 @@ namespace Clocktail.Mcp;
 /// The V/F curve editor window (the user, 2026-11-01): the person asks the agent for it, drags the curve by hand, and
 /// their click on the window's save button is their own approval (the "dialog" kind of <see cref="Consent"/>, in a window
 /// of its own): the curve goes on the card as one trial, is read back, and is kept as the daily profile; then the window
-/// closes. Opening it changes nothing; history deletions are separately confirmed and take effect immediately.
+/// shows the verified result. Opening it changes nothing; history deletions are separately confirmed and take effect immediately.
 /// </summary>
 public sealed partial class TuningTools
 {
@@ -31,13 +31,14 @@ public sealed partial class TuningTools
         "Open the V/F curve editor window on the person's desktop, when they ask for it. It shows this GPU's curve (dark, " +
         "points dragged by hand), every crash pinned to the curve point it happened at, the highest setting each point was " +
         "marked stable or survived at, and where the card actually ran (the residency samples under load). Under the top of " +
-        "the curve's low-voltage cliff it reshapes the cliff as a smooth transition band (no point under the band's foot is " +
+        "the curve's low-voltage cliff edits reshape the cliff as a smooth transition band (no point under the band's foot is " +
         "lifted; both ends are draggable lines); above it the person drags freely, one button smooths, and the clock never " +
         "falls (the driver's own rule). Right-click a curve, crash or evidence point to select and confirm deletion of a " +
         "historical test; this takes effect immediately without changing GPU settings. The person's own click on " +
-        "'Confirm & Save as Daily' in the window is their approval: it " +
+        "'Save as Daily' in the window is their approval: it " +
         "writes the curve as one trial (opening a session itself when none is open), checks the readback, keeps it as the " +
-        "daily profile (with any other trial settings in force, which the window names) and closes. Returns at once; call " +
+        "daily profile (with any other trial settings in force, available in Details) and shows the result. The opened curve " +
+        "is preserved until edited; undo/redo, exact restore, numeric offsets and layer toggles are available. Returns at once; call " +
         "again to bring the window to the front or to read how the last one ended. Opening it writes nothing.")]
     public string CurveEditor() => Guard(() =>
     {
@@ -65,7 +66,7 @@ public sealed partial class TuningTools
         return Out(new
         {
             success = true, opened = true,
-            note = "the window is on the person's desktop; GPU settings change only on Confirm & Save as Daily. Right-click a point to delete a historical test after confirmation (immediate, independent of curve saving). Call curve_editor again later to read how it ended.",
+            note = "the window is on the person's desktop; GPU settings change only on Save as Daily. Right-click a point to delete a historical test after confirmation (immediate, independent of curve saving). Call curve_editor again later to read how it ended.",
             points = data.Mv.Length, crashes_marked = data.Crashes.Count, evidence_points = data.Evidence.Count, running_bins = data.Runs.Count,
             band = data.Band is { } b ? string.Create(CultureInfo.InvariantCulture, $"{data.Mv[b.Foot]}-{data.Mv[b.Top]} mV, as saved last time") : null,
             also_kept = data.AlsoKept, leftover = Leftover(), last = EditorState.Last,
@@ -318,7 +319,7 @@ public sealed partial class TuningTools
             return wrote ? Undo(why) : Refused(why);
         }
         progress("Saving as Daily…");
-        var k = card.Broker(BrokerRequest.OpProfile, "keep", "drawn in the curve editor window; the person clicked Confirm & Save as Daily");
+        var k = card.Broker(BrokerRequest.OpProfile, "keep", "drawn in the curve editor window; the person clicked Save as Daily");
         // The broker saves the profile and then switches the card to it; a wall or limit that did not go back is reported
         // as a failure with saved=true: the daily profile is this curve all the same.
         bool saved = k.Ok || (k.Result is { } kr && kr.TryGetProperty("saved", out var sv) && sv.ValueKind == JsonValueKind.True);

@@ -116,11 +116,12 @@ Measure these trials, then show me what would be saved before making anything pe
 Rather do the curve by hand? Ask your agent **"Open the V/F curve editor."** A window opens on your desktop with this card's curve, and everything Clocktail has learned about it drawn on top:
 
 - **Every crash, pinned to the point it happened at.** A solid cross means it crashed during a curve trial.
-- **How high each point has proven stable**, from the tests you've marked stable or survived.
-- **Where the card actually runs**, as a haze of dots from the samples taken under load. You see which part of the curve your games really use.
-- **Drag points by hand.** Ctrl+Z undoes, right-drag pans, and it stays crisp at any DPI. The low-voltage cliff is reshaped as a smooth band between two draggable lines, and above it the clock never falls, the driver's own rule. One button smooths the rest.
+- **Stable settings and sampled clocks, separately.** Green marks show sampled clocks from tests marked stable. Amber hollow marks show a stable setting that was not reached or has no samples. Survived settings have their own dotted marks. Past evidence does not certify your draft.
+- **Where the card ran**, as a haze of dots from historical samples taken under load. Brighter dots mean more time; this is a snapshot, not a live monitor. Switch the history, evidence, crashes, opened curve and base clocks on or off.
+- **Drag points or enter a precise offset.** A persistent inspector shows voltage, draft and opened clocks, their difference and an editable offset in MHz. Ctrl+Z undoes, Ctrl+Y / Ctrl+Shift+Z redoes, Esc cancels a drag, right-drag pans, and Ctrl+0 fits the view. The low-voltage cliff is reshaped as a smooth band between two draggable lines, and above it the clock never falls, the driver's own rule.
+- **Start from the exact curve on the card.** Opening the window preserves the curve. Smooth is an explicit action; Restore opened restores the original offsets and band exactly. Both are undoable.
 - **Clean up the history.** Right-click a point, a crash or a stability mark to pick a past test and delete it. It asks first, and the marks are recomputed at once. Your card isn't touched, and the original journal stays for recovery.
-- **Nothing is written until you click Confirm & Save as Daily.** Then the curve goes on as a trial, the readback is checked, and it becomes your daily profile. That click is your approval; the agent won't ask again.
+- **Nothing is written until you click Save as Daily.** Then the curve goes on as a trial, the readback is checked, and it becomes your daily profile. That click is your approval; the agent won't ask again. The window shows the save result; Details lets you read and copy full diagnostics and see other settings included in Daily. Closing an unsaved draft prompts before discarding it.
 
 Windows only. The window is in English.
 

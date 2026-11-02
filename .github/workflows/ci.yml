@@ -29,3 +29,13 @@ jobs:
         # Quoted: node expands the pattern itself (Node 21 on), the same under PowerShell and bash; a directory
         # argument is not searched for tests on every Node version.
         run: node --test "npm/test/*.test.js"
+      - name: Windows editor smoke checks and previews (synthetic data, no GPU)
+        if: runner.os == 'Windows'
+        run: dotnet run --project tools/Clocktail.UiPreview -c Release -- --output out/ui-preview
+      - name: Editor previews
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: curve-editor-preview
+          path: out/ui-preview/*.png
+          if-no-files-found: warn
