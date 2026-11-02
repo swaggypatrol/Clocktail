@@ -10,7 +10,9 @@
 /// trial by then. There is no step-down: the person is at the
 /// machine when a game crashes, and the agent adjusts through the MCP server (the user, 2026-10-19). The give-back is a
 /// write like any other, so it waits for the window and for a stability run to let go rather than going around either,
-/// and it retries until <see cref="GiveUpAfter"/>; the crash is on record from the first attempt that does not land.
+/// and it retries until <see cref="GiveUpAfter"/>. The crash is on record from the first attempt that does not land for
+/// a reason other than a run measuring (<see cref="HeldByRun"/>), or once it gives up: a run measuring lets go and the
+/// give-back lands, and until then the run's own job sees the reset and reads the trial on the card unchanged.
 /// </summary>
 public sealed class DriverResetResponder(
     Func<BrokerRequest, BrokerResponse> perform,
@@ -94,10 +96,6 @@ public sealed class DriverResetResponder(
             // recovery would take the trial off the record before "crashed" could record its crash.
             var r = perform(new BrokerRequest(BrokerRequest.OpRecover, gpuId, Kind: recorded ? BrokerRequest.RecoverAfterDriverResetAgain : BrokerRequest.RecoverAfterDriverReset, Value: evidence));
             recorded |= r.Result != null;
-            // A give-back that has not landed (held off, refused): the crash on record all the same, its trial kept in force
-            // while the card may still hold it ("crashed-held"), so that nothing marks it stable or records it as survived
-            // meanwhile, and a give-back that never lands still leaves its data point. "crashed" closes it once one lands.
-            if (!r.Ok && !crashOnRecord) crashOnRecord = RecordHeld(gpuId, evidence, crashUv, hung);
             if (r.Ok)
             {
                 log($"gpu {gpuId}: driver reset ({evidence}): {Summary(r)}");
@@ -109,7 +107,14 @@ public sealed class DriverResetResponder(
                 return Profile(gpuId, "after-reset", evidence, "after the reset");
             }
             bool retry = r.Code is BrokerCode.JudgeBusy or BrokerCode.WindowBusy or BrokerCode.Failed || r.Result != null;
-            if (!retry || now() + RetryEvery > deadline)
+            bool givingUp = !retry || now() + RetryEvery > deadline;
+            // A give-back that has not landed (a cell refused, the window never free): the crash on record all the same, its
+            // trial kept in force while the card may still hold it ("crashed-held"), so that nothing marks it stable or
+            // records it as survived meanwhile, and a give-back that never lands still leaves its data point. "crashed"
+            // closes it once one lands. Not while a run measuring holds it off: the trial's ending would change under the
+            // run, whose job would read the trial on the card as changed, or the crash as given back, before it is.
+            if (!crashOnRecord && (givingUp || !HeldByRun(r))) crashOnRecord = RecordHeld(gpuId, evidence, crashUv, hung);
+            if (givingUp)
             {
                 log($"gpu {gpuId}: driver reset ({evidence}): not given back{(retry ? $" after {GiveUpAfter.TotalMinutes:0} min" : "")}: {r.Error ?? Summary(r)}");
                 return false;
@@ -197,6 +202,10 @@ public sealed class DriverResetResponder(
         log($"gpu {gpuId}: crash recorded {when}: {(c.Ok ? CrashSummary(c) : c.Error ?? "failed")}");
     }
 
+    /// <summary>Whether a give-back was held off by a run measuring (judge.lock) or by another operation in the window: it
+    /// lands once that lets go.</summary>
+    private static bool HeldByRun(BrokerResponse r) => r.Code is BrokerCode.JudgeBusy or BrokerCode.WindowBusy;
+
     /// <summary>The crash recorded while its give-back waits ("crashed-held"); true once the service has it.</summary>
     private bool RecordHeld(string gpuId, string evidence, uint crashUv, (DateTimeOffset Answered, DateTimeOffset Stopped)? hung)
     {
@@ -208,7 +217,11 @@ public sealed class DriverResetResponder(
 
     private static string CrashSummary(BrokerResponse r) =>
         r.Result is { } res && res.TryGetProperty("point", out var p) && p.ValueKind == System.Text.Json.JsonValueKind.Object
-            && p.TryGetProperty("Change", out var change) ? $"the trial in force ({change.GetString()}) is a crash data point" : "no trial was in force";
+            && p.TryGetProperty("Change", out var change)
+            ? res.TryGetProperty("on_record_already", out var before) && before.ValueKind == System.Text.Json.JsonValueKind.True
+                ? $"the trial's crash ({change.GetString()}) was on record already; the card is off the trial now"
+                : $"the trial in force ({change.GetString()}) is a crash data point"
+            : "no trial was in force";
 
     /// <summary>
     /// After the PC wakes up: each GPU's daily profile again once it is idle, through "resume", which writes only what

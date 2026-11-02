@@ -241,7 +241,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                     r = MeasureAlone(spec.Seconds, "memory,latency", _bufferMib, log);
                     // lab_stop kills the measuring child: its run is inconclusive, and that is not the memory's failure.
                     if (StopAsked) return Finish(SweepStatus.Stopped, "stopped (lab_stop)", offset);
-                    if (r.Verdict != LabResult.Fail && TrialAt() != stamp)
+                    if (r.Verdict != LabResult.Fail && !SameTrial(TrialAt(), stamp))
                         return Finish(SweepStatus.Failed, $"{offset:+0;-0;0} MHz: the trial on the card changed during the measurement: the step is not this offset's", offset);
                 }
                 int? resets = OperatingSystem.IsWindows() ? TryCount(started) : null;

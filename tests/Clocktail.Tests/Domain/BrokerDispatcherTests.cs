@@ -1418,6 +1418,35 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal(960_000u, Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1].CrashUv);
     }
 
+    /// <summary>"crashed" after "crashed-held" for the same trial writes no second point, and no second "Crash · during trial"
+    /// entry either: the tuning log says once that the trial is off the card, and the answer says the crash was
+    /// on record already. Before, the crash was logged twice with the same evidence.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_crash_on_record_while_its_give_back_waited_is_logged_once(bool hangTime)
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+        var stopped = _host.Now.AddSeconds(30);
+        _host.Now = stopped.AddSeconds(5);
+        BrokerRequest Ask(string kind) => hangTime ? Crashed(stopped) with { Kind = kind }
+            : new BrokerRequest(BrokerRequest.OpProfile, Kind: kind, Value: "nvlddmkm 153");
+
+        busy = "clocktail-lab (pid 4242)";
+        Assert.True(d.Dispatch(Ask("crashed-held")).Ok);
+        busy = null;
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Ok);
+        var closed = d.Dispatch(Ask("crashed"));
+        Assert.True(closed.Ok, closed.Error);
+        Assert.True(closed.Result!.Value.GetProperty("on_record_already").GetBoolean());
+        Assert.Null(TrialNow());
+        Assert.Equal([Experiment.Crash], Outcomes());
+        string log = File.ReadAllText(TuningLog.PathBeside(_journal.Path));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(log, "Crash · during trial"));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(log, "Crash · trial off the card"));
+    }
+
     /// <summary>The responder's answer to a reset whose GPU stopped answering at <paramref name="stopped"/>: what is held
     /// given back, then the crash recorded (DriverResetResponder.RespondFor).</summary>
     private void Reset(BrokerDispatcher d, DateTimeOffset stopped, uint uv = 0)

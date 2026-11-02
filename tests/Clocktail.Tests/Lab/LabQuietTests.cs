@@ -37,4 +37,23 @@ public class LabQuietTests
         Assert.False(LabJob.Recorded(() => { asked++; return (null, false); }, written, LabJob.CrashRecordWait, _ => { }));
         Assert.Equal(31, asked);
     }
+
+    /// <summary>The service puts a driver reset's crash on the trial in force while it cannot give the card back yet
+    /// ("crashed-held"): the trial is still on the card, so a job does not read it as recorded and given back, nor as a
+    /// trial that changed during its measurement. Any other ending, or another write time, is a change.</summary>
+    [Fact]
+    public void A_crash_on_record_with_the_trial_still_in_force_is_the_same_trial()
+    {
+        const string written = "2026-10-24T10:00:00";
+        Assert.True(LabJob.SameTrial(written + " (crash)", written));
+        Assert.True(LabJob.SameTrial(written, written));
+        Assert.False(LabJob.SameTrial(written + " (stable)", written));
+        Assert.False(LabJob.SameTrial("2026-10-24T10:05:00", written));
+        Assert.False(LabJob.SameTrial(null, written));
+
+        var answers = new Queue<(string?, bool)>([(written + " (crash)", true), (written + " (crash)", true), (null, true)]);
+        var slept = TimeSpan.Zero;
+        Assert.True(LabJob.Recorded(() => answers.Dequeue(), written, TimeSpan.FromSeconds(30), t => slept += t));
+        Assert.Equal(TimeSpan.FromSeconds(2), slept);   // waited until the trial left the record
+    }
 }

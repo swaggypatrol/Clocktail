@@ -46,6 +46,43 @@ public class DriverResetResponderTests
         Assert.Contains("none kept", _log[^1]);
     }
 
+    /// <summary>A give-back held off by a run measuring (judge.lock, or another operation in the window) is waited for
+    /// without "crashed-held": the run lets go and it lands. Before, the first refusal put the crash on the trial in force,
+    /// so a lab job still measuring read the trial on the card as changed, or the crash as given back, before it was.</summary>
+    [Theory]
+    [InlineData(BrokerCode.JudgeBusy)]
+    [InlineData(BrokerCode.WindowBusy)]
+    public void A_give_back_a_run_measuring_holds_off_is_waited_for_without_crashed_held(string code)
+    {
+        var r = Responder(n => n < 4 ? new BrokerResponse(false, "a stability run is in progress", Code: code) : Recovered(true, "Written"));
+        Assert.True(r.Respond("nvlddmkm 153"));
+        Assert.Equal(4, _asked.Count);
+        Assert.Equal(["crashed", "apply-power", "after-reset"], _profile.Select(p => p.Kind));
+    }
+
+    /// <summary>A run that holds the card for all 15 minutes: the crash is put on record once, when the responder gives up,
+    /// so a give-back that never lands still leaves its data point.</summary>
+    [Fact]
+    public void A_give_back_held_off_to_the_end_puts_the_crash_on_record_when_it_gives_up()
+    {
+        int askedAtHeld = -1;
+        var r = new DriverResetResponder(req =>
+        {
+            if (req.Op == BrokerRequest.OpProfile)
+            {
+                _profile.Add(req);
+                askedAtHeld = _asked.Count;
+                return new BrokerResponse(true, Result: JsonSerializer.SerializeToElement(new { success = true }));
+            }
+            _asked.Add(req);
+            return new BrokerResponse(false, "a stability run is in progress", Code: BrokerCode.JudgeBusy);
+        }, ["gpu-A"], _log.Add, () => _now, t => _now += t);
+        Assert.False(r.Respond("nvlddmkm 153"));
+        Assert.Equal("crashed-held", Assert.Single(_profile).Kind);
+        Assert.Equal(_asked.Count, askedAtHeld);   // after the last try, not the first
+        Assert.Contains("not given back after 15 min", _log[^1]);
+    }
+
     [Fact]
     public void A_reset_that_never_gets_the_window_gives_up_and_says_so()
     {
