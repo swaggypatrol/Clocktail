@@ -205,7 +205,7 @@ public sealed partial class TuningTools
     });
 
     [McpServerTool(Name = "set_clock_lock", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Set a core clock cap, floor, V/F point lock or Boost Lock as a trial through the driver client-limit record. Use this GPU's actual curve; omitted entries stay unchanged and zero releases an entry. NVIDIA decides accepted combinations. Only a cap is currently retained by keep_as_daily; preview exclusions before keeping.")]
+        "Set a core clock cap, floor, V/F point lock or Boost Lock as a trial through the driver client-limit record. Use this GPU's actual curve; omitted entries stay unchanged and zero releases an entry. NVIDIA decides accepted combinations. The lock is a request, not a hard P-state lock: the driver still lowers the clock under it for power, temperature and voltage, and the other clock domains are not held with it; stress_test, watch and live_read report what actually ran against it (clock_locks). Only a cap is currently retained by keep_as_daily; preview exclusions before keeping.")]
     public string SetClockLock(
         [Description("Maximum core clock, MHz; 0 releases.")] double? maxMhz = null,
         [Description("Minimum core clock, MHz; 0 releases.")] double? minMhz = null,
@@ -308,7 +308,9 @@ public sealed partial class TuningTools
         [Description("The game's process name for the frame rate (e.g. \"Cyberpunk2077\"); omit for the application that drew the most frames.")] string? process = null) => Guard(() =>
     {
         if (seconds < 10 || seconds > MaxWatchSeconds) throw new ArgumentException($"seconds is 10..{MaxWatchSeconds} (CLOCKTAIL_MCP_MAX_WATCH_S)");
-        var curve = card.Read().Curve;
+        var look = card.Read();
+        var curve = look.Curve;
+        var locks = card.ClockLocks();
         // A live watch's capture is followed, not replaced: a second capture would end it, and every later live line would
         // say "no frames".
         string? noFrames = null;
@@ -328,14 +330,15 @@ public sealed partial class TuningTools
         var point = p50Mv is { } mv && Nearest(curve, (uint)(mv * 1000)) is { } pt
             ? new { index = pt.Index, mv = pt.VoltageUv / 1000.0, curve_mhz = pt.EffectiveKhz / 1000.0 } : null;
         var reasons = loaded.SelectMany(s => s.Telemetry?.ThrottleReasons ?? []).Distinct().ToList();
+        var locksMet = LocksMet(locks, loaded.Select(s => (double?)s.Telemetry?.GraphicsClockMhz), curve, look.NvvddMaxUv);
         if (shared == null) frames?.Settle(TimeSpan.FromSeconds(3));   // its own capture ends by itself: let it finish writing
         var fps = frames?.Total();
         var p50 = WatchStats(loaded, 0.5);
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Watched {seconds} s: {loaded.Count} of {samples.Count} samples under load. P50 {p50.clock_mhz} MHz @ NVVDD {p50.nvvdd_mv} mV (curve point {point?.index}), " +
-            $"P90 {WatchStats(loaded, 0.9).clock_mhz} MHz, P10 {WatchStats(loaded, 0.1).clock_mhz} MHz; MSVDD {p50.msvdd_mv} mV, XBAR {p50.xbar_mhz} MHz, board {p50.board_w} W, " +
+            $"P90 {WatchStats(loaded, 0.9).clock_mhz} MHz, P10 {WatchStats(loaded, 0.1).clock_mhz} MHz; MSVDD {p50.msvdd_mv} mV, XBAR {p50.xbar_mhz} / SYS {p50.sys_mhz} MHz, board {p50.board_w} W, " +
             $"{atWall} % of the time on the wall, max {loaded.Max(s => s.Telemetry?.TemperatureC)} °C, VRAM {p50.vram_used_gib} GiB; limit reasons [{string.Join(", ", reasons)}]")
-            + (frames != null ? $"; {FrameFeed.Words(fps)}" : "")
+            + (frames != null ? $"; {FrameFeed.Words(fps)}" : "") + LocksWords(locksMet)
             + (note != null ? $". Playing: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
         return Out(new
@@ -352,6 +355,7 @@ public sealed partial class TuningTools
             pstates = PStates(loaded),
             efficiency = Efficiency(loaded, fps?.AvgFps),
             curve_shift = CurveShift(curve, ReadCurveOrNull(), point?.index, loaded),
+            clock_locks = locksMet,
             fps = FrameFeed.Show(fps) ?? (object)new
             {
                 unavailable = noFrames ?? (process != null ? $"no frames from {process}: is that the game's process name?" : "no application drew frames: was the game running?"),
@@ -361,11 +365,13 @@ public sealed partial class TuningTools
         });
     });
 
-    private sealed record WatchStat(double? clock_mhz, double? nvvdd_mv, double? msvdd_mv, double? xbar_mhz, double? board_w, double? temp_c, double? vram_used_gib, double? memory_c);
+    private sealed record WatchStat(double? clock_mhz, double? nvvdd_mv, double? msvdd_mv, double? xbar_mhz, double? sys_mhz, double? video_mhz,
+        double? board_w, double? temp_c, double? vram_used_gib, double? memory_c);
 
     private static WatchStat WatchStats(IReadOnlyList<Card.Sample> s, double q) => new(
         Pct(s.Select(x => (double?)x.Telemetry?.GraphicsClockMhz), q), Pct(s.Select(x => x.NvvddUv / 1000.0), q),
         Pct(s.Select(x => x.MsvddUv / 1000.0), q), Pct(s.Select(x => x.Mhz(AllClocksLayout.Xbar)), q),
+        Pct(s.Select(x => x.Mhz(AllClocksLayout.Sys)), q), Pct(s.Select(x => x.Mhz(AllClocksLayout.Video)), q),
         Pct(s.Select(x => x.Telemetry?.PowerWatts), q), Pct(s.Select(x => x.Telemetry?.TemperatureC), q),
         Pct(s.Select(x => Gib(x.Telemetry?.VramUsedBytes)), q), Pct(s.Select(x => x.MemoryC), q));
 

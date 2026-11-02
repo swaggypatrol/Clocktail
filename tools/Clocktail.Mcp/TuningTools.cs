@@ -81,6 +81,9 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         var session = card.Broker(BrokerRequest.OpExperiment, "show");
         GpcVoltages.Reading? gpc = null;
         try { gpc = card.Gpc(); } catch (InvalidOperationException) { }
+        var clocks = card.Clocks();
+        double? Domain(int id) => clocks != null && clocks.TryGetValue(id, out var k) ? Math.Round(k / 1000.0) : null;
+        var locks = card.ClockLocks();
         return Out(new
         {
             gpu = card.Name,
@@ -90,6 +93,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             nvvdd_max_mv = look.NvvddMaxUv / 1000.0,
             clock_mhz = t?.GraphicsClockMhz,
             memory_mhz = t?.MemoryClockMhz,
+            // The other clock domains as the driver's clock table has them: a clock held on the core says nothing about these,
+            // and a lock or a P-state can leave the core high while they sit low.
+            domain_clocks_mhz = clocks == null ? null : new { xbar = Domain(AllClocksLayout.Xbar), sys = Domain(AllClocksLayout.Sys), video = Domain(AllClocksLayout.Video) },
+            clock_locks = locks is { Count: > 0 } ? locks.Select(l => l.Describe()).ToList() : null,
             power_w = t?.PowerWatts,
             power_limit_w = t?.PowerEnforcedWatts,
             temp_c = t?.TemperatureC,
@@ -452,10 +459,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         // result is the trial's in force then. Given back before anything is recorded: a crash puts the daily profile back.
         var hold = HoldCard("stress_test", olderToo: false);
         Card.Look before;
+        IReadOnlyList<Clocktail.Domain.Clocks.ClientLimit>? locks;
         var started = DateTime.UtcNow;
         try
         {
             before = card.Read();   // the card as the run finds it, once no write is landing
+            locks = card.ClockLocks();   // a lock outlives what set it (nvidia-smi -lgc, Afterburner's L): the run is checked against it
             started = DateTime.UtcNow;
             // A sample the driver does not answer in time is a missing one (a hang is what this run is looking for).
             residency.StressUntil(DateTimeOffset.Now.AddSeconds(seconds + 30));   // light load counts as load for this run
@@ -490,6 +499,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             msvdd_a = P(held.Select(s => s.MsvddOut?.Ma / 1000.0), q),
             xbar_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Xbar)), q),
             sys_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Sys)), q),
+            video_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Video)), q),
             memory_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Memory)), q),
             temp_c = P(held.Select(s => (double?)s.Telemetry?.TemperatureC), q),
             memory_c = P(held.Select(s => s.MemoryC), q),
@@ -504,11 +514,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         var reasons = held.SelectMany(s => s.Telemetry?.ThrottleReasons ?? []).Distinct().ToList();
         int? pointIndex = p50Mv is { } mv && Nearest(before.Curve, (uint)(mv * 1000)) is { } pt ? pt.Index : null;
         var shift = CurveShift(before.Curve, ReadCurveOrNull(), pointIndex, held);
+        var locksMet = LocksMet(locks, held.Select(s => (double?)s.Telemetry?.GraphicsClockMhz), before.Curve, before.NvvddMaxUv);
 
         bool trial = hold.Trial != null;   // in force when the run began: the trial it measured
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Stress nvgwls -l {load}, {seconds} s: {verdict} (exit code {(code?.ToString(CultureInfo.InvariantCulture) ?? "none")}). P50 {p50Mhz} MHz @ NVVDD {p50Mv} mV (curve point {pointIndex}), XBAR {P(held.Select(s => s.Mhz(AllClocksLayout.Xbar)), 0.5)} / SYS {P(held.Select(s => s.Mhz(AllClocksLayout.Sys)), 0.5)} MHz, board {p50W} W, NVVDD {p50NvW} W, MSVDD {p50MsMv} mV / {p50MsW} W; max {held.Max(s => s.Telemetry?.TemperatureC)} °C; limit reasons [{string.Join(", ", reasons)}]; {held.Count} samples; per sample {csv}")
-            + (note != null ? $". Purpose: {note}" : "");
+            + LocksWords(locksMet) + (note != null ? $". Purpose: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
         bool crashRecorded = failed && RecordCrash(hold, resets, $"nvgwls -l {load} {seconds} s: {verdict}");
         return Out(new
@@ -528,6 +539,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             efficiency = Efficiency(held, null, p50Mhz),
             curve_point = pointIndex,
             curve_shift = shift,
+            clock_locks = locksMet,
             samples_csv = csv,
             trial_in_force = trial,
             crash_recorded = crashRecorded,
@@ -1177,6 +1189,22 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
 
     private static VfPoint? Nearest(VfCurveSnapshot c, uint uv) =>
         c.Points.Count == 0 ? null : c.Points.MinBy(p => Math.Abs((long)p.VoltageUv - uv));
+
+    /// <summary>The client clock limits that were in force for a run (<paramref name="held"/>, read as it began) against the
+    /// core clock it sampled under load; null when none was in force. A voltage lock is set against its curve point's clock,
+    /// Boost Lock against the curve's top under NVVDD MAX.</summary>
+    public static IReadOnlyList<Clocktail.Domain.Clocks.ClockLockOutcome>? LocksMet(IReadOnlyList<Clocktail.Domain.Clocks.ClientLimit>? held,
+        IEnumerable<double?> clocksMhz, VfCurveSnapshot? curve, uint? maxUv)
+    {
+        if (held is not { Count: > 0 }) return null;
+        return Clocktail.Domain.Clocks.ClockLockCheck.Check(held, clocksMhz.OfType<double>().ToList(), l => curve == null ? null
+            : l.Value == Clocktail.Domain.Clocks.ClientLimitsLayout.BoostLockUv ? Clocktail.Domain.Limiter.CurveTop(curve.Points, maxUv)?.EffectiveKhz / 1000.0
+            : Nearest(curve, l.Value)?.EffectiveKhz / 1000.0);
+    }
+
+    /// <summary>The lock outcomes in one clause for a summary line; empty when none was in force.</summary>
+    public static string LocksWords(IReadOnlyList<Clocktail.Domain.Clocks.ClockLockOutcome>? met) =>
+        met is not { Count: > 0 } ? "" : "; clock lock in force: " + string.Join("; ", met.Select(m => $"{m.What}: {m.Words}"));
 
     private static object Row(VfPoint p, int[] daily) => new
     {

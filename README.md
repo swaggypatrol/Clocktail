@@ -11,6 +11,7 @@ English | [简体中文](README.zh-CN.md)
 So you want to overclock a card that's already this fast. We get it. We won't ask.
 
 - **The agent does the tuning.** The V/F curve, core and memory offsets, XBAR and the other clock domains, the voltage boost, clock locks, power and current limits, the fans. Every control, no "expert mode", no caps of Clocktail's on top of the card's own.
+- **Or draw the curve yourself.** Ask for the V/F curve editor and a window opens with your curve, every crash pinned to the point it happened at, how high each point has proven stable, and where the card actually runs. Drag, then save.
 - **Something other than the agent decides if it's stable.** NVIDIA's stress tester, Clocktail's own lab, and your games, with the frame times to prove it.
 - **Nothing sticks unless you say so.** No preset, no default profile. A fresh install writes nothing to your card until you say so.
 
@@ -64,7 +65,7 @@ It doesn't have to be Claude. Any model that's decent with tools will do. The ca
 npx -y clocktail@latest setup --lite
 ```
 
-The full toolbox is 53 tools and a manual's worth of instructions. A local model in a 32k window can't fit that next to its own agent's prompt, and Ollama won't tell you: it quietly drops the start of the conversation, instructions first, and your agent forgets what it was doing. `--lite` hands the agent 22 tools and a one-page brief. Give Ollama all the context your VRAM allows anyway (`OLLAMA_CONTEXT_LENGTH`; 64k is comfortable).
+The full toolbox is 54 tools and a manual's worth of instructions. A local model in a 32k window can't fit that next to its own agent's prompt, and Ollama won't tell you: it quietly drops the start of the conversation, instructions first, and your agent forgets what it was doing. `--lite` hands the agent 22 tools and a one-page brief. Give Ollama all the context your VRAM allows anyway (`OLLAMA_CONTEXT_LENGTH`; 64k is comfortable).
 
 **The model matters more than the app.** The same Clocktail ran smoothly in Cursor on a frontier model and went in circles on a small free one. Pick the best model you can afford; DeepSeek V4.1 Flash in OpenCode is a fine budget pick.
 
@@ -91,7 +92,7 @@ Then the verdict, in plain words.
 
 *✅ means inside NVIDIA's own limits, not crash-proof, and it tells you so itself. It also names the setting it would blame first if you ever see a grey screen. Somebody has to.*
 
-It also reads the stuff most tools don't show you: the memory temperature, how many watts go through the 16-pin connector, whether the PCIe link has been resending data, which driver limit is really holding your clock back, how long Windows waits before it resets a hung GPU.
+It also reads the stuff most tools don't show you: the memory temperature, how many watts go through the 16-pin connector, whether the PCIe link has been resending data, which driver limit is really holding your clock back, whether a clock lock actually held (a lock is only a request, and the driver still pulls the clock under it), the XBAR, SYS and video clocks beside the core, how long Windows waits before it resets a hung GPU.
 
 Things to ask:
 
@@ -107,7 +108,21 @@ I'm playing Cyberpunk tonight on the new curve. Watch the card the whole time. I
 Measure these trials, then show me what would be saved before making anything persistent.
 ```
 
-Want to draw it yourself? Ask **"Open the V/F curve editor."** The English desktop window shows your curve, crashes, stability evidence and running points. Drag to edit; **Confirm & Save as Daily** applies it. Right-click a curve or evidence point to select and confirm deletion of a historical test. History deletion is immediate and independent of curve saving; the original journal is retained for recovery.
+</details>
+
+<details>
+<summary><b>The V/F curve editor: draw it yourself</b></summary>
+
+Rather do the curve by hand? Ask your agent **"Open the V/F curve editor."** A window opens on your desktop with this card's curve, and everything Clocktail has learned about it drawn on top:
+
+- **Every crash, pinned to the point it happened at.** A solid cross means it crashed during a curve trial.
+- **How high each point has proven stable**, from the tests you've marked stable or survived.
+- **Where the card actually runs**, as a haze of dots from the samples taken under load. You see which part of the curve your games really use.
+- **Drag points by hand.** Ctrl+Z undoes, right-drag pans, and it stays crisp at any DPI. The low-voltage cliff is reshaped as a smooth band between two draggable lines, and above it the clock never falls, the driver's own rule. One button smooths the rest.
+- **Clean up the history.** Right-click a point, a crash or a stability mark to pick a past test and delete it. It asks first, and the marks are recomputed at once. Your card isn't touched, and the original journal stays for recovery.
+- **Nothing is written until you click Confirm & Save as Daily.** Then the curve goes on as a trial, the readback is checked, and it becomes your daily profile. That click is your approval; the agent won't ask again.
+
+Windows only. The window is in English.
 
 </details>
 

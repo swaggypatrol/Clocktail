@@ -52,6 +52,10 @@ public class ManualFactsTests
     [InlineData("stability", "stop only when the card comes within 2 °C of NVIDIA's slowdown point")]
     [InlineData("power-thermal", "stop only when the card comes within 2 °C of NVIDIA's slowdown point")]
     [InlineData("controls", "stop under start, both within 0..120 °C")]                            // FanStopWrites.Invalid (0.6.0)
+    [InlineData("why", "Clocktail does not write that lock")]                                      // LACT #1177: no hard P-state lock
+    [InlineData("controls", "is a request, not a hard P-state lock")]                               // ClockLockCheck
+    [InlineData("controls", "a layout that is not the confirmed one is refused, not guessed")]
+    [InlineData("status", "A held core clock says nothing about the other domains")]
     public void The_manual_carries_it(string topic, string fact) => Assert.Contains(fact, ManualTools.Manual(topic));
 
     [Theory]

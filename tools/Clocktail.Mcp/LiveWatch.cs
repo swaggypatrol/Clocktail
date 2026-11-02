@@ -41,7 +41,8 @@ public sealed class LiveWatch(Card card) : IDisposable
 
     /// <summary>One sample: what the card ran, and the curve point its voltage sits on (the curve read every window).</summary>
     public sealed record Point(DateTimeOffset At, uint? ClockMhz, double? NvvddMv, double? MsvddMv, double? XbarMhz, double? BoardW,
-        double? LimitW, double? TempC, uint? UtilPct, double? FanPct, string HeldBy, int? CurvePoint, bool Loaded)
+        double? LimitW, double? TempC, uint? UtilPct, double? FanPct, string HeldBy, int? CurvePoint, bool Loaded,
+        double? SysMhz = null, double? VideoMhz = null, string? Locks = null)
     {
         public bool OnWall => BoardW is { } w && LimitW is { } l && w >= l - Limiter.WallBandW;
     }
@@ -69,6 +70,12 @@ public sealed class LiveWatch(Card card) : IDisposable
         public string? Summary;
         /// <summary>The game's frame rate (the broker's capture); null when it could not start.</summary>
         public FrameFeed? Frames;
+        /// <summary>The client clock limits in force as last read (once a window), the curve and NVVDD MAX they were read
+        /// with, and their words as one key (null for none) that each sample carries.</summary>
+        public IReadOnlyList<Clocktail.Domain.Clocks.ClientLimit>? Locks;
+        public VfCurveSnapshot? Curve;
+        public uint? MaxUv;
+        public string? LocksKey;
     }
 
     private readonly object _gate = new();
@@ -100,7 +107,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                 Started = now, IntervalMs = intervalMs, EverySeconds = everySeconds, Note = note,
                 LogPath = stem + ".log", CsvPath = stem + ".csv", Log = Writer(stem + ".log"), Csv = Writer(stem + ".csv"),
             };
-            run.Csv.WriteLine("time,clock_mhz,nvvdd_mv,msvdd_mv,xbar_mhz,board_w,limit_w,temp_c,util_pct,fan_pct,curve_point,held_by,limit_reasons,instant_w,vram_used_gib,temp_margin_c,gpc_mean_mv,gpc_min_mv,memory_c");
+            run.Csv.WriteLine("time,clock_mhz,nvvdd_mv,msvdd_mv,xbar_mhz,board_w,limit_w,temp_c,util_pct,fan_pct,curve_point,held_by,limit_reasons,instant_w,vram_used_gib,temp_margin_c,gpc_mean_mv,gpc_min_mv,memory_c,sys_mhz,video_mhz,clock_locks");
             Emit(run, string.Create(CultureInfo.InvariantCulture, $"🟢 live watch started: a line every {everySeconds} s under load, sampled every {intervalMs} ms")
                 + (note != null ? $". Playing: {note}" : ""));
             run.Frames = FrameFeed.Start(card, Math.Min(MaxHours * 3600, MaxFrameSeconds), process, out var noFrames);
@@ -210,6 +217,21 @@ public sealed class LiveWatch(Card card) : IDisposable
                     try { curve = card.WithDriver(VfReader.Read); maxUv = card.WithDriver(RailsReader.Read).Get(Rail.Nvvdd)?.Limits.MaxUv; }
                     catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
                     if (curve != null) edge = Edge(curve);
+                    // A lock set or released mid-watch (set_clock_lock, nvidia-smi -lgc, Afterburner's L) changes what the clocks mean.
+                    // An unreadable record is not a released lock: the last reading stands.
+                    var locks = card.ClockLocks();
+                    string? key, was;
+                    lock (run)
+                    {
+                        was = run.LocksKey;
+                        if (locks != null) { run.Locks = locks; run.LocksKey = locks.Count > 0 ? string.Join(", ", locks.Select(l => l.Describe())) : null; }
+                        key = run.LocksKey;
+                        run.Curve = curve;
+                        run.MaxUv = maxUv;
+                    }
+                    if (key != was)
+                        Emit(run, key != null ? $"🔒 clock lock in force: {key}. The driver still lowers the clock under it for power, temperature and voltage: the lines show what ran"
+                            : "🔓 no clock lock in force any more");
                     shapeAt = now;
                 }
                 Card.Sample? s = null;
@@ -220,7 +242,9 @@ public sealed class LiveWatch(Card card) : IDisposable
                     DateTimeOffset? silent;
                     lock (run) { silent = run.SilentSince; run.SilentSince = null; run.LastAnswer = answered; }
                     if (silent is { } since) Emit(run, string.Create(CultureInfo.InvariantCulture, $"🔁 the card answers again after {(answered - since).TotalSeconds:0} s"));
-                    var p = ToPoint(s, t, curve, maxUv);
+                    string? locksKey;
+                    lock (run) locksKey = run.LocksKey;
+                    var p = ToPoint(s, t, curve, maxUv) with { Locks = locksKey };
                     bool hangLike = p is { UtilPct: >= HangUtilPct, BoardW: < HangMaxW, ClockMhz: >= HangMinMhz } && (hangMhz == null || hangMhz == p.ClockMhz);
                     if (hangLike)
                     {
@@ -348,7 +372,7 @@ public sealed class LiveWatch(Card card) : IDisposable
         return new Point(s.At, t.GraphicsClockMhz, s.NvvddUv / 1000.0, s.MsvddUv / 1000.0, s.Mhz(AllClocksLayout.Xbar), t.PowerWatts,
             t.PowerEnforcedWatts ?? t.PowerLimitWatts, t.TemperatureC, t.GpuUtilPercent, t.FanPercent.Count > 0 ? t.FanPercent.Average(x => (double)x) : null,
             Limiter.Key(Limiter.Holding(reading, maxUv, top?.EffectiveKhz)), point,
-            t is { GpuUtilPercent: >= LoadedUtilPct, PowerWatts: >= LoadedW });
+            t is { GpuUtilPercent: >= LoadedUtilPct, PowerWatts: >= LoadedW }, s.Mhz(AllClocksLayout.Sys), s.Mhz(AllClocksLayout.Video));
     }
 
     /// <summary>One window under load, the way the reference card's runs were read: clock range and median, the voltage and
@@ -375,7 +399,7 @@ public sealed class LiveWatch(Card card) : IDisposable
         var sb = new StringBuilder("📊 ");
         sb.Append(clocks.Count == 0 ? "clock unread" : string.Create(CultureInfo.InvariantCulture, $"{clocks.Min():0}-{clocks.Max():0} MHz (p50 {Pct(clocks, 0.5):0})"));
         sb.Append(string.Create(CultureInfo.InvariantCulture, $" @ {Pct(w.Select(p => p.NvvddMv), 0.5):0} mV, point {point?.ToString(CultureInfo.InvariantCulture) ?? "?"}{onCurve}"));
-        sb.Append(string.Create(CultureInfo.InvariantCulture, $" · MSVDD {Pct(w.Select(p => p.MsvddMv), 0.5):0} mV · XBAR {Pct(w.Select(p => p.XbarMhz), 0.5):0} MHz"));
+        sb.Append(string.Create(CultureInfo.InvariantCulture, $" · MSVDD {Pct(w.Select(p => p.MsvddMv), 0.5):0} mV · XBAR {Pct(w.Select(p => p.XbarMhz), 0.5):0} / SYS {Pct(w.Select(p => p.SysMhz), 0.5):0} MHz"));
         sb.Append(string.Create(CultureInfo.InvariantCulture,
             $" · {Avg(w.Select(p => p.BoardW)):0} W avg, {w.Max(p => p.BoardW):0} max of {limit:0} ({100.0 * w.Count(p => p.OnWall) / w.Count:0} % on the wall)"));
         sb.Append(string.Create(CultureInfo.InvariantCulture, $" · {w.Max(p => p.TempC):0} °C · fans {Avg(w.Select(p => p.FanPct)):0} %"));
@@ -405,6 +429,9 @@ public sealed class LiveWatch(Card card) : IDisposable
             p50_nvvdd_mv = Pct(l.Select(p => p.NvvddMv), 0.5),
             p50_msvdd_mv = Pct(l.Select(p => p.MsvddMv), 0.5),
             p50_xbar_mhz = Pct(l.Select(p => p.XbarMhz), 0.5),
+            p50_sys_mhz = Pct(l.Select(p => p.SysMhz), 0.5),
+            p50_video_mhz = Pct(l.Select(p => p.VideoMhz), 0.5),
+            clock_locks = LocksMet(run, l),
             p50_board_w = Pct(l.Select(p => p.BoardW), 0.5),
             max_board_w = l.Count == 0 ? null : Round1(l.Max(p => p.BoardW)),
             max_temp_c = l.Count == 0 ? null : Round1(l.Max(p => p.TempC)),
@@ -432,7 +459,20 @@ public sealed class LiveWatch(Card card) : IDisposable
             $"{minutes:0.#} min, {l.Count * run.IntervalMs / 60000.0:0.#} min of it under load in {stretches} stretch(es). P50 {Pct(clocks, 0.5):0} MHz @ {Pct(l.Select(p => p.NvvddMv), 0.5):0} mV (point {point}), " +
             $"P10 {Pct(clocks, 0.1):0}, P90 {Pct(clocks, 0.9):0}; {100.0 * l.Count(p => p.OnWall) / l.Count:0} % on the wall; max {l.Max(p => p.TempC):0} °C, {l.Max(p => p.BoardW):0} W; {held}")
             + (silences > 0 ? $"; the card stopped answering {silences} time(s)" : "")
-            + (run.Frames != null ? $"; {FrameFeed.Words(SafeTotal(run))}" : "") + (run.Note != null ? $". Playing: {run.Note}" : "");
+            + (run.Frames != null ? $"; {FrameFeed.Words(SafeTotal(run))}" : "") + TuningTools.LocksWords(LocksMet(run, l))
+            + (run.Note != null ? $". Playing: {run.Note}" : "");
+    }
+
+    /// <summary>The lock in force as last read against the samples under load taken while it was; null when none is.</summary>
+    private static IReadOnlyList<Clocktail.Domain.Clocks.ClockLockOutcome>? LocksMet(Run run, List<Point> loaded)
+    {
+        IReadOnlyList<Clocktail.Domain.Clocks.ClientLimit>? locks;
+        VfCurveSnapshot? curve;
+        uint? maxUv;
+        string? key;
+        lock (run) { locks = run.Locks; curve = run.Curve; maxUv = run.MaxUv; key = run.LocksKey; }
+        if (key == null) return null;
+        return TuningTools.LocksMet(locks, loaded.Where(p => p.Locks == key).Select(p => (double?)p.ClockMhz), curve, maxUv);
     }
 
     private static Clocktail.Domain.Fps.FrameStats.App? SafeTotal(Run run)
@@ -448,7 +488,7 @@ public sealed class LiveWatch(Card card) : IDisposable
         try
         {
             run.Csv.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"{p.At:O},{p.ClockMhz},{p.NvvddMv:0.#},{p.MsvddMv:0.#},{p.XbarMhz:0},{p.BoardW:0.#},{p.LimitW:0},{p.TempC:0},{p.UtilPct},{p.FanPct:0},{p.CurvePoint},{p.HeldBy},{string.Join("|", t.ThrottleReasons)},{t.PowerInstantWatts:0.#},{TuningTools.Gib(t.VramUsedBytes)},{t.TempMarginC},{gpc?.MeanMv:0.#},{gpc?.MinMv},{memoryC:0.#}"));
+                $"{p.At:O},{p.ClockMhz},{p.NvvddMv:0.#},{p.MsvddMv:0.#},{p.XbarMhz:0},{p.BoardW:0.#},{p.LimitW:0},{p.TempC:0},{p.UtilPct},{p.FanPct:0},{p.CurvePoint},{p.HeldBy},{string.Join("|", t.ThrottleReasons)},{t.PowerInstantWatts:0.#},{TuningTools.Gib(t.VramUsedBytes)},{t.TempMarginC},{gpc?.MeanMv:0.#},{gpc?.MinMv},{memoryC:0.#},{p.SysMhz:0},{p.VideoMhz:0},\"{p.Locks}\""));
         }
         catch (IOException) { }
     }

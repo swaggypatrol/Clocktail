@@ -249,6 +249,22 @@ public sealed class Card : IDisposable
         }
     }
 
+    /// <summary>The client clock limits in force (nvidia-smi -lgc, Afterburner's L, set_clock_lock); null when the record is
+    /// unreadable or not the confirmed layout, which is not the same as no lock.</summary>
+    public IReadOnlyList<Clocktail.Domain.Clocks.ClientLimit>? ClockLocks()
+    {
+        try { return WithDriver(Clocktail.Domain.Clocks.ClientLimitsLayout.Read); }
+        catch (Exception e) when (e is InvalidOperationException or InvalidDataException or NvApiException or DriverBusyException) { return null; }
+    }
+
+    /// <summary>Every clock domain's present clock from the driver's clock table (<see cref="AllClocksLayout"/> ids), kHz;
+    /// null when the table is unreadable.</summary>
+    public IReadOnlyDictionary<int, uint>? Clocks()
+    {
+        try { return WithDriver(PowerSplitReader.ReadClocks); }
+        catch (Exception e) when (e is InvalidOperationException or NvApiException or DriverBusyException) { return null; }
+    }
+
     /// <summary>Any other read of the driver, in the same lane as every read above (a read that writes nothing needs no
     /// broker and no elevation, as the CLI's reads do). What <paramref name="f"/> throws reaches the caller.</summary>
     public T WithDriver<T>(Func<NvClient, GpuSession, T> f)
