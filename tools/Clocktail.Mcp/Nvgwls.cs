@@ -97,10 +97,11 @@ public static class Nvgwls
     }
 
     /// <summary>Runs it hidden and calls <paramref name="sample"/> every 500 ms until it exits or overruns. A sample that
-    /// answers true stops the run (its process tree is ended) and sets <paramref name="stopped"/>; the code is then null.</summary>
-    public static int? Run(string exe, int load, int seconds, Func<bool> sample, out bool stopped, int graceS = 30)
+    /// answers true stops the run and sets <paramref name="stopped"/>; the code is then null. <paramref name="exited"/> is
+    /// false only when nvgwls was still running <see cref="ChildProcess.ExitWait"/> after being stopped: its load may
+    /// still be on the card.</summary>
+    public static int? Run(string exe, int load, int seconds, Func<bool> sample, out bool stopped, out bool exited, int graceS = 30)
     {
-        stopped = false;
         var dir = Path.Combine(Path.GetTempPath(), "clocktail-stress");
         Directory.CreateDirectory(dir);
         var psi = new ProcessStartInfo(exe)
@@ -111,22 +112,44 @@ public static class Nvgwls
         };
         foreach (var a in new[] { "-b", "500", "-r", (seconds * 1000).ToString(System.Globalization.CultureInfo.InvariantCulture), "-l", load.ToString(System.Globalization.CultureInfo.InvariantCulture) })
             psi.ArgumentList.Add(a);
-        using var p = Process.Start(psi) ?? throw new InvalidOperationException("nvgwls did not start");
-        var deadline = DateTime.UtcNow.AddSeconds(seconds + graceS);
-        while (!p.WaitForExit(500))
+        return Run(psi, seconds, sample, out stopped, out exited, graceS);
+    }
+
+    /// <summary>
+    /// <see cref="Run(string, int, int, Func{bool}, out bool, out bool, int)"/> for any process: the exit code, or null when
+    /// <paramref name="sample"/> stopped it or it overran <paramref name="seconds"/> + <paramref name="graceS"/>. Every way
+    /// out, a sampling error too, ends its process tree and waits for it, and while it runs it sits in a kill-on-close job,
+    /// so it never outlives this server either: nothing after the run (the card given back, a crash record putting the
+    /// daily profile back) starts under its load. A sampling error that leaves it running says so in its message.
+    /// <paramref name="started"/> sees the process once it is in the job.
+    /// </summary>
+    public static int? Run(ProcessStartInfo psi, int seconds, Func<bool> sample, out bool stopped, out bool exited, int graceS = 30,
+                           Action<Process>? started = null)
+    {
+        stopped = false;
+        string name = Path.GetFileNameWithoutExtension(psi.FileName);
+        using var children = OperatingSystem.IsWindows() ? new KillOnCloseJob() : null;
+        using var p = Process.Start(psi) ?? throw new InvalidOperationException($"{name} did not start");
+        if (OperatingSystem.IsWindows()) children?.Add(p);
+        int? code = null;
+        try
         {
-            if (sample())
+            started?.Invoke(p);
+            var deadline = DateTime.UtcNow.AddSeconds(seconds + graceS);
+            while (true)
             {
-                try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-                stopped = true;
-                return null;
-            }
-            if (DateTime.UtcNow > deadline)
-            {
-                try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-                return null;
+                if (p.WaitForExit(500)) { code = p.ExitCode; break; }
+                if (sample()) { stopped = true; break; }
+                if (DateTime.UtcNow > deadline) break;
             }
         }
-        return p.ExitCode;
+        catch (Exception e)
+        {
+            if (!ChildProcess.Stop(p))
+                throw new InvalidOperationException($"{e.Message} ({name} did not exit after being stopped: its load may still be running)", e);
+            throw;
+        }
+        exited = ChildProcess.Stop(p);
+        return code;
     }
 }
