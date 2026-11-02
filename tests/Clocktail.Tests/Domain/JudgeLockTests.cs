@@ -125,6 +125,7 @@ public class JudgeLockTests : IDisposable
     [Fact]
     public void Only_one_of_many_takers_gets_a_stale_lock()
     {
+        if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
         const int takers = 6;
         for (int round = 0; round < 40; round++)
         {
@@ -149,6 +150,7 @@ public class JudgeLockTests : IDisposable
     [Fact]
     public async Task A_lock_still_being_written_is_waited_for_not_taken_as_stale()
     {
+        if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
         File.WriteAllText(_path, """{"Pid":100,"RunId":"a","Label":"burn"}""");
         var writer = new FileStream(_path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
         var closer = Task.Run(async () => { await Task.Delay(100); writer.Dispose(); });
@@ -166,6 +168,7 @@ public class JudgeLockTests : IDisposable
     [Fact]
     public void A_stale_lock_that_cannot_be_deleted_is_reported_not_thrown()
     {
+        if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
         File.WriteAllText(_path, """{"Pid":999,"RunId":"old"}""");
         File.SetAttributes(_path, FileAttributes.ReadOnly);
         try
@@ -192,6 +195,7 @@ public class JudgeLockTests : IDisposable
     [Fact]
     public async Task Release_waits_out_a_reader_and_deletes_its_own_lock()
     {
+        if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
         File.WriteAllText(_path, """{"Pid":100,"RunId":"run-1"}""");
         var reader = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.Read);
         var closer = Task.Run(async () => { await Task.Delay(100); reader.Dispose(); });
@@ -209,6 +213,7 @@ public class JudgeLockTests : IDisposable
     [Fact]
     public void A_lock_another_process_keeps_open_is_busy_not_free()
     {
+        if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
         File.WriteAllText(_path, """{"Pid":100,"RunId":"r1","Label":"burn"}""");
         using (Checking(_path))
         {
@@ -227,6 +232,7 @@ public class JudgeLockTests : IDisposable
     [Fact]
     public async Task A_lock_open_a_moment_is_read_once_it_is_free()
     {
+        if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
         File.WriteAllText(_path, """{"Pid":100,"RunId":"r1","Label":"burn"}""");
         var check = Checking(_path);
         var closer = Task.Run(async () => { await Task.Delay(30); check.Dispose(); });
@@ -239,6 +245,7 @@ public class JudgeLockTests : IDisposable
     [Fact]
     public async Task A_lock_open_elsewhere_does_not_refuse_a_taker_or_make_a_run_give_its_own_back()
     {
+        if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
         File.WriteAllText(_path, """{"Pid":999,"RunId":"old"}""");   // its process is gone
         var check = Checking(_path);
         var closer = Task.Run(async () => { await Task.Delay(200); check.Dispose(); });

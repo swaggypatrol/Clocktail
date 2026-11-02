@@ -104,7 +104,11 @@ public static class JudgeLock
             try
             {
                 if (!File.Exists(path)) { trace = $"{path}: absent"; return null; }
-                info = JsonSerializer.Deserialize<Info>(File.ReadAllText(path), Json);
+                // Read letting others write and delete: a look never stops a holder from giving its lock back, nor a
+                // later run's Settle from deleting its own. A taker's check (TakeOver) still shuts this read out.
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var reader = new StreamReader(fs))
+                    info = JsonSerializer.Deserialize<Info>(reader.ReadToEnd(), Json);
                 break;
             }
             catch (IOException e) when (InUse(e))
