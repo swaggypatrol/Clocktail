@@ -89,8 +89,11 @@ public sealed record BrokerRequest(
     /// "wall" sets the profile's power limit (<see cref="Value"/>: mW) and writes it unless suspended or a trial holds its own; "apply-power" writes only its power limit (none under a trial in force with a wall of its own, and nothing else of a trial in force: right after a driver reset, which puts the
     /// limit back to 575 W, without waiting for an idle GPU); "crashed" records a crash at once (the held cells already
     /// given back): the trial on the card when the GPU stopped answering (<see cref="HungAt"/>; without it, the trial in
-    /// force) made a data point, nothing written; the service's own (a client sending it is refused); "after-reset" then writes the profile back
-    /// unchanged once the GPU is idle, unless a trial written since is in force. Every one of
+    /// force) made a data point, nothing written; the service's own (a client sending it is refused); "crashed-held" records
+    /// it the same way while the give-back has not landed, the trial kept in force with the crash as its ending (the
+    /// service's own too); "after-reset" then writes the profile back
+    /// unchanged once the GPU is idle, unless a trial written since is in force; "start" is the service's "apply" at start,
+    /// which leaves alone a trial written since the service began. Every one of
     /// them that changes the card or the profile is an entry in the tuning log. Not itself a write: "apply" and "after-reset"
     /// send each write through <see cref="OpWrite"/>, which takes the window and every guard.
     /// </summary>
