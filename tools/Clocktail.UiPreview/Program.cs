@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Drawing.Imaging;
 using System.Reflection;
 using Clocktail.Domain.Vf;
 using Clocktail.Mcp.CurveEditor;
@@ -159,11 +158,10 @@ internal static class Program
 
     private static void WindowScreenshot(Form form, string output, string name)
     {
+        Console.WriteLine($"Window {form.Size}, client {form.ClientSize}");
         using var full = new Bitmap(form.Width, form.Height);
         form.DrawToBitmap(full, new(Point.Empty, form.Size));
-        var client = form.PointToScreen(Point.Empty) - (Size)form.Location;
-        using var image = full.Clone(new Rectangle(client, form.ClientSize), PixelFormat.Format32bppArgb);
-        image.Save(Path.Combine(output, name + ".png"));
+        full.Save(Path.Combine(output, name + ".png"), System.Drawing.Imaging.ImageFormat.Png);
     }
 
     private static EditorData Fixture()

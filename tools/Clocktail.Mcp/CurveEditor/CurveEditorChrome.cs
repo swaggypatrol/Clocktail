@@ -97,7 +97,7 @@ public sealed partial class CurveEditorForm
         _controlTips.SetToolTip(_offsetInput, "Enter an offset in MHz. Edits snap to 7.5 MHz; the driver's effective clock is shown beside it. Up/Down steps by 7.5 MHz.");
         Controls.Add(_offsetInput);
 
-        _detailsButton = Action("Details…", "Details", ShowDetails, "Read or copy the complete save result and the other settings kept as Daily.");
+        _detailsButton = Action("Details…", "Details", ShowDetails, "Read or copy the full draft summary, save result and other settings kept as Daily.");
         _closeButton = Action("Cancel", "Cancel", Close, "Close the editor. An unsaved draft prompts before it is discarded.");
         _saveButton = Action("Save as Daily", "SaveAsDaily", Save, "Apply the draft to the GPU, verify readback and keep it as the Daily profile · Ctrl+S");
         _saveButton.BackColor = Primary;
@@ -151,7 +151,7 @@ public sealed partial class CurveEditorForm
         Place(_offsetInput, width - 198, height - 117, 150, 30);
         Place(_saveButton, width - 212, height - 58, 188, 36);
         Place(_closeButton, width - 310, height - 58, 86, 36);
-        Place(_detailsButton, width - 408, height - 58, 86, 36);
+        Place(_detailsButton, width - (_done ? 310 : 408), height - 58, 86, 36);
     }
 
     private void RefreshChrome()
@@ -172,7 +172,7 @@ public sealed partial class CurveEditorForm
         _saveButton.Enabled = !_busy;
         _saveButton.Text = _busy ? "Saving…" : _done ? "Close" : "Save as Daily";
         _closeButton.Visible = !_done;
-        _detailsButton.Visible = _saveError != null || _d.AlsoKept != null;
+        _detailsButton.Enabled = !_busy;
         _saveButton.AccessibleDescription = _done ? _status : "Writes the draft to the GPU and keeps it as Daily. " + (_d.AlsoKept ?? "");
     }
 
@@ -235,7 +235,7 @@ public sealed partial class CurveEditorForm
             : _d.AlsoKept != null ? "Also keeps other GPU settings · see Details"
             : above > 0 ? $"{above} points at / above a crashed curve setting"
             : changed == 0 ? "GPU unchanged · edits apply only when you save" : $"{changed} points changed · max lift {Signed(MaxLift().Lift)} MHz";
-        float right = _detailsButton.Visible ? w - 424 * s : w - 326 * s;
+        float right = w - (_done ? 326 : 424) * s;
         TextLine(g, summary, _small, above > 0 && !_done ? C(0xefc078) : Dim, new(24 * s, h - 58 * s, Math.Max(20, right - 24 * s), 36 * s));
     }
 
@@ -248,7 +248,16 @@ public sealed partial class CurveEditorForm
             StartPosition = FormStartPosition.CenterParent, Size = new(720, 470), MinimumSize = new(480, 320),
             Font = detailFont, AutoScaleMode = AutoScaleMode.Dpi,
         };
-        string details = _status + "\r\n\r\n";
+        var (lift, at) = MaxLift();
+        int count = _off.Where((offset, i) => offset != _opened[i]).Count();
+        double slope = CurveModel.PeakSlope(_d.Mv, _d.BaseKhz, _off, _bottom, _top);
+        double openedSlope = CurveModel.PeakSlope(_d.Mv, _d.BaseKhz, _opened, _original.Foot, _original.Top);
+        string details = _d.Gpu + "\r\n" + _status + "\r\n\r\nDraft summary\r\n" +
+            $"Changed offsets: {count} / {_off.Length}\r\nMaximum lift above opened: {Signed(lift)} MHz at {Fmt(at)} mV\r\n" +
+            $"Transition band: {Fmt(_d.Mv[_bottom])}–{Fmt(_d.Mv[_top])} mV; points below its foot are preserved\r\n" +
+            $"Band peak slope: {Fmt(slope)} MHz/mV (opened band: {Fmt(openedSlope)})\r\n" +
+            $"Points at or above a crashed curve setting: {AboveCrash()}\r\n" +
+            $"Writable points: {_d.Writable}; offset range {Signed(_d.LowKhz / 1000.0)} to {Signed(_d.HighKhz / 1000.0)} MHz\r\n\r\n";
         if (_saveError != null) details += "Save result\r\n" + _saveError + "\r\n\r\n";
         details += _d.AlsoKept == null ? "Save as Daily applies this curve and keeps it as the Daily profile.\r\n"
             : "Other settings included in Save as Daily\r\n" + _d.AlsoKept + "\r\n";
