@@ -10,7 +10,7 @@
 /// trial by then. There is no step-down: the person is at the
 /// machine when a game crashes, and the agent adjusts through the MCP server (the user, 2026-10-19). The give-back is a
 /// write like any other, so it waits for the window and for a stability run to let go rather than going around either,
-/// and it retries until <see cref="GiveUpAfter"/>.
+/// and it retries until <see cref="GiveUpAfter"/>; the crash is on record from the first attempt that does not land.
 /// </summary>
 public sealed class DriverResetResponder(
     Func<BrokerRequest, BrokerResponse> perform,
@@ -37,18 +37,22 @@ public sealed class DriverResetResponder(
     private readonly SemaphoreSlim _signal = new(0);
     private sealed record Seen(string Evidence, IReadOnlyDictionary<string, uint> CrashUv,
         IReadOnlyDictionary<string, (DateTimeOffset Answered, DateTimeOffset Stopped)> Hung);
-    private Seen _last = new("", new Dictionary<string, uint>(), new Dictionary<string, (DateTimeOffset, DateTimeOffset)>());
+    /// <summary>The resets signalled and not yet answered, oldest first, each with its own evidence and hang.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentQueue<Seen> _seen = new();
 
     /// <summary>
-    /// Called once a reset is seen: a burst of events is answered once. <paramref name="crashUv"/> is each GPU's core
+    /// Called once a reset is seen (the broker answers a burst of events once, ResetBursts): each signal is answered as a
+    /// reset of its own, in order. <paramref name="crashUv"/> is each GPU's core
     /// voltage at the hang from the flight recorder, where it found one, for the record; <paramref name="hung"/> when each
     /// GPU stopped answering and the last look before at which it still answered (<see cref="Profiles.FlightRecorder.Hang"/>),
     /// so that the crash goes to the trial on the card then, whatever took it off the record before the crash is recorded.
+    /// Until 0.8.1 one slot held the last signal, so a reset signalled while an earlier one was answered replaced the
+    /// evidence and hang of any other still waiting.
     /// </summary>
     public void Signal(string evidence, IReadOnlyDictionary<string, uint>? crashUv = null,
         IReadOnlyDictionary<string, (DateTimeOffset Answered, DateTimeOffset Stopped)>? hung = null)
     {
-        Volatile.Write(ref _last, new Seen(evidence, crashUv ?? new Dictionary<string, uint>(), hung ?? new Dictionary<string, (DateTimeOffset, DateTimeOffset)>()));
+        _seen.Enqueue(new Seen(evidence, crashUv ?? new Dictionary<string, uint>(), hung ?? new Dictionary<string, (DateTimeOffset, DateTimeOffset)>()));
         _signal.Release();
     }
 
@@ -59,9 +63,10 @@ public sealed class DriverResetResponder(
             try { await _signal.WaitAsync(ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { return; }
             sleep(SettleFor);
-            while (_signal.Wait(0)) { }   // the events of one reset arrive together
-            var (evidence, crashUv, hung) = Volatile.Read(ref _last);
-            Respond(evidence, crashUv, hung);
+            while (_signal.Wait(0)) { }   // each signal is in the queue: the count is not needed
+            // The resets signalled by now, in order; one signalled while they are answered is settled for in the next pass
+            // (its release comes after this count).
+            for (int n = _seen.Count; n > 0 && _seen.TryDequeue(out var seen); n--) Respond(seen.Evidence, seen.CrashUv, seen.Hung);
         }
     }
 
@@ -82,13 +87,17 @@ public sealed class DriverResetResponder(
     private bool RespondFor(string gpuId, string evidence, uint crashUv, (DateTimeOffset Answered, DateTimeOffset Stopped)? hung = null)
     {
         var deadline = now() + GiveUpAfter;
-        bool recorded = false;
+        bool recorded = false, crashOnRecord = false;
         while (true)
         {
             // Only the first attempt that reaches recovery records the crash; a retry is the same reset, and says so: a plain
             // recovery would take the trial off the record before "crashed" could record its crash.
             var r = perform(new BrokerRequest(BrokerRequest.OpRecover, gpuId, Kind: recorded ? BrokerRequest.RecoverAfterDriverResetAgain : BrokerRequest.RecoverAfterDriverReset, Value: evidence));
             recorded |= r.Result != null;
+            // A give-back that has not landed (held off, refused): the crash on record all the same, its trial kept in force
+            // while the card may still hold it ("crashed-held"), so that nothing marks it stable or records it as survived
+            // meanwhile, and a give-back that never lands still leaves its data point. "crashed" closes it once one lands.
+            if (!r.Ok && !crashOnRecord) crashOnRecord = RecordHeld(gpuId, evidence, crashUv, hung);
             if (r.Ok)
             {
                 log($"gpu {gpuId}: driver reset ({evidence}): {Summary(r)}");
@@ -131,8 +140,10 @@ public sealed class DriverResetResponder(
                 }
                 if (!down)
                 {
+                    // "start": the trial in force when the service began ends with it; one the agent writes while this
+                    // waits for an idle GPU stays.
                     RecoverLeftovers(id);
-                    Profile(id, "apply", "the broker started", "at start");
+                    Profile(id, "start", "the broker started", "at start");
                     continue;
                 }
                 const string why = "the machine went down holding the profile";
@@ -186,6 +197,15 @@ public sealed class DriverResetResponder(
         log($"gpu {gpuId}: crash recorded {when}: {(c.Ok ? CrashSummary(c) : c.Error ?? "failed")}");
     }
 
+    /// <summary>The crash recorded while its give-back waits ("crashed-held"); true once the service has it.</summary>
+    private bool RecordHeld(string gpuId, string evidence, uint crashUv, (DateTimeOffset Answered, DateTimeOffset Stopped)? hung)
+    {
+        var c = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: "crashed-held", Value: evidence, Uv: crashUv,
+            HungAt: hung?.Stopped, AnsweredAt: hung?.Answered));
+        log($"gpu {gpuId}: crash recorded before the give-back landed: {(c.Ok ? CrashSummary(c) : c.Error ?? "failed")}");
+        return c.Ok;
+    }
+
     private static string CrashSummary(BrokerResponse r) =>
         r.Result is { } res && res.TryGetProperty("point", out var p) && p.ValueKind == System.Text.Json.JsonValueKind.Object
             && p.TryGetProperty("Change", out var change) ? $"the trial in force ({change.GetString()}) is a crash data point" : "no trial was in force";
@@ -206,29 +226,50 @@ public sealed class DriverResetResponder(
 
     private bool Profile(string gpuId, string kind, string? evidence, string when)
     {
-        if (!WaitIdle(gpuId))
+        // After a reset the wait gives way: "after-reset" leaves a trial in force alone, so once the agent has begun one
+        // the step is sent at once (and skips it), and a newer reset puts the profile back on itself once answered. The
+        // loop that answers resets waits here, so until 0.8.1 a game kept running after a crash held every later reset's
+        // give-back and record until the GPU idled, up to 4 h.
+        bool afterReset = kind == "after-reset";
+        switch (WaitIdle(gpuId, afterReset ? () => !_seen.IsEmpty : null, afterReset ? () => TrialInForce(gpuId) : null))
         {
-            log($"gpu {gpuId}: daily profile {when}: the GPU was not idle for {IdleWaitAtMost.TotalHours:0} h; not applied (the card stays at stock)");
-            return false;
+            case Waited.TooLong:
+                log($"gpu {gpuId}: daily profile {when}: the GPU was not idle for {IdleWaitAtMost.TotalHours:0} h; not applied (the card stays at stock)");
+                return false;
+            case Waited.NewerReset:
+                log($"gpu {gpuId}: daily profile {when}: a newer driver reset came first; it is answered now, and its answer puts the profile back once the GPU is idle");
+                return false;
         }
         var p = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: kind, Value: evidence));
         log($"gpu {gpuId}: daily profile {when}: {ProfileSummary(p)}");
         return p.Ok;
     }
 
-    private bool WaitIdle(string gpuId)
+    private enum Waited { Idle, TrialInForce, NewerReset, TooLong }
+
+    /// <summary>Until <see cref="IdleLooks"/> idle looks in a row, at most <see cref="IdleWaitAtMost"/>; after a busy look it
+    /// gives way to a newer reset (<paramref name="newerReset"/>) or a trial in force (<paramref name="trialInForce"/>).</summary>
+    private Waited WaitIdle(string gpuId, Func<bool>? newerReset = null, Func<bool>? trialInForce = null)
     {
-        if (idle == null) return true;
+        if (idle == null) return Waited.Idle;
         var deadline = now() + IdleWaitAtMost;
         for (int run = 0; run < IdleLooks;)
         {
             run = idle(gpuId) ? run + 1 : 0;
             if (run == IdleLooks) break;
-            if (now() > deadline) return false;
+            if (run == 0 && newerReset?.Invoke() == true) return Waited.NewerReset;
+            if (run == 0 && trialInForce?.Invoke() == true) return Waited.TrialInForce;
+            if (now() > deadline) return Waited.TooLong;
             sleep(RetryEvery);
         }
-        return true;
+        return Waited.Idle;
     }
+
+    /// <summary>Whether a trial is in force now ("show"); false when that cannot be read.</summary>
+    private bool TrialInForce(string gpuId) =>
+        perform(new BrokerRequest(BrokerRequest.OpExperiment, gpuId, Kind: "show")).Result is { } res
+        && res.TryGetProperty("experiment", out var e) && e.ValueKind == System.Text.Json.JsonValueKind.Object
+        && e.TryGetProperty("Trial", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.Object;
 
     public static string ProfileSummary(BrokerResponse r)
     {

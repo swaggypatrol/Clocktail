@@ -47,7 +47,11 @@ public sealed record ExperimentTrial(
     /// crash over anything else: on record, so nothing more is recorded for it but a crash after another ending (asked
     /// again, mark_stable, a driver reset after mark_crash, a hand-back or the next trial: none adds a point), and a crash
     /// is never kept. Null: it has not ended.</summary>
-    string? Ending = null);
+    string? Ending = null,
+    /// <summary>The trial's identity, given when it was written ("try") and kept while it stays in force (a hand-back
+    /// writes a new <see cref="At"/>, not a new identity): a run that measured this trial records its crash against this
+    /// identity, so a trial written after the run cannot take it. Null: written by a service that gave none.</summary>
+    string? Id = null);
 
 /// <summary>One data point: how a trial ended in a game.</summary>
 public sealed record DataPoint(

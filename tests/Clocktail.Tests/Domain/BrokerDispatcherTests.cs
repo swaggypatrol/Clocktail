@@ -934,6 +934,30 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal([Experiment.Survived, Experiment.Crash], Outcomes());   // nothing written twice
     }
 
+    /// <summary>back_to_daily refused because a stability run holds the card says so, and nothing more: the profile's power
+    /// limit is not a group the driver will not take, left at stock. Before, the refused write dropped its group, the next
+    /// run's put-back was refused too, and the answer said the power limit "stays at stock" over a card still on the trial.</summary>
+    [Fact]
+    public void A_daily_profile_held_off_by_a_stability_run_names_no_group_left_at_stock()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "560000")).Ok);   // kept, not written under the trial's wall
+
+        busy = "clocktail-lab (pid 4242)";
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily"));
+        Assert.Equal(BrokerCode.JudgeBusy, r.Code);
+        Assert.DoesNotContain("stays at stock", r.Error);
+        Assert.Contains("a stability run is in progress", r.Error);
+        Assert.False(r.Result is { } res && res.TryGetProperty("not_applied", out _));
+        Assert.Equal(450_000u, _requests[0xfe]);   // the card still runs the trial
+        Assert.NotNull(TrialNow());
+
+        busy = null;
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily")).Ok);
+        Assert.Equal(560_000u, _requests[0xfe]);
+    }
+
     /// <summary>A new session over a trial the card did not let go of does not begin, and the trial stays in force, so
     /// asking again puts it back first. Until 0.3.7 the first ask took the trial off the record, and the second began the
     /// new session over a card still at the old trial's 450 W.</summary>
@@ -1106,6 +1130,83 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily")).Ok);
         Assert.Null(TrialNow());
         Assert.Equal([Experiment.Crash], Outcomes());
+    }
+
+    /// <summary>A run's crash (stress_test, lab_test) names the trial it measured: each trial has an identity, kept through
+    /// a hand-back, and a crash naming another is refused under the operation lock, so a trial written after the run
+    /// (here the next "try", as set_fan_speed writes one) does not take it. Before, the run looked at the trial in force and
+    /// then recorded the crash in a second request, and a trial with the same settings but a fixed fan duty took it.</summary>
+    [Fact]
+    public void A_run_s_crash_goes_only_to_the_trial_it_names()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"lab"}""")).Ok);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W, NVVDD 350 A", power_mw = 450_000u, nvvdd_ma = 350_000u, keep_curve = true }))).Ok);
+        var measured = TrialNow()!;
+        Assert.False(string.IsNullOrEmpty(measured.Id));
+
+        _host.Now += TimeSpan.FromMinutes(5);
+        Assert.True(d.Dispatch(Exp("release", "the agent disconnected")).Ok);   // the hand-back writes the trial again
+        Assert.NotEqual(measured.At, TrialNow()!.At);
+        Assert.Equal(measured.Id, TrialNow()!.Id);                               // and it is still that trial
+
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "460 W", power_mw = 460_000u, keep_curve = true }))).Ok);
+        var next = TrialNow()!;
+        Assert.NotEqual(measured.Id, next.Id);
+        int points = Outcomes().Count;
+        var refused = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "crash", Key: measured.Id, Value: "lab: 3 errors"));
+        Assert.Equal(BrokerCode.CannotWrite, refused.Code);
+        Assert.Contains("not the one the run measured", refused.Error);
+        Assert.Equal(points, Outcomes().Count);                 // nothing recorded
+        Assert.Equal(next.Id, TrialNow()!.Id);                  // and the trial written since stays on
+        Assert.Equal(460_000u, _requests[0xfe]);
+
+        var named = d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "crash", Key: next.Id, Value: "lab: 3 errors"));
+        Assert.True(named.Ok, named.Error);
+        var crash = Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1];
+        Assert.Equal((Experiment.Crash, "460 W"), (crash.Outcome, crash.Change));
+
+        // A trial from a service that gave none (an experiment.json from before) takes no named crash, and mark_crash's,
+        // which names none, as before.
+        new Experiment("lab", null, _host.Now, new ExperimentTrial(_host.Now, "0*127", "+15 MHz", null, null)).Save(Experiment.PathBeside(_journal.Path));
+        Assert.Equal(BrokerCode.CannotWrite, d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "crash", Key: next.Id, Value: "lab")).Code);
+        Assert.True(d.Dispatch(Exp("crash", "the game closed to the desktop")).Ok);
+        Assert.Equal("+15 MHz", Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1].Change);
+    }
+
+    /// <summary>A worker that starts with a trial in force gives its cells back (the service's own recovery, which leaves the
+    /// trial in force until the daily profile goes on once the GPU is idle): a stable mark then is refused, the card is not
+    /// running it. The start's daily profile ("start") ends that trial, and leaves alone one the agent wrote while it waited.
+    /// Before, the mark was taken, and the start's "apply" ended the agent's new trial as survived and put the profile over it.</summary>
+    [Fact]
+    public void After_a_restart_the_given_back_trial_takes_no_mark_and_the_start_ends_only_it()
+    {
+        TrialAt450(() => null);                                                      // the worker before wrote it
+        var d = Power();                                                             // the next one starts with it in force
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover)).Ok);      // its leftovers, given back
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.NotNull(TrialNow());
+        var mark = d.Dispatch(Exp("stable", "lab_test passed"));
+        Assert.Equal(BrokerCode.CannotWrite, mark.Code);
+        Assert.Contains("not running it", mark.Error);
+        Assert.Empty(Outcomes());
+
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "460 W", power_mw = 460_000u, keep_curve = true }))).Ok);
+        int points = Outcomes().Count;
+        var start = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "start", Value: "the broker started"));
+        Assert.True(start.Ok, start.Error);
+        Assert.Contains("after the service started", start.Result!.Value.GetProperty("skipped").GetString());
+        Assert.Equal("460 W", TrialNow()!.Change);                                   // the agent's trial stays on
+        Assert.Equal(460_000u, _requests[0xfe]);
+        Assert.Equal(points, Outcomes().Count);
+
+        // The trial in force when a service began is the one its start ends.
+        var next = Power();
+        Assert.True(next.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "start", Value: "the broker started")).Ok);
+        Assert.Null(TrialNow());
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Equal(Experiment.Survived, Outcomes()[^1]);
     }
 
     /// <summary>A driver reset after a mark_crash the card held off is that same crash, recorded once (an unattended
@@ -1286,6 +1387,36 @@ public class BrokerDispatcherTests : IDisposable
 
     private static BrokerRequest Crashed(DateTimeOffset stopped, uint uv = 0) => new(BrokerRequest.OpProfile, Kind: "crashed",
         Value: "nvlddmkm 153", Uv: uv, HungAt: stopped, AnsweredAt: stopped.AddMilliseconds(-250));
+
+    /// <summary>A reset whose give-back has not landed (here a stability run holds the card) has its crash on record at
+    /// once ("crashed-held"), and the trial stays in force with that ending while the card may still hold it: no stable mark,
+    /// no keep, no "survived" from the next trial. The give-back that lands, and "crashed" after it, close it with no second
+    /// point. A client cannot send it.</summary>
+    [Fact]
+    public void A_reset_whose_give_back_waits_is_on_record_and_its_trial_stays_until_the_card_is_off_it()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+        var stopped = _host.Now.AddSeconds(30);
+        _host.Now = stopped.AddSeconds(5);
+
+        busy = "clocktail-lab (pid 4242)";
+        Assert.Equal(BrokerCode.JudgeBusy, d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover, Kind: BrokerRequest.RecoverAfterDriverReset, Value: "nvlddmkm 153")).Code);
+        Assert.Equal(BrokerCode.BadRequest, d.FromClient(Crashed(stopped) with { Kind = "crashed-held" }).Code);
+        var held = d.Dispatch(Crashed(stopped, 960_000) with { Kind = "crashed-held" });
+        Assert.True(held.Ok, held.Error);
+        Assert.Equal([Experiment.Crash], Outcomes());
+        Assert.Equal((Experiment.Crash, "wall 575 → 450 W"), (TrialNow()!.Ending, TrialNow()!.Change));   // in force, ended
+        Assert.Equal(450_000u, _requests[0xfe]);
+        Assert.Equal(BrokerCode.CannotWrite, d.Dispatch(Exp("stable", "it seemed fine")).Code);
+
+        busy = null;
+        Reset(d, stopped, 960_000);
+        Assert.Null(TrialNow());
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Equal([Experiment.Crash], Outcomes());                                     // recorded once
+        Assert.Equal(960_000u, Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1].CrashUv);
+    }
 
     /// <summary>The responder's answer to a reset whose GPU stopped answering at <paramref name="stopped"/>: what is held
     /// given back, then the crash recorded (DriverResetResponder.RespondFor).</summary>

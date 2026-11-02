@@ -63,6 +63,56 @@ public class StressCrashTests
         Assert.Null(TuningTools.TrialSettings(new BrokerAnswer(false, null, "the Clocktail service does not answer")));
     }
 
+    private static object WithId(string curve, string? id, uint? fanPct = null) =>
+        new { At = "10:00", Change = "+15", Curve = curve, Marked = false, PowerMw = 450_000u, FanPct = fanPct, Id = id };
+
+    /// <summary>Settings cannot tell a trial apart from the next one that changes only what they leave out (set_fan_speed
+    /// starts a trial with the same curve and a fixed duty): the identity can.</summary>
+    [Fact]
+    public void A_trial_is_known_by_its_identity_where_the_settings_cannot_tell()
+    {
+        var measured = Show(WithId("0*127", "t1"));
+        var next = Show(WithId("0*127", "t2", fanPct: 80));
+        Assert.Equal(TuningTools.TrialSettings(measured), TuningTools.TrialSettings(next));
+        Assert.Equal("t1", TuningTools.TrialId(measured));
+        Assert.Equal("t2", TuningTools.TrialId(next));
+        Assert.Null(TuningTools.TrialId(Show(WithId("0*127", null))));   // a service that gives none
+        Assert.Null(TuningTools.TrialId(Show(null)));
+        Assert.Null(TuningTools.TrialId(new BrokerAnswer(false, null, "the Clocktail service does not answer")));
+    }
+
+    private static BrokerAnswer Point() => new(true, JsonSerializer.SerializeToElement(new { success = true, point = new { Outcome = "crash" } }), null);
+
+    /// <summary>A failed run with the measured trial's identity records its crash in one request that names it, with no
+    /// look first: the service checks the identity as it records. Without one it looks, and blames only a trial with the
+    /// measured settings and no identity of its own (a trial written since, by a service that gives them, is another).</summary>
+    [Fact]
+    public void A_failed_run_names_the_trial_it_measured_in_the_crash_request()
+    {
+        var asked = new List<(string Kind, string? Key)>();
+        BrokerAnswer Service(string kind, string? value, string? key, BrokerAnswer show)
+        {
+            asked.Add((kind, key));
+            return kind == "show" ? show : Point();
+        }
+        string? settings = TuningTools.TrialSettings(Show(WithId("0*127", "t1")));
+
+        Assert.True(TuningTools.RecordCrash((k, v, key) => Service(k, v, key, Show(WithId("0*127", "t2", 80))), settings, "t1", true, 0, "lab: 3 errors", _ => { }));
+        Assert.Equal([("crash", (string?)"t1")], asked);
+
+        asked.Clear();   // no identity: the look decides, and a trial with one now is not the measured one
+        Assert.False(TuningTools.RecordCrash((k, v, key) => Service(k, v, key, Show(WithId("0*127", "t2", 80))), settings, null, true, 0, "lab: 3 errors", _ => { }));
+        Assert.Equal([("show", (string?)null)], asked);
+
+        asked.Clear();
+        Assert.True(TuningTools.RecordCrash((k, v, key) => Service(k, v, key, Show(WithId("0*127", null))), settings, null, true, 0, "lab: 3 errors", _ => { }));
+        Assert.Equal([("show", (string?)null), ("crash", null)], asked);
+
+        asked.Clear();   // no trial when the run began: nothing to blame, nothing asked
+        Assert.False(TuningTools.RecordCrash((k, v, key) => Service(k, v, key, Show(null)), null, null, true, 0, "lab: 3 errors", _ => { }));
+        Assert.Empty(asked);
+    }
+
     private static BrokerAnswer Busy() => new(false, null, "another operation has held the card for over 30 s; nothing was done, try again", BrokerCode.WindowBusy);
 
     /// <summary>A measurement starts once the service says nothing is in flight ("quiet"), asked again while it is busy;
