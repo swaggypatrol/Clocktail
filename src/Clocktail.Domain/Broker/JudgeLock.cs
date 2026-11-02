@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Clocktail.Domain.Ownership;
 
@@ -99,6 +100,7 @@ public static class JudgeLock
     public static Info? Live(string path, IHost host, out string trace)
     {
         Info? info;
+        long readStart = Stopwatch.GetTimestamp();
         for (int attempt = 1; ; attempt++)
         {
             try
@@ -113,8 +115,8 @@ public static class JudgeLock
             }
             catch (IOException e) when (InUse(e))
             {
-                if (attempt < ReadAttempts) { Thread.Sleep(ReadRetryDelay); continue; }
-                trace = $"{path}: open by another process after {ReadAttempts} tries ({e.Message}), so busy";
+                if (Stopwatch.GetElapsedTime(readStart) < ReadRetryFor) { Thread.Sleep(ReadRetryDelay); continue; }
+                trace = $"{path}: open by another process for {ReadRetryFor.TotalMilliseconds:0} ms ({e.Message}), so busy";
                 return OpenElsewhere;
             }
             catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException)
@@ -133,17 +135,18 @@ public static class JudgeLock
     public static string Reason(Info info) => !NamesRun(info) ? info.Label ?? OpenElsewhere.Label! :
         $"pid {info.Pid}{(string.IsNullOrWhiteSpace(info.Label) ? "" : $" '{info.Label}'")}";
 
-    /// <summary>How often <see cref="Live(string, IHost, out string)"/> tries a lock another process has open, and how long
+    /// <summary>How long <see cref="Live(string, IHost, out string)"/> tries a lock another process has open, and how far
     /// apart: far longer than a taker or a holder keeps it open to check or delete it.</summary>
-    private const int ReadAttempts = 5;
+    private static readonly TimeSpan ReadRetryFor = TimeSpan.FromMilliseconds(300);
     private static readonly TimeSpan ReadRetryDelay = TimeSpan.FromMilliseconds(20);
 
     /// <summary>A sharing or lock violation: another process has the file open and lets no one read it.</summary>
     private static bool InUse(IOException e) => (e.HResult & 0xFFFF) is 32 or 33;
 
-    /// <summary>How often a lock another process has open is tried again, and how long apart: about half a second in all,
-    /// far longer than any taker keeps it open to write or check it.</summary>
-    private const int Attempts = 20;
+    /// <summary>How long a lock another process has open is tried again, and how far apart: far longer than any taker keeps
+    /// it open to write or check it, measured in time rather than tries so that a busy machine (a starved thread pool, a
+    /// slow disk) does not run the tries out before the other side lets go.</summary>
+    private static readonly TimeSpan RetryFor = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(25);
 
     /// <summary>How long <see cref="Settle"/> waits for a later run to give back the lock it wrote in a packaged copy.</summary>
@@ -168,7 +171,7 @@ public static class JudgeLock
             return false;
         }
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        for (int attempt = 0; attempt < Attempts; attempt++)
+        for (long start = Stopwatch.GetTimestamp(); ; )
         {
             try
             {
@@ -181,12 +184,14 @@ public static class JudgeLock
                 {
                     case Found.Mine: return true;
                     case Found.Live: heldBy = Reason(holder!); return false;
-                    case Found.InUse: Thread.Sleep(RetryDelay); break;
+                    case Found.InUse: if (!Wait(start)) goto busy; break;
+                    case Found.Taken: if (Stopwatch.GetElapsedTime(start) >= RetryFor) goto busy; break;
                 }
-                continue;   // stale and deleted: create ours now
+                continue;   // stale and deleted (or open a moment): create ours now
             }
             return Settle(path, mine, host, localAppData, out heldBy);
         }
+    busy:
         heldBy = "judge.lock could not be created or taken over: another process keeps it open, or it cannot be deleted";
         return false;
     }
@@ -262,7 +267,7 @@ public static class JudgeLock
     /// left behind with its live pid.</summary>
     public static void Release(string path, string runId)
     {
-        for (int attempt = 0; attempt < Attempts; attempt++)
+        for (long start = Stopwatch.GetTimestamp(); ; )
         {
             try
             {
@@ -271,7 +276,15 @@ public static class JudgeLock
                 return;
             }
             catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return; }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Thread.Sleep(RetryDelay); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { if (!Wait(start)) return; }
         }
+    }
+
+    /// <summary>Waits <see cref="RetryDelay"/> before another try, or false once <see cref="RetryFor"/> has passed since <paramref name="start"/>.</summary>
+    private static bool Wait(long start)
+    {
+        if (Stopwatch.GetElapsedTime(start) >= RetryFor) return false;
+        Thread.Sleep(RetryDelay);
+        return true;
     }
 }

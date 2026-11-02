@@ -11,6 +11,7 @@ namespace Clocktail.Tests.Mcp;
 /// an overclocking program running is said, the lite tool set is real, and the person's own yes is asked for the changes
 /// that stay.
 /// </summary>
+[Collection("Consent codes")]
 public class NotStockTests
 {
     private static List<(string Name, string Mark, string Note)> Rows(string settings) =>

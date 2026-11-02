@@ -5,6 +5,9 @@ namespace Clocktail.Tests.Mcp;
 
 /// <summary>A confirm code is bound to the question's words: a yes for one set of values must not let other values
 /// through. keep_as_daily and load_preset name the profile's values by fingerprint, the power tools to the milliwatt.</summary>
+// Consent keeps its codes in one static table and drops the expired ones by the time each call passes in, so
+// tests with different clocks would drop each other's codes if they ran at once.
+[Collection("Consent codes")]
 public class ConsentValuesTests
 {
     private static readonly DateTimeOffset Now = new(2026, 11, 2, 12, 0, 0, TimeSpan.Zero);
