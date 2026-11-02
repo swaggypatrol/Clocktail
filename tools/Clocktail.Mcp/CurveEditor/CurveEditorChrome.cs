@@ -54,7 +54,7 @@ public sealed partial class CurveEditorForm
             box.CheckedChanged += (_, _) =>
             {
                 box.ForeColor = box.Checked ? TextC : Dim;
-                _hoverCrash = _hoverRun = null;
+                _hoverCrash = _hoverRun = _hoverEvidence = null;
                 _layer?.Dispose(); _layer = null;
                 Invalidate();
             };
@@ -251,8 +251,13 @@ public sealed partial class CurveEditorForm
             Dock = DockStyle.Fill, BackColor = PlotBg, ForeColor = TextC, BorderStyle = BorderStyle.None,
             Text = details, AccessibleName = "Complete draft and save details" };
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 52, FlowDirection = FlowDirection.RightToLeft, Padding = new(8) };
-        var close = new Button { Text = "Close", DialogResult = DialogResult.Cancel, AutoSize = true };
-        var copy = new Button { Text = "Copy details", AutoSize = true };
+        Button DetailAction(string caption) => new()
+        {
+            Text = caption, AccessibleName = caption, AutoSize = true, MinimumSize = new(110, 30),
+            FlatStyle = FlatStyle.Flat, BackColor = PanelC, ForeColor = TextC, UseVisualStyleBackColor = false,
+        };
+        var close = DetailAction("Close"); close.DialogResult = DialogResult.Cancel;
+        var copy = DetailAction("Copy details");
         copy.Click += (_, _) =>
         {
             try { Clipboard.SetText(details); copy.Text = "Copied"; }

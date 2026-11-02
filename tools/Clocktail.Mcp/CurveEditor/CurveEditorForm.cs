@@ -41,7 +41,7 @@ public sealed partial class CurveEditorForm : Form
     private readonly EditorHistory _history = new();
     private readonly EditorDraft _original;
     private readonly int _maxIndex;   // the last point the card can reach (NVVDD MAX): the right end of smoothing
-    private readonly double _runMax, _peakOpened;
+    private readonly double _runMax;
 
     private float _s = 1;
     private Font _body = null!, _small = null!, _title = null!, _bold = null!;
@@ -50,7 +50,7 @@ public sealed partial class CurveEditorForm : Form
     private Bitmap? _layer;
     private (double, double, double, double, int, int, float) _layerKey;
 
-    private int? _hover, _sel, _hoverCrash, _hoverRun;
+    private int? _hover, _sel, _hoverCrash, _hoverRun, _hoverEvidence;
     /// <summary>1: the foot line, 2: the top line, 0: neither.</summary>
     private int _hoverLine, _dragLine;
     private int? _drag;
@@ -79,7 +79,6 @@ public sealed partial class CurveEditorForm : Form
         Detect();
         _off = (int[])_opened.Clone();
         _original = Draft();
-        _peakOpened = CurveModel.PeakSlope(data.Mv, data.BaseKhz, _opened, _bottom, _top);
         _status = "Draft only. Select a point or drag to edit; the GPU is unchanged.";
         _statusColor = Dim;
         _maxIndex = data.MaxMv is { } max ? Math.Max(1, Array.FindLastIndex(data.Mv, v => v <= max + 0.01)) : data.Mv.Length - 1;
@@ -353,6 +352,7 @@ public sealed partial class CurveEditorForm : Form
         foreach (var ev in _showEvidence.Checked ? _d.Evidence : [])
             if (Math.Abs(X(ev.Mv) - location.X) <= 8 * _s
                 && ((ev.StableMhz is { } st && Math.Abs(Y(st) - location.Y) <= 8 * _s)
+                    || (ev.StableRanMhz is { } ran && Math.Abs(Y(ran) - location.Y) <= 8 * _s)
                     || (ev.SurvivedMhz is { } sv && Math.Abs(Y(sv) - location.Y) <= 8 * _s)))
                 indices.Add(ev.Index);
         var ids = (_showCrashes.Checked ? _d.Crashes : []).Where(c => Math.Abs(X(c.Mv) - location.X) <= 8 * _s
@@ -399,7 +399,7 @@ public sealed partial class CurveEditorForm : Form
                 Ui(() =>
                 {
                     _d = _d with { Crashes = history.Crashes, Evidence = history.Evidence, Tests = history.Tests };
-                    _hoverCrash = _hover = _hoverRun = null;
+                    _hoverCrash = _hover = _hoverRun = _hoverEvidence = null;
                     _busy = false;
                     Cursor = Cursors.Default;
                     Say("Historical test deleted; evidence refreshed. GPU settings unchanged.", Good);
@@ -451,6 +451,18 @@ public sealed partial class CurveEditorForm : Form
             if (dist < bestD) { bestD = dist; best = k; }
         }
         return best;
+    }
+
+    private int? EvidenceAt(PointF p)
+    {
+        if (!_plot.Contains(p)) return null;
+        for (int k = _d.Evidence.Count - 1; k >= 0; k--)
+        {
+            var ev = _d.Evidence[k];
+            if (Math.Abs(X(ev.Mv) - p.X) > 8 * _s) continue;
+            if (new[] { ev.StableMhz, ev.StableRanMhz, ev.SurvivedMhz }.Any(mhz => mhz is { } v && Math.Abs(Y(v) - p.Y) < 8 * _s)) return k;
+        }
+        return null;
     }
 
     /// <summary>Which band line's tab is under the point (1: the foot's, 2: the top's, 0: neither).</summary>
@@ -579,14 +591,15 @@ public sealed partial class CurveEditorForm : Form
             Invalidate();
             return;
         }
-        var before = (_hover, _hoverCrash, _hoverRun, _hoverLine);
+        var before = (_hover, _hoverCrash, _hoverRun, _hoverEvidence, _hoverLine);
         _hoverLine = TabAt(e.Location);
         _hover = _hoverLine == 0 ? PointAt(e.Location, draggableOnly: false) : null;
         if (_hoverLine == 0 && _hover == null) _hoverLine = LineBodyAt(e.Location);
         _hoverCrash = _showCrashes.Checked && _hover == null && _hoverLine == 0 ? CrashAt(e.Location) : null;
-        _hoverRun = _showHistory.Checked && _hover == null && _hoverCrash == null && _hoverLine == 0 && _plot.Contains(e.Location) ? RunAt(e.Location) : null;
+        _hoverEvidence = _showEvidence.Checked && _hover == null && _hoverCrash == null && _hoverLine == 0 ? EvidenceAt(e.Location) : null;
+        _hoverRun = _showHistory.Checked && _hover == null && _hoverCrash == null && _hoverEvidence == null && _hoverLine == 0 && _plot.Contains(e.Location) ? RunAt(e.Location) : null;
         Cursor = _busy ? Cursors.WaitCursor : _hoverLine != 0 ? Cursors.SizeWE : _hover is { } h && Draggable(h) ? Cursors.SizeNS : Cursors.Default;
-        if (before != (_hover, _hoverCrash, _hoverRun, _hoverLine)) Invalidate();
+        if (before != (_hover, _hoverCrash, _hoverRun, _hoverEvidence, _hoverLine)) Invalidate();
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -932,6 +945,22 @@ public sealed partial class CurveEditorForm : Form
             lines.Add(($"Historical load  {Fmt(r.Mv)} mV · {Fmt(r.Mhz)} MHz", RunC));
             lines.Add(($"{Duration(r.Seconds)} · samples at ≥50% load · not live", Dim));
             at = new PointF(X(r.Mv), Y(r.Mhz));
+        }
+        else if (_hoverEvidence is { } e0)
+        {
+            var ev = _d.Evidence[e0];
+            lines.Add(($"Test evidence · #{ev.Index} · {Fmt(ev.Mv)} mV", TextC));
+            if (ev.StableMhz is { } stable)
+            {
+                lines.Add(($"Marked stable: setting {Fmt(stable)} MHz · {Duration((int)ev.StableSeconds)}", AxisText));
+                if (ev.StableRanMhz is { } ran)
+                    lines.Add(($"Sampled {Fmt(ran)} MHz (P90)" + (ev.HeldBelowMhz is { } held ? $" · {Fmt(held)} below setting" : ""), Good));
+                else lines.Add(("No sampled clock for this stable record", Unverified));
+                if (ev.HeldBelowMhz != null) lines.Add(("The test did not demonstrate stability at the requested setting", Unverified));
+            }
+            if (ev.SurvivedMhz is { } survived) lines.Add(($"Highest survived setting: {Fmt(survived)} MHz", AxisText));
+            lines.Add(("Historical evidence · current draft is untested", Dim));
+            at = new PointF(X(ev.Mv), Y(ev.StableMhz ?? ev.SurvivedMhz ?? _vy0));
         }
         else if (_hoverLine == 2)
         {

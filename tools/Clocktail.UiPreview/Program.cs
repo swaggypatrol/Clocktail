@@ -18,6 +18,12 @@ internal static class Program
     {
         try
         {
+            using var watchdog = new System.Threading.Timer(_ =>
+            {
+                Console.Error.WriteLine("UI preview timed out; a modal dialog or native operation did not return.");
+                Environment.Exit(1);
+            }, null, TimeSpan.FromMinutes(1), Timeout.InfiniteTimeSpan);
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
             Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -28,6 +34,7 @@ internal static class Program
             using (var form = new CurveEditorForm(data, (request, progress) =>
                 { saved = request; progress("Checking readback…"); return new(true, null, null); }, _ => new([], [], [])))
             {
+                Console.WriteLine("Opening synthetic editor");
                 form.Show(); Application.DoEvents();
                 Check(Field<int[]>(form, "_off").SequenceEqual(data.Offsets), "Opening must preserve every imported offset.");
                 Render(form, output, "opened", new(1320, 862));
@@ -43,6 +50,10 @@ internal static class Program
                 Check(saved == null, "Edits and undo must never write to the GPU.");
                 Render(form, output, "edited", new(1320, 862));
                 Render(form, output, "compact", new(900, 660));
+                // Hover the measured mark below a requested stable setting, away from the editable curve.
+                Set(form, "_hoverEvidence", 1);
+                Render(form, output, "evidence-detail", new(900, 660));
+                Set(form, "_hoverEvidence", null!);
                 Control<Button>(form, "RestoreOpened").PerformClick();
                 Check(Field<int[]>(form, "_off").SequenceEqual(data.Offsets), "Restore opened must preserve imported values exactly.");
                 Check(!Control<Button>(form, "RestoreOpened").Enabled, "A restored draft must be clean.");
@@ -72,10 +83,13 @@ internal static class Program
                 Set(form, "_s", 1f); Call(form, "Fonts");
                 form.ClientSize = new(1320, 862);
                 // Typed text is committed by focus change before the save request is copied.
-                input.Focus(); input.Text = (input.Value + 15).ToString(System.Globalization.CultureInfo.CurrentCulture);
+                decimal typed = input.Value + 15;
+                int expectedOffset = CurveModel.Snap((double)typed * 1000);
+                input.Focus(); input.Text = typed.ToString(System.Globalization.CultureInfo.CurrentCulture);
                 Control<Button>(form, "SaveAsDaily").PerformClick();
                 PumpUntil(() => !Field<bool>(form, "_busy"));
                 Check(saved != null && saved.Offsets.SequenceEqual(Field<int[]>(form, "_off")), "Save must copy the committed draft.");
+                Check(saved!.Offsets[66] == expectedOffset, "Save must include the numeric text that was still being edited.");
                 Check(Field<bool>(form, "_done"), "Successful save must display a final result.");
                 Check(!input.Enabled && Control<Button>(form, "SaveAsDaily").Text == "Close", "Saved draft must be locked with a Close action.");
                 Render(form, output, "saved", new(1320, 862));
@@ -89,6 +103,23 @@ internal static class Program
                 PumpUntil(() => !Field<bool>(form, "_busy"));
                 Check(!Field<bool>(form, "_done") && Control<Button>(form, "Details").Visible, "Failed saves must leave a readable diagnostic and editable draft.");
                 Render(form, output, "save-error", new(900, 660));
+                bool detailsChecked = false;
+                using var timer = new System.Windows.Forms.Timer { Interval = 100 };
+                timer.Tick += (_, _) =>
+                {
+                    var dialog = Application.OpenForms.Cast<Form>().FirstOrDefault(window => window != form);
+                    if (dialog == null) return;
+                    timer.Stop();
+                    TextBox? FindText(Control root) => root is TextBox box ? box : root.Controls.Cast<Control>().Select(FindText).FirstOrDefault(box => box != null);
+                    var diagnostic = FindText(dialog);
+                    Check(diagnostic != null && diagnostic.ReadOnly && diagnostic.Text.Contains("This long diagnostic remains available in full"), "Details must preserve the entire diagnostic in a selectable field.");
+                    WindowScreenshot(dialog, output, "save-details");
+                    detailsChecked = true;
+                    dialog.Close();
+                };
+                timer.Start();
+                Control<Button>(form, "Details").PerformClick();
+                Check(detailsChecked, "Details must open with the complete save diagnostic.");
                 Set(form, "_discarding", true);
                 form.Close();
             }
@@ -108,6 +139,7 @@ internal static class Program
 
     private static void Render(CurveEditorForm form, string output, string name, Size size)
     {
+        Console.WriteLine($"Rendering {name}: {size.Width} × {size.Height}");
         form.ClientSize = size;
         form.PerformLayout(); form.Refresh(); Application.DoEvents();
         foreach (Control control in form.Controls)
@@ -118,6 +150,11 @@ internal static class Program
             foreach (Control other in form.Controls)
                 if (other != control && other.Visible) Check(!control.Bounds.IntersectsWith(other.Bounds), $"{name}: {control.Name} overlaps {other.Name}.");
         }
+        WindowScreenshot(form, output, name);
+    }
+
+    private static void WindowScreenshot(Form form, string output, string name)
+    {
         using var full = new Bitmap(form.Width, form.Height);
         form.DrawToBitmap(full, new(Point.Empty, form.Size));
         var client = form.PointToScreen(Point.Empty) - (Size)form.Location;

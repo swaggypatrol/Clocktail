@@ -31,6 +31,7 @@ jobs:
         run: node --test "npm/test/*.test.js"
       - name: Windows editor smoke checks and previews (synthetic data, no GPU)
         if: runner.os == 'Windows'
+        timeout-minutes: 3
         run: dotnet run --project tools/Clocktail.UiPreview -c Release -- --output out/ui-preview
       - name: Editor previews
         if: runner.os == 'Windows' && always()
