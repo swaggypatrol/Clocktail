@@ -131,8 +131,10 @@ public sealed class DriverResetResponder(
                 }
                 if (!down)
                 {
+                    // "start": the trial in force when the service began ends with it; one the agent writes while this
+                    // waits for an idle GPU stays.
                     RecoverLeftovers(id);
-                    Profile(id, "apply", "the broker started", "at start");
+                    Profile(id, "start", "the broker started", "at start");
                     continue;
                 }
                 const string why = "the machine went down holding the profile";

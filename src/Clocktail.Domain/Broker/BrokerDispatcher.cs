@@ -84,7 +84,18 @@ public sealed partial class BrokerDispatcher
         _canWrite = canWrite;
         _judgeBusyReason = judgeBusyReason ?? (() => null);
         _frames = frames;
+        foreach (var id in gpus.Ids)
+            if (gpus.Resolve(id) is { } t)
+                try { _trialAtStart[id] = Identity(Experiment.Load(Experiment.PathBeside(t.Journal.Path))?.Trial); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
+
+    /// <summary>The trial in force when this dispatcher began, per GPU (<see cref="Identity"/>; none: no trial, or the file
+    /// could not be read): the one the start's daily profile ends ("start"). A trial written after it is the agent's.</summary>
+    private readonly Dictionary<string, string?> _trialAtStart = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A trial's identity: its <see cref="ExperimentTrial.Id"/>, or for one written without, when it was written.</summary>
+    private static string? Identity(ExperimentTrial? t) => t == null ? null : t.Id ?? t.At.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
 
     private readonly Fps.IFrameCapture? _frames;
     public Func<string, bool> GameLeaseHeld { get; set; } = _ => false;
@@ -348,7 +359,7 @@ public sealed partial class BrokerDispatcher
             CrashLog.Append(resetLogged, new CrashRecord(_host.Now, _host.BootId, $"driver reset ({req.Value ?? "no detail"}){window}", held.Items));
         }
         var r = new Recovery(RecoveryClient(), target.Journal, target.Sentinel, _host).Run(target.Session, _canWrite);
-        if (r.Clean) _givenBack[target.StableId] = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial?.At;   // off the card now
+        if (r.Clean) _givenBack[target.StableId] = Identity(Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial);   // off the card now
         return new BrokerResponse(r.Clean, Result: Element(new
         {
             success = r.Clean,
@@ -508,6 +519,20 @@ public sealed partial class BrokerDispatcher
                     not_cleared = r.Result is { } c && c.TryGetProperty("not_cleared", out var nc) ? nc : (JsonElement?)null,
                 }), r.Code);
             }
+            case "start":
+            {
+                // The service's daily profile at start, once the GPU is idle: "apply", for the trial in force when this
+                // service began (it ran on a card a reboot or the restart's recovery has given back) or none. A trial
+                // written since is the agent's, written over that card: it stays, and the agent running it decides, as
+                // after a reset. Until 0.8.1 the start's "apply" ended it as survived and put the daily profile over it.
+                if (Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial is { } since
+                    && Identity(since) != _trialAtStart.GetValueOrDefault(target.StableId))
+                {
+                    Log(target, "At start: a trial written since the service started is in force, nothing written", [req.Value is { } w ? $"Reason: {w}" : null, $"Trial: {since.Change}"]);
+                    return Ok(new { success = true, skipped = "a trial began after the service started: the agent running it decides", profile });
+                }
+                goto case "apply";
+            }
             case "apply":
             {
                 // Value: why, for the log ("the broker started", an agent's back_to_daily).
@@ -664,7 +689,7 @@ public sealed partial class BrokerDispatcher
                 return r;
             }
             default:
-                return Fail($"profile needs show, preview, preview-adopt, keep, adopt, off, stock, factory, apply, resume, load, preset, save, saved, forget, wall, apply-power, crashed or after-reset, not '{req.Kind}'", BrokerCode.BadRequest);
+                return Fail($"profile needs show, preview, preview-adopt, keep, adopt, off, stock, factory, apply, start, resume, load, preset, save, saved, forget, wall, apply-power, crashed or after-reset, not '{req.Kind}'", BrokerCode.BadRequest);
         }
     }
 
@@ -884,6 +909,10 @@ public sealed partial class BrokerDispatcher
                     // mark after it would be a second one (a lab step's, or the agent's).
                     if (t.Ending is { } ended)
                         return Fail($"the trial in force has ended ({ended}) and waits for the card to be free to go back; nothing to mark", BrokerCode.CannotWrite);
+                    // Given back by the service's own recovery (a restart's leftovers, before the daily profile goes on once
+                    // the GPU is idle; a driver reset's, before its crash is recorded): the card is not running it.
+                    if (GivenBack(target, t))
+                        return Fail("the service's own recovery (after a restart or a driver reset) gave the trial in force back to stock, so the card is not running it; nothing to mark: write the trial again to test it", BrokerCode.CannotWrite);
                     var point = exp.Point(Experiment.Stable, _host.Now, req.Value)!;
                     Experiment.Append(data, point);
                     (exp with { Trial = t with { Marked = true } }).Save(path);
@@ -1404,14 +1433,15 @@ public sealed partial class BrokerDispatcher
     /// <summary>A time for the tuning log, in local time as its headings are (the host's clock is UTC, the flight recorder's local).</summary>
     private static string When(DateTimeOffset t) => t.ToLocalTime().ToString("HH:mm:ss.f", System.Globalization.CultureInfo.InvariantCulture);
 
-    /// <summary>The trial (its write time, the trial's identity) in force when each GPU's last clean recovery ran
+    /// <summary>The trial (its <see cref="Identity"/>) in force when each GPU's last clean recovery ran
     /// (<see cref="Recover"/>; a driver reset's give-back, before its crash is recorded): the card holds nothing of it. Kept
-    /// by identity and not by time, so a clock set back cannot make a trial written after it look given back. Under the
-    /// operation lock, as every recovery and every trial write is.</summary>
-    private readonly Dictionary<string, DateTimeOffset?> _givenBack = new(StringComparer.OrdinalIgnoreCase);
+    /// by identity and not by time, so a clock set back cannot make a trial written after it look given back, nor one
+    /// written in the same tick. Under the operation lock, as every recovery and every trial write is.</summary>
+    private readonly Dictionary<string, string?> _givenBack = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Whether a recovery took the card off <paramref name="trial"/> (it was in force when one ran).</summary>
-    private bool GivenBack(IGpuTarget target, ExperimentTrial trial) => _givenBack.GetValueOrDefault(target.StableId) == trial.At;
+    private bool GivenBack(IGpuTarget target, ExperimentTrial trial) =>
+        _givenBack.GetValueOrDefault(target.StableId) is { } back && back == Identity(trial);
 
     /// <summary>
     /// A driver reset's crash ("crashed") when the flight recorder says when the GPU stopped answering

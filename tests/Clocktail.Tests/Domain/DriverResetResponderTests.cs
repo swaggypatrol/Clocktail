@@ -138,7 +138,7 @@ public class DriverResetResponderTests
             _asked.Clear(); _profile.Clear();
             Start(resets, trial).ApplyAtStart([]);
             Assert.Equal(BrokerRequest.OpOwnership, Assert.Single(_asked).Op);   // a look for leftovers, nothing to recover
-            Assert.Equal("apply", Assert.Single(_profile).Kind);
+            Assert.Equal("start", Assert.Single(_profile).Kind);
         }
     }
 
@@ -156,7 +156,7 @@ public class DriverResetResponderTests
                 : Recovered(true, "Written");
         }, ["gpu-A"], _log.Add, () => _now, t => _now += t);
         r.ApplyAtStart([]);
-        Assert.Equal([BrokerRequest.OpOwnership, BrokerRequest.OpRecover, "profile:apply"], order);
+        Assert.Equal([BrokerRequest.OpOwnership, BrokerRequest.OpRecover, "profile:start"], order);
         Assert.Contains(_log, l => l.Contains("a write window was left open"));
     }
 

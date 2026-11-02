@@ -1175,6 +1175,40 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal("+15 MHz", Experiment.ReadLast(Experiment.DataPathBeside(_journal.Path), 20)[^1].Change);
     }
 
+    /// <summary>A worker that starts with a trial in force gives its cells back (the service's own recovery, which leaves the
+    /// trial in force until the daily profile goes on once the GPU is idle): a stable mark then is refused, the card is not
+    /// running it. The start's daily profile ("start") ends that trial, and leaves alone one the agent wrote while it waited.
+    /// Before, the mark was taken, and the start's "apply" ended the agent's new trial as survived and put the profile over it.</summary>
+    [Fact]
+    public void After_a_restart_the_given_back_trial_takes_no_mark_and_the_start_ends_only_it()
+    {
+        TrialAt450(() => null);                                                      // the worker before wrote it
+        var d = Power();                                                             // the next one starts with it in force
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpRecover)).Ok);      // its leftovers, given back
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.NotNull(TrialNow());
+        var mark = d.Dispatch(Exp("stable", "lab_test passed"));
+        Assert.Equal(BrokerCode.CannotWrite, mark.Code);
+        Assert.Contains("not running it", mark.Error);
+        Assert.Empty(Outcomes());
+
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "460 W", power_mw = 460_000u, keep_curve = true }))).Ok);
+        int points = Outcomes().Count;
+        var start = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "start", Value: "the broker started"));
+        Assert.True(start.Ok, start.Error);
+        Assert.Contains("after the service started", start.Result!.Value.GetProperty("skipped").GetString());
+        Assert.Equal("460 W", TrialNow()!.Change);                                   // the agent's trial stays on
+        Assert.Equal(460_000u, _requests[0xfe]);
+        Assert.Equal(points, Outcomes().Count);
+
+        // The trial in force when a service began is the one its start ends.
+        var next = Power();
+        Assert.True(next.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "start", Value: "the broker started")).Ok);
+        Assert.Null(TrialNow());
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Equal(Experiment.Survived, Outcomes()[^1]);
+    }
+
     /// <summary>A driver reset after a mark_crash the card held off is that same crash, recorded once (an unattended
     /// session's budget counts it once); the reset took the card off the trial, so it leaves the record.</summary>
     [Fact]
