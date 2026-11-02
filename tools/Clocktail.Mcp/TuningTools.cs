@@ -641,7 +641,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// <summary>The fields of a trial that say nothing about what the card runs: when and why it was written, its identity
     /// (<see cref="TrialId"/>), how it ended, the operating point at the write, and what a hand-back takes off it (a fixed
     /// fan duty, current limits).</summary>
-    private static readonly HashSet<string> NotSettings = ["At", "Id", "Change", "Marked", "Ending", "AtUv", "AtMhz", "FanPct", "NvvddMa", "MsvddMa", "Writes"];
+    private static readonly HashSet<string> NotSettings = ["At", "Id", "JobId", "Change", "Marked", "Ending", "AtUv", "AtMhz", "FanPct", "NvvddMa", "MsvddMa", "Writes"];
 
     /// <summary>The identity of the trial in force, from a "show" or "quiet" answer (ExperimentTrial.Id, kept through a
     /// hand-back); null when no trial is in force, the answer cannot be read, or the service gave the trial none.</summary>
@@ -792,9 +792,11 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         var preview = card.Broker(BrokerRequest.OpProfile, adopt ? "preview-adopt" : "preview");
         if (adopt && preview.Code == BrokerCode.BadRequest) return Older(preview);
         if (!preview.Ok) return Reply(preview);
+        var expected = FullFingerprint(preview);
+        if (expected == null) return Out(new { success = false, error = "update the Clocktail service before keeping a profile: it cannot verify the confirmed values" });
         return await Asked(server, $"Make what is on your graphics card now your daily profile ({Changes(preview)}). Clocktail puts it back after every start and driver reset.", confirm, cancellationToken, () =>
         {
-            var r = card.Broker(BrokerRequest.OpProfile, adopt ? "adopt" : "keep", note);
+            var r = card.Broker(BrokerRequest.OpProfile, adopt ? "adopt" : "keep", note, expectedProfileFingerprint: expected);
             if (!r.Ok || r.Result is not { } res) return Reply(r);
             var writes = res.GetProperty("profile").GetProperty("Writes").EnumerateArray()
                 .Select(w => $"{w.GetProperty("Kind").GetString()}/{w.GetProperty("Key").GetString()} = {w.GetProperty("Value").GetString()}");
@@ -837,6 +839,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// </summary>
     public static string Fingerprint(BrokerAnswer preview)
     {
+        if (FullFingerprint(preview) is { } full) return full[..6];
         List<string> lines = [];
         if (preview.Result is { } r)
         {
@@ -850,6 +853,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", lines)));
         return Convert.ToHexString(hash, 0, 3);
     }
+
+    private static string? FullFingerprint(BrokerAnswer preview) =>
+        preview.Result is { } r && r.TryGetProperty("values_fingerprint", out var f) && f.ValueKind == JsonValueKind.String
+            && f.GetString() is { Length: 64 } hash ? hash : null;
 
     /// <summary>A field's JSON text as it came (any kind of value), or empty when it is missing.</summary>
     private static string Raw(JsonElement e, string name) =>
@@ -909,8 +916,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         // Validate a user-saved name before asking; there are no built-in tuning profiles.
         var preview = card.Broker(BrokerRequest.OpProfile, "preview", name);
         if (!preview.Ok) return Reply(preview);
+        var expected = FullFingerprint(preview);
+        if (expected == null) return Out(new { success = false, error = "update the Clocktail service before loading a profile: it cannot verify the confirmed values" });
         return await Asked(server, $"Load '{name}' as your daily profile and put it on your graphics card now ({Changes(preview)}); Clocktail puts it back after every start.",
-            confirm, cancellationToken, () => Applied(card.Broker(BrokerRequest.OpProfile, "preset", name), null));
+            confirm, cancellationToken, () => Applied(card.Broker(BrokerRequest.OpProfile, "preset", name, expectedProfileFingerprint: expected), null));
     }
 
     [McpServerTool(Name = "install_service", ReadOnly = false, Destructive = true, Idempotent = false, OpenWorld = false), Description(

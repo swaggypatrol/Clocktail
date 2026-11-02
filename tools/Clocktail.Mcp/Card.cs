@@ -295,13 +295,13 @@ public sealed class Card : IDisposable
     /// (<see cref="WriteOutcome"/>; null for the ops that only read). A service that cannot be reached wrote nothing; one
     /// that stops answering after the request went out may have. <paramref name="key"/>: the request's
     /// <see cref="BrokerRequest.Key"/> (for an experiment "crash", the trial the run measured).</summary>
-    public BrokerAnswer Broker(string op, string? kind = null, string? value = null, string? key = null)
+    public BrokerAnswer Broker(string op, string? kind = null, string? value = null, string? key = null, string? expectedProfileFingerprint = null)
     {
         bool reads = op is BrokerRequest.OpPing or BrokerRequest.OpOwnership || kind is "show" or "saved" or "preview" or "preview-adopt" or "alive" or "quiet";
         BrokerResponse? r;
         try
         {
-            var request = new BrokerRequest(op, StableId, Kind: kind, Key: key, Value: value);
+            var request = new BrokerRequest(op, StableId, Kind: kind, Key: key, Value: value, ExpectedProfileFingerprint: expectedProfileFingerprint);
             r = _brokerOverride != null ? _brokerOverride(request) : BrokerClient.TryCall(request);
         }
         catch (Exception e) when (e is IOException or InvalidDataException or ObjectDisposedException or TimeoutException)

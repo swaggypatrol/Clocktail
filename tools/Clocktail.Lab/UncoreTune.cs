@@ -423,7 +423,9 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
             if (Moved() is { } m1) return m1;
             if (a1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the incumbent's own run did not pass: " + (a1.Detail ?? a1.Verdict));
             if (Write(b) is { } wb) return Done(Comparison.Failed, $"the service refused the candidate: {wb}");
-            stamp = TrialAt(out _, out candidateId);
+            stamp = TrialAt(out bool answered, out candidateId);
+            if (!answered || string.IsNullOrWhiteSpace(candidateId))
+                return Done(Comparison.Unjudged, "the service could not identify the candidate to measure: update the service and rerun");
             var b1 = Run(b);
             if (b1.DriverResets > 0) return Reset(b1, candidate: true);
             if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");

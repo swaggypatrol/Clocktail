@@ -77,9 +77,14 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     /// which the service checks against the trial in force when it records it: the job may have let go of the card by then.</summary>
     protected BrokerResponse? Broker(string kind, string? value = null, string op = BrokerRequest.OpExperiment, string? key = null)
     {
-        try { return BrokerClient.TryCall(new BrokerRequest(op, stableId, Kind: kind, Value: value, Lease: RunId, Key: key)); }
+        if (op == BrokerRequest.OpExperiment && kind is "stable" or "crash" && string.IsNullOrWhiteSpace(key))
+            return new BrokerResponse(false, "the measured trial's identity is unknown: no automatic result recorded; update the service and rerun", Code: BrokerCode.CannotWrite);
+        try { return Send(new BrokerRequest(op, stableId, Kind: kind, Value: value, Lease: RunId, Key: key)); }
         catch (Exception e) when (e is IOException or InvalidDataException or ObjectDisposedException or TimeoutException) { return null; }
     }
+
+    /// <summary>The transport boundary; protocol/state tests can exercise job cleanup without a service or a GPU.</summary>
+    protected virtual BrokerResponse? Send(BrokerRequest request) => BrokerClient.TryCall(request);
 
     /// <summary>
     /// Holds the card for one measurement (a candidate written and measured, a comparison's four runs): judge.lock with this
@@ -268,7 +273,9 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     /// back_to_daily tries again), or null.</summary>
     protected string? DailyBack(string why)
     {
-        var r = Broker("apply", why, BrokerRequest.OpProfile);
+        var r = Broker("finish-job", why, BrokerRequest.OpProfile);
+        if (r?.Result is { } result && result.TryGetProperty("skipped", out var skipped) && skipped.ValueKind == JsonValueKind.String)
+            return $"cleanup skipped: {skipped.GetString()}";
         if (r is { Ok: true }) return null;
         // Back on without a group the driver will not take (621.01: MSVDD): the rest is on, and trying again changes nothing.
         if (r?.Result is { } res && res.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True)

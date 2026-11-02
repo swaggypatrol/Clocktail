@@ -2536,4 +2536,116 @@ public class BrokerDispatcherTests : IDisposable
         Assert.False(Clocktail.Domain.Fps.IFrameCapture.LeavesIt("C:\\fps\\a.csv", "C:\\fps\\a.csv", runs: true));
         Assert.False(Clocktail.Domain.Fps.IFrameCapture.LeavesIt(null, "C:\\fps\\b.csv", runs: true));
     }
+
+    private sealed class JobProbe(string dir, Func<BrokerRequest, BrokerResponse> send)
+        : Clocktail.Lab.LabJob("gpu-A", "", 0, dir, "")
+    {
+        protected override BrokerResponse? Send(BrokerRequest request) => send(request);
+        public string? Cleanup() => DailyBack("job finished");
+        public BrokerResponse? Result(string kind) => Broker(kind);
+    }
+
+    [Fact]
+    public void An_old_jobs_cleanup_leaves_the_new_trial_and_hardware_unchanged()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"lab"}""")).Ok);
+        var args = JsonSerializer.Serialize(new { curve = "0*127", change = "job trial", power_mw = 450_000u, keep_curve = true });
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "try", Value: args, Lease: "job-a")).Ok);
+        Assert.Equal("job-a", TrialNow()!.JobId);
+        _host.Now += TimeSpan.FromMinutes(1);
+        Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "another agent", power_mw = 460_000u, keep_curve = true }))).Ok);
+        var other = TrialNow()!;
+        int points = Outcomes().Count;
+        var probe = new JobProbe(Path.Combine(_dir, "job-a"), d.FromClient);
+        Assert.Contains("left unchanged", probe.Cleanup());
+        Assert.Equal(other, TrialNow());
+        Assert.Equal(460_000u, _requests[0xfe]);
+        Assert.Equal(points, Outcomes().Count);
+        Assert.False(d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "try", Value: args, Lease: "job-a")).Ok);
+        Assert.Equal(other, TrialNow());
+        Assert.Equal(460_000u, _requests[0xfe]);
+    }
+
+    [Fact]
+    public void A_jobs_write_can_be_cleaned_up_even_when_its_response_was_lost()
+    {
+        var d = Power();
+        CurrentLimitsFixture.Install();
+        Assert.True(d.Dispatch(Exp("begin", """{"game":"lab"}""")).Ok);
+        // The job never needs to receive this response or query the new trial's Id to restore its own write.
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "try", Lease: "job-a",
+            Value: JsonSerializer.Serialize(new { curve = "0*127", change = "job trial", power_mw = 450_000u, keep_curve = true }))).Ok);
+        var probe = new JobProbe(Path.Combine(_dir, "job-a"), d.FromClient);
+        Assert.Null(probe.Cleanup());
+        Assert.Null(TrialNow());
+        Assert.Equal(575_000u, _requests[0xfe]);
+        int points = Outcomes().Count;
+        Assert.Null(probe.Cleanup());
+        Assert.Equal(points, Outcomes().Count);
+    }
+
+    [Fact]
+    public void An_automatic_result_without_a_trial_identity_never_reaches_the_service()
+    {
+        int calls = 0;
+        var probe = new JobProbe(Path.Combine(_dir, "job-a"), _ => { calls++; return new BrokerResponse(true); });
+        Assert.Equal(BrokerCode.CannotWrite, probe.Result("stable")!.Code);
+        Assert.Equal(BrokerCode.CannotWrite, probe.Result("crash")!.Code);
+        Assert.Equal(0, calls);
+    }
+
+    [Fact]
+    public void A_keep_rechecks_the_approved_values_before_changing_the_profile()
+    {
+        var d = Power();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 560_000)).Ok);
+        string Preview() => d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preview")).Result!.Value.GetProperty("values_fingerprint").GetString()!;
+        string confirmed = Preview();
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpPower, Kind: "fe", Mw: 550_000)).Ok);
+        var refused = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep", ExpectedProfileFingerprint: confirmed));
+        Assert.False(refused.Ok);
+        Assert.Contains("changed after the preview", refused.Error);
+        Assert.Null(DailyProfile.Load(DailyProfile.PathBeside(_journal.Path)));
+        Assert.Equal(550_000u, _requests[0xfe]);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep", ExpectedProfileFingerprint: Preview())).Ok);
+    }
+
+    [Fact]
+    public void A_saved_profile_replaced_during_confirmation_is_not_loaded()
+    {
+        var d = Power();
+        var path = SavedProfiles.PathBeside(_journal.Path);
+        DailyProfile Profile(string mw) => new([new ProfileWrite(PowerCap.Kind, PowerCap.Key(PowerRequestKind.Ordinary), mw)], _host.Now);
+        SavedProfiles.Save(path, "quiet", Profile("560000"));
+        string Preview() => d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preview", Value: "quiet")).Result!.Value.GetProperty("values_fingerprint").GetString()!;
+        string confirmed = Preview();
+        SavedProfiles.Save(path, "quiet", Profile("550000"));
+        var refused = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preset", Value: "quiet", ExpectedProfileFingerprint: confirmed));
+        Assert.False(refused.Ok);
+        Assert.Equal(575_000u, _requests[0xfe]);
+        Assert.Null(DailyProfile.Load(DailyProfile.PathBeside(_journal.Path)));
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preset", Value: "quiet", ExpectedProfileFingerprint: Preview())).Ok);
+        Assert.Equal(550_000u, _requests[0xfe]);
+    }
+
+    [Fact]
+    public void The_profile_fingerprint_includes_values_unchanged_from_the_daily_profile()
+    {
+        var d = Power();
+        string path = DailyProfile.PathBeside(_journal.Path);
+        void Save(string mw) => new DailyProfile([new ProfileWrite(PowerCap.Kind, PowerCap.Key(PowerRequestKind.Ordinary), mw)], _host.Now).Save(path);
+        string Preview()
+        {
+            var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preview")).Result!.Value;
+            Assert.Empty(r.GetProperty("changes").EnumerateArray());
+            return r.GetProperty("values_fingerprint").GetString()!;
+        }
+        Save("560000");
+        string first = Preview();
+        Save("550000");
+        Assert.NotEqual(first, Preview());
+    }
+
 }

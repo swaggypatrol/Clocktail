@@ -4,7 +4,7 @@ There are no built-in tuning presets or default daily settings.
 Clocktail targets the RTX 50 series across board vendors. It does not ship one board's curve, offsets, fan policy or power limit as a starting point.
 A fresh install writes no GPU tuning settings and creates no daily profile.
 ## Keep and switch
-- `preview_daily`: inspect exactly what would be kept, or preview a user-saved profile. Its `values_fingerprint` is in the question `keep_as_daily` and `load_preset` ask: when the values change before the confirmed call, the question changes too and the person is asked again.
+- `preview_daily`: inspect exactly what would be kept, or preview a user-saved profile. Its `values_fingerprint` is in the question `keep_as_daily` and `load_preset` ask. The service checks the complete target profile again when committing: a change while confirmation is pending writes nothing and requires a new preview and confirmation.
 - `keep_as_daily`: after explicit agreement, keep eligible settings from this GPU as its daily profile. `adopt=true` can include settings left by another utility; preview them first.
 - `save_profile name`: save the user's existing daily profile under a chosen name.
 - `list_presets`: retained API name; the built-in `presets` list is empty, and `saved` contains only profiles this user saved for this GPU.

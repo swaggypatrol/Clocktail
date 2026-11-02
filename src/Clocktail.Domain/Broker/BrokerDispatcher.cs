@@ -392,10 +392,12 @@ public sealed partial class BrokerDispatcher
                 bool adopt = req.Kind == "preview-adopt";
                 var (writes, left, _) = req.Value is { Length: > 0 } name && !adopt ? (SavedWrites(target, name), [], []) : KeepWrites(target, profile, adopt);
                 var cardNow = CardValues(target, writes);
+                string source = req.Value is { Length: > 0 } savedName && !adopt ? $"'{savedName}'" : adopt ? "keep_as_daily (adopt)" : "keep_as_daily";
                 return Ok(new
                 {
                     success = true,
-                    source = req.Value is { Length: > 0 } n && !adopt ? $"'{n}'" : adopt ? "keep_as_daily (adopt)" : "keep_as_daily",
+                    source,
+                    values_fingerprint = ProfileSnapshot.Fingerprint(source, writes),
                     changes = DailyProfile.InWriteOrder(writes).Select(w => new
                     {
                         kind = w.Kind, key = w.Key, becomes = w.Value,
@@ -414,6 +416,8 @@ public sealed partial class BrokerDispatcher
                 // can be closed.
                 bool adopt = req.Kind == "adopt";
                 var (writes, _, adopted) = KeepWrites(target, profile, adopt);
+                if (req.ExpectedProfileFingerprint is { } expected && expected != ProfileSnapshot.Fingerprint(adopt ? "keep_as_daily (adopt)" : "keep_as_daily", writes))
+                    return Fail("the profile values changed after the preview: nothing kept; preview and confirm again", BrokerCode.CannotWrite);
                 var inForce = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial;
                 bool trialWall = inForce?.PowerMw != null;
                 // A trial that crashed but is still on the card (its put-back held off) is never what a keep takes from it.
@@ -533,6 +537,14 @@ public sealed partial class BrokerDispatcher
                 }
                 goto case "apply";
             }
+            case "finish-job":
+            {
+                if (string.IsNullOrWhiteSpace(req.Lease)) return Fail("job cleanup needs the job's identity", BrokerCode.BadRequest);
+                var trial = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial;
+                if (trial != null && trial.JobId != req.Lease)
+                    return Ok(new { success = true, skipped = "another trial is in force: left unchanged", trial_id = trial.Id });
+                goto case "apply";
+            }
             case "apply":
             {
                 // Value: why, for the log ("the broker started", an agent's back_to_daily).
@@ -574,7 +586,7 @@ public sealed partial class BrokerDispatcher
             case "preset":
                 // Value: a saved profile's name (the op keeps its old name; no profile ships with Clocktail). It replaces
                 // the daily profile (the old one's writes go into the log) and goes on now.
-                return LoadSaved(target, req.Value, profile, path);
+                return LoadSaved(target, req.Value, profile, path, req.ExpectedProfileFingerprint);
             case "save":
             {
                 // Value: the name, any name. The daily profile as it is kept now, saved under it; one already saved under
@@ -816,6 +828,8 @@ public sealed partial class BrokerDispatcher
                 lock (_experiment)
                 {
                     var exp = Experiment.Load(path) ?? throw new InvalidOperationException("no experiment session is open; begin one first");
+                    if (req.Lease is { Length: > 0 } job && exp.Trial is { } existing && existing.JobId != job)
+                        return Fail("another trial is in force: the job cannot replace it", BrokerCode.CannotWrite);
                     // A trial written while the GPU hangs would be the one the coming reset is blamed on.
                     if (HungReason(target.StableId) is { } hung)
                         return Fail($"the GPU looks hung ({hung}): nothing written; a driver reset usually follows, and the service records it", BrokerCode.GpuHung);
@@ -927,7 +941,7 @@ public sealed partial class BrokerDispatcher
                         XbarKhz: xbarKhz ?? under?.XbarKhz, XbarVdemandUv: xbarVdemand ?? under?.XbarVdemandUv,
                         Writes: extra.Count == 0 ? under?.Writes
                             : [.. (under?.Writes ?? []).Where(b => !extra.Any(n => n.Kind == b.Kind && n.Key == b.Key)), .. extra],
-                        Id: Guid.NewGuid().ToString("n"));
+                        Id: Guid.NewGuid().ToString("n"), JobId: req.Lease);
                     (exp with { Trial = trial }).Save(path);
                     Log(target, $"Trial · {exp.Game}", [
                         $"Change: {change}",
@@ -1228,7 +1242,7 @@ public sealed partial class BrokerDispatcher
     }
 
     /// <summary>"preset" with a saved profile's name: it becomes the daily profile and goes on.</summary>
-    private BrokerResponse LoadSaved(IGpuTarget target, string? value, DailyProfile? profile, string path)
+    private BrokerResponse LoadSaved(IGpuTarget target, string? value, DailyProfile? profile, string path, string? expectedFingerprint)
     {
         var file = SavedProfiles.PathBeside(target.Journal.Path);
         if (SavedProfiles.Find(file, value) is not var (name, saved))
@@ -1236,6 +1250,8 @@ public sealed partial class BrokerDispatcher
             var known = SavedProfiles.All(file).Select(p => $"'{p.Name}'").ToList();
             return Fail($"no saved profile named '{value}' ({(known.Count > 0 ? $"saved: {string.Join(", ", known)}" : "none is saved yet: save_profile keeps the daily profile under a name")})", BrokerCode.CannotWrite);
         }
+        if (expectedFingerprint != null && expectedFingerprint != ProfileSnapshot.Fingerprint($"'{value}'", saved.Writes))
+            return Fail("the saved profile changed after the preview: nothing loaded; preview and confirm again", BrokerCode.CannotWrite);
         var loaded = new DailyProfile(DailyProfile.InWriteOrder(saved.Writes), _host.Now, History: profile?.History).On(target.Vbios, target.Driver)
             .Noted(_host.Now, $"saved profile '{name}' loaded");
         var r = Leave(target, Experiment.Survived, $"saved profile '{name}' went on", _ => Loading(target, $"saved profile '{name}'", loaded, profile, path)).Answer;

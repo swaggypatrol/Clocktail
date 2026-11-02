@@ -78,4 +78,17 @@ public class ConsentValuesTests
         Assert.Contains("(F8) to 450.001 W for a test", TuningTools.PowerCapQuestion(450_001));
         Assert.NotEqual(TuningTools.PowerCapQuestion(450_000), TuningTools.PowerCapQuestion(450_040));
     }
+
+    [Fact]
+    public void The_display_fingerprint_comes_from_the_services_complete_snapshot()
+    {
+        string full = Clocktail.Domain.Profiles.ProfileSnapshot.Fingerprint("keep_as_daily", [new("power", "fe", "550000")]);
+        var preview = new BrokerAnswer(true, JsonSerializer.SerializeToElement(new
+        {
+            source = "keep_as_daily", changes = Array.Empty<object>(), values_fingerprint = full,
+        }), null);
+        Assert.Equal(full[..6], TuningTools.Fingerprint(preview));
+        Assert.Contains(full[..6], TuningTools.Changes(preview));
+    }
+
 }
