@@ -37,18 +37,22 @@ public sealed class DriverResetResponder(
     private readonly SemaphoreSlim _signal = new(0);
     private sealed record Seen(string Evidence, IReadOnlyDictionary<string, uint> CrashUv,
         IReadOnlyDictionary<string, (DateTimeOffset Answered, DateTimeOffset Stopped)> Hung);
-    private Seen _last = new("", new Dictionary<string, uint>(), new Dictionary<string, (DateTimeOffset, DateTimeOffset)>());
+    /// <summary>The resets signalled and not yet answered, oldest first, each with its own evidence and hang.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentQueue<Seen> _seen = new();
 
     /// <summary>
-    /// Called once a reset is seen: a burst of events is answered once. <paramref name="crashUv"/> is each GPU's core
+    /// Called once a reset is seen (the broker answers a burst of events once, ResetBursts): each signal is answered as a
+    /// reset of its own, in order. <paramref name="crashUv"/> is each GPU's core
     /// voltage at the hang from the flight recorder, where it found one, for the record; <paramref name="hung"/> when each
     /// GPU stopped answering and the last look before at which it still answered (<see cref="Profiles.FlightRecorder.Hang"/>),
     /// so that the crash goes to the trial on the card then, whatever took it off the record before the crash is recorded.
+    /// Until 0.8.1 one slot held the last signal, so a reset signalled while an earlier one was answered replaced the
+    /// evidence and hang of any other still waiting.
     /// </summary>
     public void Signal(string evidence, IReadOnlyDictionary<string, uint>? crashUv = null,
         IReadOnlyDictionary<string, (DateTimeOffset Answered, DateTimeOffset Stopped)>? hung = null)
     {
-        Volatile.Write(ref _last, new Seen(evidence, crashUv ?? new Dictionary<string, uint>(), hung ?? new Dictionary<string, (DateTimeOffset, DateTimeOffset)>()));
+        _seen.Enqueue(new Seen(evidence, crashUv ?? new Dictionary<string, uint>(), hung ?? new Dictionary<string, (DateTimeOffset, DateTimeOffset)>()));
         _signal.Release();
     }
 
@@ -59,9 +63,10 @@ public sealed class DriverResetResponder(
             try { await _signal.WaitAsync(ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { return; }
             sleep(SettleFor);
-            while (_signal.Wait(0)) { }   // the events of one reset arrive together
-            var (evidence, crashUv, hung) = Volatile.Read(ref _last);
-            Respond(evidence, crashUv, hung);
+            while (_signal.Wait(0)) { }   // each signal is in the queue: the count is not needed
+            // The resets signalled by now, in order; one signalled while they are answered is settled for in the next pass
+            // (its release comes after this count).
+            for (int n = _seen.Count; n > 0 && _seen.TryDequeue(out var seen); n--) Respond(seen.Evidence, seen.CrashUv, seen.Hung);
         }
     }
 
@@ -221,29 +226,50 @@ public sealed class DriverResetResponder(
 
     private bool Profile(string gpuId, string kind, string? evidence, string when)
     {
-        if (!WaitIdle(gpuId))
+        // After a reset the wait gives way: "after-reset" leaves a trial in force alone, so once the agent has begun one
+        // the step is sent at once (and skips it), and a newer reset puts the profile back on itself once answered. The
+        // loop that answers resets waits here, so until 0.8.1 a game kept running after a crash held every later reset's
+        // give-back and record until the GPU idled, up to 4 h.
+        bool afterReset = kind == "after-reset";
+        switch (WaitIdle(gpuId, afterReset ? () => !_seen.IsEmpty : null, afterReset ? () => TrialInForce(gpuId) : null))
         {
-            log($"gpu {gpuId}: daily profile {when}: the GPU was not idle for {IdleWaitAtMost.TotalHours:0} h; not applied (the card stays at stock)");
-            return false;
+            case Waited.TooLong:
+                log($"gpu {gpuId}: daily profile {when}: the GPU was not idle for {IdleWaitAtMost.TotalHours:0} h; not applied (the card stays at stock)");
+                return false;
+            case Waited.NewerReset:
+                log($"gpu {gpuId}: daily profile {when}: a newer driver reset came first; it is answered now, and its answer puts the profile back once the GPU is idle");
+                return false;
         }
         var p = perform(new BrokerRequest(BrokerRequest.OpProfile, gpuId, Kind: kind, Value: evidence));
         log($"gpu {gpuId}: daily profile {when}: {ProfileSummary(p)}");
         return p.Ok;
     }
 
-    private bool WaitIdle(string gpuId)
+    private enum Waited { Idle, TrialInForce, NewerReset, TooLong }
+
+    /// <summary>Until <see cref="IdleLooks"/> idle looks in a row, at most <see cref="IdleWaitAtMost"/>; after a busy look it
+    /// gives way to a newer reset (<paramref name="newerReset"/>) or a trial in force (<paramref name="trialInForce"/>).</summary>
+    private Waited WaitIdle(string gpuId, Func<bool>? newerReset = null, Func<bool>? trialInForce = null)
     {
-        if (idle == null) return true;
+        if (idle == null) return Waited.Idle;
         var deadline = now() + IdleWaitAtMost;
         for (int run = 0; run < IdleLooks;)
         {
             run = idle(gpuId) ? run + 1 : 0;
             if (run == IdleLooks) break;
-            if (now() > deadline) return false;
+            if (run == 0 && newerReset?.Invoke() == true) return Waited.NewerReset;
+            if (run == 0 && trialInForce?.Invoke() == true) return Waited.TrialInForce;
+            if (now() > deadline) return Waited.TooLong;
             sleep(RetryEvery);
         }
-        return true;
+        return Waited.Idle;
     }
+
+    /// <summary>Whether a trial is in force now ("show"); false when that cannot be read.</summary>
+    private bool TrialInForce(string gpuId) =>
+        perform(new BrokerRequest(BrokerRequest.OpExperiment, gpuId, Kind: "show")).Result is { } res
+        && res.TryGetProperty("experiment", out var e) && e.ValueKind == System.Text.Json.JsonValueKind.Object
+        && e.TryGetProperty("Trial", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.Object;
 
     public static string ProfileSummary(BrokerResponse r)
     {

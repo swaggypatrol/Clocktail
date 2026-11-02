@@ -107,6 +107,66 @@ public class DriverResetResponderTests
         Assert.Null(_profile[0].HungAt);   // a crash found at start has no flight recording: the trial in force
     }
 
+    /// <summary>The game kept running after the crash, and the agent began a new trial: the profile step after the reset
+    /// would skip it anyway, so the wait for an idle GPU gives way at once instead of holding the loop that answers the next
+    /// reset for up to 4 h.</summary>
+    [Fact]
+    public void After_a_reset_the_idle_wait_gives_way_to_a_trial_the_agent_has_begun()
+    {
+        int shows = 0;
+        var r = new DriverResetResponder(req =>
+        {
+            if (req.Op == BrokerRequest.OpProfile) { _profile.Add(req); return new BrokerResponse(true, Result: JsonSerializer.SerializeToElement(new { success = true, skipped = "a trial began after the crash: the agent running it decides" })); }
+            if (req.Op == BrokerRequest.OpExperiment)
+                return new BrokerResponse(true, Result: JsonSerializer.SerializeToElement(new { success = true, experiment = new { Game = "KCD2", Trial = ++shows < 3 ? null : new { Change = "-15" } } }));
+            return Recovered(true, "Written");
+        }, ["gpu-A"], _log.Add, () => _now, t => _now += t, _ => false);   // the game keeps the GPU busy
+        var start = _now;
+        Assert.True(r.Respond("nvlddmkm 153"));
+        Assert.Equal(["crashed", "apply-power", "after-reset"], _profile.Select(p => p.Kind));
+        Assert.Equal(3, shows);
+        Assert.True(_now - start < TimeSpan.FromMinutes(1));
+        Assert.Contains("a trial began after the crash", _log[^1]);
+    }
+
+    /// <summary>Two resets signalled before the first is answered are answered in order, each with its own hang (the crash
+    /// goes to the trial on the card at each); the first's profile step, waiting for an idle GPU, gives way to the second,
+    /// whose answer puts the profile back. Before, one slot held the last signal: the first reset's hang was lost, and a
+    /// reset during the idle wait waited for it.</summary>
+    [Fact]
+    public async Task Each_reset_signalled_is_answered_with_its_own_hang()
+    {
+        using var done = new ManualResetEventSlim();
+        int looks = 0;
+        var r = new DriverResetResponder(req =>
+        {
+            if (req.Op == BrokerRequest.OpProfile)
+            {
+                lock (_profile) _profile.Add(req);
+                if (req.Kind == "after-reset") done.Set();
+                return new BrokerResponse(true, Result: JsonSerializer.SerializeToElement(new { success = true }));
+            }
+            if (req.Op == BrokerRequest.OpExperiment)
+                return new BrokerResponse(true, Result: JsonSerializer.SerializeToElement(new { success = true, experiment = (object?)null }));
+            return Recovered(true, "Written");
+        }, ["gpu-A"], _log.Add, () => _now, t => _now += t, _ => ++looks > 1);   // busy at the first look only
+        var first = (_now.AddSeconds(-20), _now.AddSeconds(-19));
+        var second = (_now.AddSeconds(-2), _now.AddSeconds(-1));
+        r.Signal("nvlddmkm 153 (first)", hung: new Dictionary<string, (DateTimeOffset, DateTimeOffset)> { ["gpu-A"] = first });
+        r.Signal("nvlddmkm 153 (second)", hung: new Dictionary<string, (DateTimeOffset, DateTimeOffset)> { ["gpu-A"] = second });
+        using var cts = new CancellationTokenSource();
+        var run = Task.Run(() => r.RunAsync(cts.Token));
+        Assert.True(done.Wait(TimeSpan.FromSeconds(10)));
+        cts.Cancel();
+        await run;
+
+        Assert.Equal(["crashed", "apply-power", "crashed", "apply-power", "after-reset"], _profile.Select(p => p.Kind));
+        Assert.Equal([first.Item2, second.Item2], _profile.Where(p => p.Kind == "crashed").Select(p => p.HungAt!.Value));
+        Assert.Equal(["nvlddmkm 153 (first)", "nvlddmkm 153 (second)"], _profile.Where(p => p.Kind == "crashed").Select(p => p.Value!));
+        Assert.Equal("nvlddmkm 153 (second)", _profile[^1].Value);
+        Assert.Contains(_log, l => l.Contains("a newer driver reset came first"));
+    }
+
     [Fact]
     public void An_answer_that_throws_is_logged_and_the_next_reset_is_still_answered()
     {
