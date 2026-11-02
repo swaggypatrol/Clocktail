@@ -115,6 +115,10 @@ Measure these trials, then show me what would be saved before making anything pe
 
 Rather do the curve by hand? Ask your agent **"Open the V/F curve editor."** A window opens on your desktop with this card's curve, and everything Clocktail has learned about it drawn on top:
 
+![The V/F editor with switchable evidence layers, a selected-point inspector and precise offset input](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/curve-editor-v0.8.5.png)
+
+*Actual Windows rendering with synthetic preview data; no GPU is connected in this preview.*
+
 - **Every crash, pinned to the point it happened at.** A solid cross means it crashed during a curve trial.
 - **Stable settings and sampled clocks, separately.** Green marks show sampled clocks from tests marked stable. Amber hollow marks show a stable setting that was not reached or has no samples. Survived settings have their own dotted marks. Past evidence does not certify your draft.
 - **Where the card ran**, as a haze of dots from historical samples taken under load. Brighter dots mean more time; this is a snapshot, not a live monitor. Switch the history, evidence, crashes, opened curve and base clocks on or off.

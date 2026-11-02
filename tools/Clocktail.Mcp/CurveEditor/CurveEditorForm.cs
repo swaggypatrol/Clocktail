@@ -973,7 +973,7 @@ public sealed partial class CurveEditorForm : Form
                 if (ev.HeldBelowMhz != null) lines.Add(("The test did not demonstrate stability at the requested setting", Unverified));
             }
             if (ev.SurvivedMhz is { } survived) lines.Add(($"Highest survived setting: {Fmt(survived)} MHz", AxisText));
-            lines.Add(("Historical evidence · current draft is untested", Dim));
+            lines.Add(("Historical evidence · no guarantee of draft stability", Dim));
             at = new PointF(X(ev.Mv), Y(ev.StableMhz ?? ev.SurvivedMhz ?? _vy0));
         }
         else if (_hoverLine == 2)
