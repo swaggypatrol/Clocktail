@@ -78,4 +78,6 @@ jobs:
 
       - name: npm publish
         if: steps.plan.outputs.npm == 'publish'
-        run: npm publish "out/clocktail-${{ steps.plan.outputs.ver }}.tgz" --access public
+        # With ./ in front: to npm, "out/clocktail-0.7.0.tgz" is the GitHub shorthand user/repo, and it goes to ask git for
+        # it (v0.7.0's first run: "Permission denied (publickey)" from ssh://git@github.com/out/clocktail-0.7.0.tgz.git).
+        run: npm publish "./out/clocktail-${{ steps.plan.outputs.ver }}.tgz" --access public
