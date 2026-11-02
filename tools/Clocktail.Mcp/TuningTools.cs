@@ -950,11 +950,18 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
 
     /// <summary>Every curve point's record across the data points the residency samples cover: the highest offset a stable
     /// or survived trial ran it at, the lowest a crash found it at (the curve editor draws these beside its points).</summary>
-    private SortedDictionary<int, PointRecord> PointRecords(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve)
+    private SortedDictionary<int, PointRecord> PointRecords(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve,
+        Action<DataPoint, int>? visit = null)
+    {
+        if (all.Count == 0) return [];
+        var ticks = residency.Between(all.Min(d => d.At - TimeSpan.FromMinutes(d.Minutes)), DateTimeOffset.Now);
+        return PointRecordsFrom(all, curve, ticks, visit);
+    }
+
+    private static SortedDictionary<int, PointRecord> PointRecordsFrom(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve,
+        IReadOnlyList<Residency.Tick> ticks, Action<DataPoint, int>? visit = null)
     {
         var records = new SortedDictionary<int, PointRecord>();
-        if (all.Count == 0) return records;
-        var ticks = residency.Between(all.Min(d => d.At - TimeSpan.FromMinutes(d.Minutes)), DateTimeOffset.Now);
         foreach (var d in all)
         {
             var start = d.At - TimeSpan.FromMinutes(d.Minutes);
@@ -977,6 +984,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             }
             foreach (var s in Stays(during, curve).Where(s => s.Share >= 0.1))
             {
+                if (d.Outcome is Experiment.Stable or Experiment.Survived) visit?.Invoke(d, s.Index);
                 int off = offsets.ElementAtOrDefault(s.Index);
                 if (!records.TryGetValue(s.Index, out var rec)) records[s.Index] = rec = new PointRecord();
                 switch (d.Outcome)

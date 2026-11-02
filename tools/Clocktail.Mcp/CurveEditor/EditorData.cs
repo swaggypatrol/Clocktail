@@ -1,3 +1,6 @@
+using Clocktail.Domain.Profiles;
+using Clocktail.Domain.Vf;
+
 namespace Clocktail.Mcp.CurveEditor;
 
 /// <summary>Where the card actually ran (the residency samples under load), binned: a voltage, a clock and how many seconds.</summary>
@@ -7,7 +10,23 @@ public sealed record RunBin(double Mv, double Mhz, int Seconds);
 /// clock the card ran (null when no sample sat on the point). <paramref name="CurveTrial"/>: the trial changed the curve,
 /// so the crash is evidence about the curve; otherwise (an XBAR, memory, power or fan trial) the curve was only what was on
 /// the card when something else failed.</summary>
-public sealed record CrashMark(int Index, double Mv, double SetMhz, double? RanMhz, DateTimeOffset At, string Game, string Change, bool CurveTrial);
+public sealed record CrashMark(int Index, double Mv, double SetMhz, double? RanMhz, DateTimeOffset At, string Game, string Change, bool CurveTrial, string RecordId);
+
+/// <summary>A complete historical test and every plotted point it contributed to. One deletion removes the test,
+/// not just one of the marks it produced.</summary>
+public sealed record TestMark(DataPoint Record, IReadOnlyList<int> Indices);
+
+public sealed record HistoryData(IReadOnlyList<CrashMark> Crashes, IReadOnlyList<EvidenceMark> Evidence, IReadOnlyList<TestMark> Tests)
+{
+    /// <summary>All overlapping records stay reachable, including tests below the current highest stable mark.</summary>
+    public static IReadOnlyList<DataPoint> Select(IReadOnlyList<TestMark> tests, IEnumerable<int> indices, IEnumerable<string> recordIds)
+    {
+        var points = indices.ToHashSet();
+        var ids = recordIds.ToHashSet(StringComparer.Ordinal);
+        return [.. tests.Where(t => t.Indices.Any(points.Contains) || ids.Contains(Experiment.PointId(t.Record)))
+            .Select(t => t.Record).DistinctBy(Experiment.PointId).OrderByDescending(p => p.At)];
+    }
+}
 
 /// <summary>What the record says about one curve point (data_points' by_point): the clock of the highest offset a trial
 /// marked stable ran it at, for how long, and of the highest a trial survived at.</summary>
@@ -38,7 +57,9 @@ public sealed record EditorData(
     /// opened), as sorted "kind/key" names: the save checks they are still the same.</summary>
     IReadOnlyList<string> AlsoKeptKeys,
     /// <summary>The same for the person, with what the daily profile would lose; null when a keep changes nothing but the curve.</summary>
-    string? AlsoKept);
+    string? AlsoKept,
+    IReadOnlyList<TestMark> Tests,
+    VfCurveSnapshot Curve);
 
 /// <summary>What the save button hands over: the offsets, and the band they were drawn with (remembered for next time).</summary>
 public sealed record SaveRequest(int[] Offsets, int Foot, int Top);

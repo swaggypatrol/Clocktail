@@ -168,9 +168,9 @@ public static class CurveModel
         for (int i = 0; i < n; i++)
         {
             if (offsets[i] == opened[i]) continue;
-            if (offsets[i] % GridKhz != 0) return $"{mv[i]} mV 的 offset {offsets[i] / 1000.0} MHz 不在 7.5 MHz 步进上";
+            if (offsets[i] % GridKhz != 0) return $"Offset {offsets[i] / 1000.0} MHz at {mv[i]} mV is not on the 7.5 MHz grid";
             if (offsets[i] < lowKhz || offsets[i] > highKhz)
-                return $"{mv[i]} mV 的 offset {offsets[i] / 1000.0} MHz 超出固件范围 [{lowKhz / 1000.0}, {highKhz / 1000.0}] MHz";
+                return $"Offset {offsets[i] / 1000.0} MHz at {mv[i]} mV is outside the firmware range [{lowKhz / 1000.0}, {highKhz / 1000.0}] MHz";
         }
         return null;
     }
@@ -187,7 +187,7 @@ public static class CurveModel
     }
 
     /// <summary>
-    /// One click of "平滑" on the person's part: the running clocks of points <paramref name="from"/>..<paramref name="to"/>
+    /// One click of "Smooth" on the person's part: the running clocks of points <paramref name="from"/>..<paramref name="to"/>
     /// through a Gaussian over voltage (<paramref name="sigmaMv"/>; the kernel stays inside the span, and the first point,
     /// the band's top, keeps its clock), then made monotonic by pooling adjacent violators (the least-squares monotonic
     /// fit), back onto the grid as offsets. Clicking again smooths more. The caller puts the result through

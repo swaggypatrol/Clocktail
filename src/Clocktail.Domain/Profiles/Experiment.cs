@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using Clocktail.Domain.Platform;
 
 namespace Clocktail.Domain.Profiles;
@@ -129,7 +131,7 @@ public sealed record Experiment(string Game, string? Note, DateTimeOffset Starte
 
     /// <summary>The crashes recorded in this session so far.</summary>
     public int CrashesSince(string dataPath) =>
-        ReadLast(dataPath, 1000).Count(p => p.Outcome == Crash && p.At >= StartedAt && p.Game == Game);
+        ReadLast(dataPath, 1000, includeDeleted: true).Count(p => p.Outcome == Crash && p.At >= StartedAt && p.Game == Game);
 
     /// <summary>The trial's data point with this outcome; null when there is no trial.</summary>
     public DataPoint? Point(string outcome, DateTimeOffset at, string? note = null, uint? crashUv = null) =>
@@ -144,15 +146,58 @@ public sealed record Experiment(string Game, string? Note, DateTimeOffset Starte
         File.AppendAllText(dataPath, JsonSerializer.Serialize(point, Line) + "\n");
     }
 
-    /// <summary>The last <paramref name="count"/> data points, oldest first; a line that does not parse is skipped.</summary>
-    public static IReadOnlyList<DataPoint> ReadLast(string dataPath, int count)
+    /// <summary>A stable identity for a complete test record, not just its timestamp or curve point.</summary>
+    public static string PointId(DataPoint point) =>
+        Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(point, Line)));
+
+    public static string DeletedDirectory(string dataPath) => dataPath + ".deleted";
+
+    /// <summary>Delete a test from history without rewriting the broker's append-only journal. One independent marker
+    /// per record makes concurrent deletes and appends safe across servers. The original remains for audit/recovery;
+    /// safety accounting explicitly reads it, so removing history cannot replenish a session's crash budget.</summary>
+    public static void DeletePoint(string dataPath, DataPoint point)
+    {
+        string id = PointId(point);
+        if (!ReadLast(dataPath, int.MaxValue, includeDeleted: true).Any(p => PointId(p) == id))
+            throw new InvalidOperationException("This test record no longer exists; reopen the window.");
+        string dir = DeletedDirectory(dataPath);
+        Directory.CreateDirectory(dir);
+        string path = Path.Combine(dir, id + ".json");
+        FileStream file;
+        try
+        {
+            file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+        }
+        catch (IOException) when (File.Exists(path)) { return; } // already deleted by another window
+        using (file)
+        {
+            // Existence is the commit: even an interrupted metadata write still records the deletion.
+            file.Write(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { deletedAt = DateTimeOffset.UtcNow, point }, Line)));
+            file.Flush(flushToDisk: true);
+        }
+    }
+
+    /// <summary>The last <paramref name="count"/> visible data points, oldest first; a line that does not parse is skipped.
+    /// Safety/recovery callers can include deleted records; ordinary readers see the same history as the editor.</summary>
+    public static IReadOnlyList<DataPoint> ReadLast(string dataPath, int count, bool includeDeleted = false)
     {
         if (!File.Exists(dataPath)) return [];
+        string dir = DeletedDirectory(dataPath);
+        var deleted = !includeDeleted && Directory.Exists(dir)
+            ? Directory.EnumerateFiles(dir, "*.json").Select(p => Path.GetFileNameWithoutExtension(p)).ToHashSet(StringComparer.Ordinal)
+            : [];
         var points = new List<DataPoint>();
-        foreach (var line in File.ReadLines(dataPath))
+        // The broker may append while an editor reads or deletes history. Never lock it out of its journal.
+        using var stream = new FileStream(dataPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        while (reader.ReadLine() is { } line)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
-            try { if (JsonSerializer.Deserialize<DataPoint>(line, Line) is { } p) points.Add(p); }
+            try
+            {
+                if (JsonSerializer.Deserialize<DataPoint>(line, Line) is { } p && (deleted.Count == 0 || !deleted.Contains(PointId(p))))
+                    points.Add(p);
+            }
             catch (JsonException) { }
         }
         return points.Count <= count ? points : points.GetRange(points.Count - count, count);

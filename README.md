@@ -107,6 +107,8 @@ I'm playing Cyberpunk tonight on the new curve. Watch the card the whole time. I
 Measure these trials, then show me what would be saved before making anything persistent.
 ```
 
+Want to draw it yourself? Ask **"Open the V/F curve editor."** The English desktop window shows your curve, crashes, stability evidence and running points. Drag to edit; **Confirm & Save as Daily** applies it. Right-click a curve or evidence point to select and confirm deletion of a historical test. History deletion is immediate and independent of curve saving; the original journal is retained for recovery.
+
 </details>
 
 <details>

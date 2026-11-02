@@ -13,14 +13,14 @@ namespace Clocktail.Mcp;
 /// The V/F curve editor window (the user, 2026-11-01): the person asks the agent for it, drags the curve by hand, and
 /// their click on the window's save button is their own approval (the "dialog" kind of <see cref="Consent"/>, in a window
 /// of its own): the curve goes on the card as one trial, is read back, and is kept as the daily profile; then the window
-/// closes. Opening it changes nothing; closing it any other way writes nothing.
+/// closes. Opening it changes nothing; history deletions are separately confirmed and take effect immediately.
 /// </summary>
 public sealed partial class TuningTools
 {
     /// <summary>How far back the running points go: the residency day files.</summary>
     public static readonly TimeSpan RunsSpan = TimeSpan.FromDays(60);
     /// <summary>The session the window opens for its save when none is open.</summary>
-    public const string EditorGame = "V/F 曲线编辑器";
+    public const string EditorGame = "V/F Curve Editor";
     /// <summary>Beside the GPU's records: the curve the window saved last and the band it was drawn with, so the same band
     /// is shown again while the card still holds that curve (a detection alone would reopen a widened band narrower).</summary>
     public const string BandFile = "curve-editor.json";
@@ -33,7 +33,9 @@ public sealed partial class TuningTools
         "marked stable or survived at, and where the card actually ran (the residency samples under load). Under the top of " +
         "the curve's low-voltage cliff it reshapes the cliff as a smooth transition band (no point under the band's foot is " +
         "lifted; both ends are draggable lines); above it the person drags freely, one button smooths, and the clock never " +
-        "falls (the driver's own rule). The person's own click on '确认并保存为 Daily' in the window is their approval: it " +
+        "falls (the driver's own rule). Right-click a curve, crash or evidence point to select and confirm deletion of a " +
+        "historical test; this takes effect immediately without changing GPU settings. The person's own click on " +
+        "'Confirm & Save as Daily' in the window is their approval: it " +
         "writes the curve as one trial (opening a session itself when none is open), checks the readback, keeps it as the " +
         "daily profile (with any other trial settings in force, which the window names) and closes. Returns at once; call " +
         "again to bring the window to the front or to read how the last one ended. Opening it writes nothing.")]
@@ -48,7 +50,14 @@ public sealed partial class TuningTools
         EditorData data;
         try { data = EditorData(); }
         catch { EditorState.Release(); throw; }
-        CurveEditorForm.Show(data, (request, progress) => SaveFromEditor(data, request, progress), outcome =>
+        CurveEditorForm.Show(data, (request, progress) => SaveFromEditor(data, request, progress), point =>
+        {
+            if (data.Dir == null) throw new InvalidOperationException("The GPU's history directory is unavailable.");
+            var path = Path.Combine(data.Dir, Experiment.DataFileName);
+            Experiment.DeletePoint(path, point);
+            // Rebuild using the opened curve's voltage/base mapping, never the user's unsaved edits.
+            return ReadEditorHistory(path, data.Mv, data.BaseKhz, data.Curve);
+        }, outcome =>
         {
             EditorState.Closed(outcome);
             try { card.Broker(BrokerRequest.OpExperiment, "note", $"Curve editor window closed: {outcome}"); } catch (Exception e) when (e is IOException or InvalidOperationException) { }
@@ -56,7 +65,7 @@ public sealed partial class TuningTools
         return Out(new
         {
             success = true, opened = true,
-            note = "the window is on the person's desktop; nothing is written until they click 确认并保存为 Daily there, which keeps the curve as the daily profile and closes it. Call curve_editor again later to read how it ended.",
+            note = "the window is on the person's desktop; GPU settings change only on Confirm & Save as Daily. Right-click a point to delete a historical test after confirmation (immediate, independent of curve saving). Call curve_editor again later to read how it ended.",
             points = data.Mv.Length, crashes_marked = data.Crashes.Count, evidence_points = data.Evidence.Count, running_bins = data.Runs.Count,
             band = data.Band is { } b ? string.Create(CultureInfo.InvariantCulture, $"{data.Mv[b.Foot]}-{data.Mv[b.Top]} mV, as saved last time") : null,
             also_kept = data.AlsoKept, leftover = Leftover(), last = EditorState.Last,
@@ -80,7 +89,7 @@ public sealed partial class TuningTools
     {
         var show = card.Broker(BrokerRequest.OpExperiment, "show");
         return show.Ok && show.Result is { } r && r.TryGetProperty("experiment", out var e) && e.ValueKind == JsonValueKind.Object
-            && Str(e, "Game") == EditorGame && e.TryGetProperty("Trial", out var t) && t.ValueKind == JsonValueKind.Object
+            && (Str(e, "Game") is EditorGame or "V/F 曲线编辑器") && e.TryGetProperty("Trial", out var t) && t.ValueKind == JsonValueKind.Object
             ? $"an earlier save from the window did not finish: its trial is still on the card (session '{EditorGame}'); back_to_daily or end_session puts the daily profile back"
             : null;
     }
@@ -103,8 +112,7 @@ public sealed partial class TuningTools
         int[] baseKhz = [.. pts.Select(p => (int)p.BaseKhz + global)];
         int[] offsets = look.Curve.Offsets();
 
-        var crashes = new List<CrashMark>();
-        var evidence = new List<EvidenceMark>();
+        HistoryData history = new([], [], []);
         var runs = new List<RunBin>();
         string? dir = null;
         (int, int)? band = null;
@@ -114,40 +122,70 @@ public sealed partial class TuningTools
         {
             dir = Path.GetDirectoryName(dataPath);
             band = ReadBand(dir, offsets);
-            var all = Experiment.ReadLast(dataPath, int.MaxValue);
-            var at = ticks.Select(t => t.At).ToList();
-            foreach (var d in all.Where(d => d.Outcome == Experiment.Crash))
-            {
-                int[] then;
-                try { then = VfOffsets.Decode(d.Curve); } catch (FormatException) { continue; }
-                if (then.Length != pts.Count) continue;
-                var start = d.At - TimeSpan.FromMinutes(d.Minutes);
-                int lo = at.BinarySearch(start), hi = at.BinarySearch(d.At);
-                lo = lo < 0 ? ~lo : lo; hi = hi < 0 ? ~hi : hi + 1;
-                var during = ticks.GetRange(lo, Math.Max(0, hi - lo));
-                IReadOnlyList<(int Index, uint? ClockMhz)> where = during.Count >= 10 ? CrashAt(during, d.CrashUv, look.Curve)
-                    : d.CrashUv is { } uv && Nearest(look.Curve, uv) is { } p ? [(p.Index, null)] : [];
-                var thenEff = CurveModel.Effective(baseKhz, then);
-                foreach (var (index, clock) in where)
-                {
-                    if (index >= pts.Count) continue;
-                    crashes.Add(new CrashMark(index, mv[index], thenEff[index] / 1000.0, clock, d.At, d.Game, d.Change, CurveTrialChange(d.Change)));
-                }
-            }
-            foreach (var (index, rec) in PointRecords(all, look.Curve))
-            {
-                if (index >= pts.Count || (rec.StableKhz == null && rec.SurvivedKhz == null)) continue;
-                evidence.Add(new EvidenceMark(index, mv[index],
-                    rec.StableKhz is { } s ? CurveModel.Clock(baseKhz, index, s) / 1000.0 : null, rec.StableSeconds,
-                    rec.SurvivedKhz is { } v ? CurveModel.Clock(baseKhz, index, v) / 1000.0 : null));
-            }
+            history = ReadEditorHistory(dataPath, mv, baseKhz, look.Curve);
         }
         foreach (var g in ticks.GroupBy(t => (Mv: Math.Round(t.Uv / 1000.0), Step: (int)Math.Round(t.Mhz / 7.5))))
             runs.Add(new RunBin(g.Key.Mv, g.Key.Step * 7.5, g.Count()));
 
         var (keys, also) = KeptBesideCurve();
         return new EditorData(card.Name, mv, baseKhz, offsets, Math.Min(pts.Count, VfRules.WritablePoints), lowKhz, highKhz,
-            look.NvvddVminUv / 1000.0, look.NvvddMaxUv / 1000.0, crashes, evidence, runs, band, dir, keys, also);
+            look.NvvddVminUv / 1000.0, look.NvvddMaxUv / 1000.0, history.Crashes, history.Evidence, runs, band, dir, keys, also,
+            history.Tests, look.Curve);
+    }
+
+    private HistoryData ReadEditorHistory(string dataPath, double[] mv, int[] baseKhz, VfCurveSnapshot curve)
+    {
+        var all = Experiment.ReadLast(dataPath, int.MaxValue);
+        var ticks = all.Count == 0 ? [] : residency.Between(all.Min(d => d.At - TimeSpan.FromMinutes(d.Minutes)), DateTimeOffset.Now);
+        return ProjectEditorHistory(all, mv, baseKhz, curve, ticks);
+    }
+
+    /// <summary>Rebuild the plotted history from visible tests and their samples, without reading or writing the GPU.
+    /// The same projection runs when opening the window and after deleting a test.</summary>
+    public static HistoryData ProjectEditorHistory(IReadOnlyList<DataPoint> all, double[] mv, int[] baseKhz,
+        VfCurveSnapshot curve, IReadOnlyList<Residency.Tick> samples)
+    {
+        var ticks = samples.OrderBy(t => t.At).ToList();
+        var crashes = new List<CrashMark>();
+        var evidence = new List<EvidenceMark>();
+        var indices = new Dictionary<DataPoint, HashSet<int>>();
+        void Visit(DataPoint d, int index)
+        {
+            if (!indices.TryGetValue(d, out var set)) indices[d] = set = [];
+            set.Add(index);
+        }
+        var at = ticks.Select(t => t.At).ToList();
+        foreach (var d in all.Where(d => d.Outcome == Experiment.Crash))
+        {
+            int[] then;
+            try { then = VfOffsets.Decode(d.Curve); } catch (FormatException) { continue; }
+            if (then.Length != mv.Length) continue;
+            var start = d.At - TimeSpan.FromMinutes(d.Minutes);
+            int lo = at.BinarySearch(start), hi = at.BinarySearch(d.At);
+            lo = lo < 0 ? ~lo : lo; hi = hi < 0 ? ~hi : hi + 1;
+            var during = ticks.GetRange(lo, Math.Max(0, hi - lo));
+            IReadOnlyList<(int Index, uint? ClockMhz)> where = during.Count >= 10 ? CrashAt(during, d.CrashUv, curve)
+                : d.CrashUv is { } uv && Nearest(curve, uv) is { } p ? [(p.Index, null)] : [];
+            var thenEff = CurveModel.Effective(baseKhz, then);
+            foreach (var (index, clock) in where)
+            {
+                if (index >= mv.Length) continue;
+                crashes.Add(new CrashMark(index, mv[index], thenEff[index] / 1000.0, clock, d.At, d.Game, d.Change, CurveTrialChange(d.Change), Experiment.PointId(d)));
+                Visit(d, index);
+            }
+        }
+        foreach (var (index, rec) in PointRecordsFrom(all, curve, ticks, Visit))
+        {
+            if (index >= mv.Length || (rec.StableKhz == null && rec.SurvivedKhz == null)) continue;
+            evidence.Add(new EvidenceMark(index, mv[index],
+                rec.StableKhz is { } s ? CurveModel.Clock(baseKhz, index, s) / 1000.0 : null, rec.StableSeconds,
+                rec.SurvivedKhz is { } v ? CurveModel.Clock(baseKhz, index, v) / 1000.0 : null));
+        }
+        // Older tests without residency still remain selectable from their recorded operating voltage.
+        foreach (var d in all)
+            if (!indices.ContainsKey(d) && (d.CrashUv ?? d.AtUv) is { } uv && Nearest(curve, uv) is { } p)
+                Visit(d, p.Index);
+        return new HistoryData(crashes, evidence, [.. indices.Select(kv => new TestMark(kv.Key, [.. kv.Value.Order()]))]);
     }
 
     /// <summary>What a keep would take beside the curve, from the broker's preview: the other settings' sorted "kind/key"
@@ -167,9 +205,9 @@ public sealed partial class TuningTools
                 if (x.GetString() is { } s && s.Split(" = ")[0].Split('/') is { Length: 2 } kk && kk[0] != VfWrites.Kind)
                     dropped.Add(Setting(kk[0], kk[1]));
         var parts = new List<string>();
-        if (kept.Count > 0) parts.Add($"一并保留当前试验中的：{string.Join(", ", kept.Select(k => k.Name).Distinct())}");
-        if (dropped.Count > 0) parts.Add($"不再保留 daily 里的：{string.Join(", ", dropped.Distinct())}");
-        return ([.. kept.Select(k => k.Key).Order(StringComparer.Ordinal)], parts.Count > 0 ? string.Join("；", parts) : null);
+        if (kept.Count > 0) parts.Add($"keeps from the current trial: {string.Join(", ", kept.Select(k => k.Name).Distinct())}");
+        if (dropped.Count > 0) parts.Add($"drops from Daily: {string.Join(", ", dropped.Distinct())}");
+        return ([.. kept.Select(k => k.Key).Order(StringComparer.Ordinal)], parts.Count > 0 ? string.Join("; ", parts) : null);
     }
 
     private sealed record BandRecord(string Curve, int Foot, int Top, DateTimeOffset SavedAt);
@@ -200,7 +238,7 @@ public sealed partial class TuningTools
     /// on). Every refusal says what the card holds afterwards.</summary>
     private SaveResult SaveFromEditor(EditorData data, SaveRequest request, Action<string> progress)
     {
-        if (!SaveGate.Wait(0)) return new SaveResult(false, null, "另一次保存正在进行");
+        if (!SaveGate.Wait(0)) return new SaveResult(false, null, "Another save is in progress");
         try { using (EditorState.Saving()) return SaveNow(data, request, progress); }
         finally { SaveGate.Release(); }
     }
@@ -210,16 +248,16 @@ public sealed partial class TuningTools
         var target = request.Offsets;
         var look = card.Read();
         var now = look.Curve.Offsets();
-        if (target.Length != now.Length) return new SaveResult(false, null, $"显卡曲线的点数变了（{now.Length}，窗口里是 {target.Length}）：没有写入；请关掉窗口重新打开");
+        if (target.Length != now.Length) return new SaveResult(false, null, $"GPU point count changed ({now.Length}, window has {target.Length}): nothing written; close and reopen the window");
         // The window drew on the curve as opened: a trial written since (by an agent) would be overwritten unseen.
-        if (!now.SequenceEqual(data.Offsets)) return new SaveResult(false, null, "窗口打开后显卡上的曲线被改过（另一个试验或 agent）：没有写入；请关掉窗口重新打开");
+        if (!now.SequenceEqual(data.Offsets)) return new SaveResult(false, null, "GPU curve changed since opening (another trial or agent): nothing written; close and reopen the window");
         bool began = false, wrote = false;
         // The card may hold the window's curve: the daily profile back (the session the window opened ended with it).
         SaveResult Undo(string why)
         {
             var r = began ? card.Broker(BrokerRequest.OpExperiment, "end") : card.Broker(BrokerRequest.OpProfile, "apply", "curve editor: " + why);
-            return new SaveResult(false, null, r.Ok ? why + "；已回到原 daily"
-                : why + $"；回到 daily 没有完全成功（{r.Error}）：请让 agent 执行 back_to_daily，或先看 card_settings");
+            return new SaveResult(false, null, r.Ok ? why + "; restored the previous Daily"
+                : why + $"; Daily was not fully restored ({r.Error}): ask your agent to run back_to_daily or inspect card_settings");
         }
         // Nothing of the window's on the card: a session it opened is ended; the card is not touched otherwise.
         SaveResult Refused(string why)
@@ -233,15 +271,15 @@ public sealed partial class TuningTools
             bool open = show.Ok && show.Result is { } sr && sr.TryGetProperty("experiment", out var e) && e.ValueKind == JsonValueKind.Object;
             if (!open)
             {
-                progress("正在开启试验会话…");
+                progress("Starting a test session…");
                 var b = card.Broker(BrokerRequest.OpExperiment, "begin", JsonSerializer.Serialize(new
                 {
                     game = EditorGame, note = "the person edited the curve in the curve_editor window and clicked its save button", unattended = false,
                 }));
-                if (!b.Ok) return new SaveResult(false, null, $"无法开启会话：{b.Error}");
+                if (!b.Ok) return new SaveResult(false, null, $"Cannot start session: {b.Error}");
                 began = true;
             }
-            progress("正在写入曲线…");
+            progress("Applying curve…");
             var bases = look.Curve.Points.Select(q => (int)q.BaseKhz).ToArray();
             var moved = look.Curve.Points.Where(p => target[p.Index] != now[p.Index]).ToList();
             var context = new List<string> { Readings(look), "Purpose: drawn by the person in the curve editor window" };
@@ -258,38 +296,38 @@ public sealed partial class TuningTools
                 // A hung GPU is written to by nobody; a refusal that wrote nothing needs no put-back (and must not take an
                 // agent's own trial off the card); anything else may have landed in part.
                 if (t.Code == BrokerCode.GpuHung)
-                    return new SaveResult(false, null, $"显卡看起来已经挂起（{t.Error}）：没有写入，通常随后会有驱动重置" + (began ? "；窗口开的会话留着，由 agent 的 end_session 收尾" : ""));
-                if (t.Written == WriteOutcome.None) return Refused($"写入被拒绝：{t.Error}");
+                    return new SaveResult(false, null, $"GPU appears hung ({t.Error}): nothing written; a driver reset usually follows" + (began ? "; the window's session remains open for the agent to end_session" : ""));
+                if (t.Written == WriteOutcome.None) return Refused($"Write refused: {t.Error}");
                 wrote = true;
-                return Undo($"写入失败：{t.Error}");
+                return Undo($"Write failed: {t.Error}");
             }
             wrote = true;
-            progress("正在回读核对…");
+            progress("Verifying readback…");
             int[] after;
             try { after = card.Read().Curve.Offsets(); }
             catch (Exception x) when (x is InvalidOperationException or InvalidDataException or Clocktail.Hw.NvApiException or Clocktail.Hw.NvmlException)
-            { return Undo($"写入后读不回曲线：{x.Message}"); }
+            { return Undo($"Cannot read curve after writing: {x.Message}"); }
             if (!after.SequenceEqual(target))
             {
                 int bad = Enumerable.Range(0, target.Length).First(i => after[i] != target[i]);
-                return Undo($"驱动回读不一致（第 {bad} 点：想要 {target[bad] / 1000.0} MHz，读到 {after[bad] / 1000.0} MHz）");
+                return Undo($"Driver readback mismatch (point {bad}: requested {target[bad] / 1000.0} MHz, read {after[bad] / 1000.0} MHz)");
             }
         }
         // What a keep would take beside the curve, now: the window named what was in force when it opened.
         var (keysNow, wordsNow) = KeptBesideCurve();
         if (!keysNow.SequenceEqual(data.AlsoKeptKeys))
         {
-            string why = $"保存会一并保留的其他设定变了（现在：{wordsNow ?? "只有曲线"}；窗口打开时：{data.AlsoKept ?? "只有曲线"}）：没有保存为 Daily；请关掉窗口重新打开";
+            string why = $"Other settings to keep changed (now: {wordsNow ?? "curve only"}; opened: {data.AlsoKept ?? "curve only"}): not saved as Daily; close and reopen the window";
             return wrote ? Undo(why) : Refused(why);
         }
-        progress("正在保存为 Daily…");
-        var k = card.Broker(BrokerRequest.OpProfile, "keep", "drawn in the curve editor window; the person clicked 确认并保存为 Daily");
+        progress("Saving as Daily…");
+        var k = card.Broker(BrokerRequest.OpProfile, "keep", "drawn in the curve editor window; the person clicked Confirm & Save as Daily");
         // The broker saves the profile and then switches the card to it; a wall or limit that did not go back is reported
         // as a failure with saved=true: the daily profile is this curve all the same.
         bool saved = k.Ok || (k.Result is { } kr && kr.TryGetProperty("saved", out var sv) && sv.ValueKind == JsonValueKind.True);
-        if (!saved) return wrote ? Undo($"保存 Daily 失败：{k.Error}") : Refused($"保存 Daily 失败：{k.Error}");
+        if (!saved) return wrote ? Undo($"Saving Daily failed: {k.Error}") : Refused($"Saving Daily failed: {k.Error}");
         WriteBand(data.Dir, target, request.Foot, request.Top);
         if (began) card.Broker(BrokerRequest.OpExperiment, "end");   // no trial is left after a keep: the daily, this curve, stays on
-        return new SaveResult(true, k.Ok ? null : $"显卡还没完全切换到新的 daily（{k.Error}）：让 agent 执行 back_to_daily 或 load_daily 再试一次", null);
+        return new SaveResult(true, k.Ok ? null : $"GPU has not fully switched to the new Daily ({k.Error}): ask your agent to retry with back_to_daily or load_daily", null);
     }
 }
