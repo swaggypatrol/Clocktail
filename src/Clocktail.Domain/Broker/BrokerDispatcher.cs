@@ -1540,6 +1540,10 @@ public sealed partial class BrokerDispatcher
     /// </summary>
     private static bool Left(BrokerResponse r) => r.Ok || Partial(r) || r.Code is not (BrokerCode.JudgeBusy or BrokerCode.WindowBusy);
 
+    /// <summary>Refused because the card was held busy (a stability run holding it, another operation in the window): asked
+    /// again once it is free, it lands.</summary>
+    private static bool HeldBusy(BrokerResponse r) => r.Code is BrokerCode.JudgeBusy or BrokerCode.WindowBusy;
+
     /// <summary>ApplyProfile's answer when everything went on but whole groups the driver will not take.</summary>
     private static bool Partial(BrokerResponse r) =>
         r.Result is { ValueKind: JsonValueKind.Object } res && res.TryGetProperty("partial", out var p) && p.ValueKind == JsonValueKind.True;
@@ -1567,12 +1571,15 @@ public sealed partial class BrokerDispatcher
     /// again without that group, which puts any cell of it this broker holds back to its original, and the other groups go
     /// on as kept. The card is then never left with half of a run, the curve set aside for a memory write and never
     /// written back. The answer fails, names each group left at stock and why (not_applied), and carries every write.
-    /// <paramref name="trialStays"/>: under a trial that stays in force, nothing held is put back first.
+    /// A write the card was held busy for (<see cref="HeldBusy"/>) is no such group: the run stops there, as the put-back's
+    /// own refusal does. <paramref name="trialStays"/>: under a trial that stays in force, nothing held is put back first.
     /// </summary>
     private BrokerResponse ApplyProfile(IGpuTarget target, DailyProfile? profile, string path, Func<ProfileWrite, bool>? only = null, bool trialStays = false)
     {
         var (r, failed) = ApplyOnce(target, profile, path, only, trialStays);
-        if (failed == null || profile == null) return r;
+        // A write the card was held busy for (a stability run, another operation) is not one the driver will not take:
+        // nothing more of the operation is written, so its group is not left out, and the refusal is the answer.
+        if (failed == null || profile == null || HeldBusy(r)) return r;
         var runs = new List<BrokerResponse> { r };
         var left = new List<(string Group, List<string> Cells, string Why)>();
         var writing = profile;
@@ -1584,6 +1591,7 @@ public sealed partial class BrokerDispatcher
             writing = writing with { Writes = [.. writing.Writes.Where(w => !In(w))] };
             (r, failed) = ApplyOnce(target, writing, path, only, trialStays);
             runs.Add(r);
+            if (HeldBusy(r)) failed = null;   // the rest waits for the card: "did not all go on", not left at stock
         }
         // The later runs write again what the first one already put on; only what they changed is worth a line.
         var applied = runs.Take(1).SelectMany(AppliedOf)

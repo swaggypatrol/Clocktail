@@ -934,6 +934,30 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal([Experiment.Survived, Experiment.Crash], Outcomes());   // nothing written twice
     }
 
+    /// <summary>back_to_daily refused because a stability run holds the card says so, and nothing more: the profile's power
+    /// limit is not a group the driver will not take, left at stock. Before, the refused write dropped its group, the next
+    /// run's put-back was refused too, and the answer said the power limit "stays at stock" over a card still on the trial.</summary>
+    [Fact]
+    public void A_daily_profile_held_off_by_a_stability_run_names_no_group_left_at_stock()
+    {
+        string? busy = null;
+        var d = TrialAt450(() => busy);
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "560000")).Ok);   // kept, not written under the trial's wall
+
+        busy = "clocktail-lab (pid 4242)";
+        var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily"));
+        Assert.Equal(BrokerCode.JudgeBusy, r.Code);
+        Assert.DoesNotContain("stays at stock", r.Error);
+        Assert.Contains("a stability run is in progress", r.Error);
+        Assert.False(r.Result is { } res && res.TryGetProperty("not_applied", out _));
+        Assert.Equal(450_000u, _requests[0xfe]);   // the card still runs the trial
+        Assert.NotNull(TrialNow());
+
+        busy = null;
+        Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "back_to_daily")).Ok);
+        Assert.Equal(560_000u, _requests[0xfe]);
+    }
+
     /// <summary>A new session over a trial the card did not let go of does not begin, and the trial stays in force, so
     /// asking again puts it back first. Until 0.3.7 the first ask took the trial off the record, and the second began the
     /// new session over a card still at the old trial's 450 W.</summary>
