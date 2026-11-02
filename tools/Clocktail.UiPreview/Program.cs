@@ -1,10 +1,13 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using Clocktail.Domain.Vf;
 using Clocktail.Mcp.CurveEditor;
 
 internal static class Program
 {
+    [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window, out NativeRect rect);
+    [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
     private static T Field<T>(CurveEditorForm form, string name) => (T)typeof(CurveEditorForm).GetField(name, Private)!.GetValue(form)!;
     private static void Set(CurveEditorForm form, string name, object value) => typeof(CurveEditorForm).GetField(name, Private)!.SetValue(form, value);
@@ -155,8 +158,13 @@ internal static class Program
     private static void Render(CurveEditorForm form, string output, string name, Size size)
     {
         Console.WriteLine($"Rendering {name}: {size.Width} × {size.Height}");
+        // Hosted runners have a small desktop. Raise the native tracking maximum, otherwise Windows clamps the HWND
+        // while WinForms temporarily reports the requested client size and a large preview is silently cropped.
+        form.MaximumSize = new(4096, 4096);
         form.ClientSize = size;
         form.PerformLayout(); form.Refresh(); Application.DoEvents();
+        Check(GetClientRect(form.Handle, out var native) && native.Right - native.Left == size.Width && native.Bottom - native.Top == size.Height,
+            $"{name}: the native window must match the requested client size.");
         foreach (Control control in form.Controls)
         {
             if (!control.Visible) continue;
@@ -173,7 +181,11 @@ internal static class Program
         Console.WriteLine($"Window {form.Size}, client {form.ClientSize}");
         using var full = new Bitmap(form.Width, form.Height);
         form.DrawToBitmap(full, new(Point.Empty, form.Size));
-        full.Save(Path.Combine(output, name + ".png"), System.Drawing.Imaging.ImageFormat.Png);
+        var origin = form.PointToScreen(Point.Empty) - (Size)form.Location;
+        var crop = new Rectangle(origin, form.ClientSize);
+        Check(new Rectangle(Point.Empty, full.Size).Contains(crop), "Client capture must fit inside the native window.");
+        using var client = full.Clone(crop, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        client.Save(Path.Combine(output, name + ".png"), System.Drawing.Imaging.ImageFormat.Png);
     }
 
     private static EditorData Fixture()
@@ -189,7 +201,8 @@ internal static class Program
         {
             int i = random.Next(34, 83);
             return new RunBin(mv[i], Clock(i) - random.Next(0, 9) * 15, random.Next(1, 400));
-        }).Append(new(mv[46], Clock(46) - 15, 2400)).ToArray();
+        }).Append(new(mv[46], Clock(46) - 15, 2400)).GroupBy(r => (r.Mv, r.Mhz))
+            .Select(group => new RunBin(group.Key.Mv, group.Key.Mhz, group.Sum(r => r.Seconds))).ToArray();
         EvidenceMark[] evidence = [.. new[] { 38, 42, 46, 50, 54, 58, 62, 66, 70, 74, 78 }.Select(i =>
             new EvidenceMark(i, mv[i], Clock(i) + 15, 1800, Clock(i) + 45,
                 i == 42 ? Clock(i) - 90 : i == 58 ? null : Clock(i) + 7.5))];

@@ -860,8 +860,8 @@ public sealed partial class CurveEditorForm : Form
         {
             if (r.Mv < _vx0 - 5 || r.Mv > _vx1 + 5 || r.Mhz < _vy0 - 50 || r.Mhz > _vy1 + 50) continue;
             double t = Math.Log(1 + r.Seconds) / Math.Log(1 + _runMax);
-            float rad = (float)(1.8 + 3.0 * t) * _s;
-            using var b = new SolidBrush(Color.FromArgb((int)(35 + 190 * t), RunC));
+            float rad = (float)(1.2 + 1.8 * t) * _s;
+            using var b = new SolidBrush(Color.FromArgb((int)(18 + 100 * t), RunC));
             g.FillEllipse(b, X(r.Mv) - rad, Y(r.Mhz) - rad, rad * 2, rad * 2);
         }
         g.ResetClip();

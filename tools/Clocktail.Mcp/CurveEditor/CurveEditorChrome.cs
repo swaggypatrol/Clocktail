@@ -201,7 +201,7 @@ public sealed partial class CurveEditorForm
         if (w / s >= 970)
             TextLine(g, "History snapshot · not live", _small, Dim, new(660 * s, 136 * s, w - 684 * s, 28 * s), StringAlignment.Far);
         using var pen = new Pen(C(0x253140), s);
-        g.DrawLine(pen, 24 * s, 176 * s, w - 24 * s, 176 * s);
+        g.DrawLine(pen, 24 * s, 168 * s, w - 24 * s, 168 * s);
     }
 
     private void Inspector(Graphics g, float w, float h)
@@ -274,6 +274,11 @@ public sealed partial class CurveEditorForm
         };
         var close = DetailAction("Close"); close.DialogResult = DialogResult.Cancel;
         var copy = DetailAction("Copy details");
+        foreach (var button in new[] { close, copy })
+        {
+            button.FlatAppearance.BorderColor = PanelBorder;
+            button.FlatAppearance.MouseOverBackColor = C(0x29374a);
+        }
         copy.Click += (_, _) =>
         {
             try { Clipboard.SetText(details); copy.Text = "Copied"; }
@@ -284,6 +289,7 @@ public sealed partial class CurveEditorForm
         content.Controls.Add(text);
         dialog.Controls.Add(content); dialog.Controls.Add(buttons);
         dialog.CancelButton = close;
+        dialog.Shown += (_, _) => { text.Select(0, 0); text.ScrollToCaret(); close.Focus(); };
         dialog.ShowDialog(this);
     }
 }
