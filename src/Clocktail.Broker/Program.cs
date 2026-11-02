@@ -166,20 +166,13 @@ static int Run()
     {
         var target = targets.Resolve(targets.Ids.Single())!;
         string recovery = Clocktail.Domain.Game.GameSession.PathBeside(target.Journal.Path);
-        bool initialized = false;
+        // The start runs once, whether or not a game recovery it ran inside then landed.
+        var start = new StartupRecovery(() => responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList()));
         while (!cts.IsCancellationRequested)
         {
-            if (File.Exists(recovery) || File.Exists(AtomicFile.BackupPath(recovery)))
-            {
-                // A live job holds the card mutex, including while it waits for reset recovery. Never race it.
-                Action startup = initialized ? () => { } : () => responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList());
-                if (RecoverGame(dispatcher, target.StableId, host, Log, startup)) initialized = true;
-            }
-            else if (!initialized)
-            {
-                responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList());
-                initialized = true;
-            }
+            // A live job holds the card mutex, including while it waits for reset recovery. Never race it.
+            start.Pass(File.Exists(recovery) || File.Exists(AtomicFile.BackupPath(recovery)),
+                startup => RecoverGame(dispatcher, target.StableId, host, Log, startup));
             try { await Task.Delay(TimeSpan.FromSeconds(5), cts.Token).ConfigureAwait(false); }
             catch (OperationCanceledException) { return; }
         }
