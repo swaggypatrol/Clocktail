@@ -958,8 +958,8 @@ public sealed partial class CurveEditorForm : Form
         else if (_hoverRun is { } r0)
         {
             var r = _d.Runs[r0];
-            lines.Add(($"Historical load  {Fmt(r.Mv)} mV · {Fmt(r.Mhz)} MHz", RunC));
-            lines.Add(($"{Duration(r.Seconds)} · samples at ≥50% load · not live", Dim));
+            lines.Add(($"Observed operation  {Fmt(r.Mv)} mV · {Fmt(r.Mhz)} MHz", RunC));
+            lines.Add(($"{Duration(r.Seconds)} observed · not a stability test · not live", Dim));
             at = new PointF(X(r.Mv), Y(r.Mhz));
         }
         else if (_hoverEvidence is { } e0)
@@ -1020,6 +1020,7 @@ public sealed partial class CurveEditorForm : Form
         }
     }
 
+    private static string Duration(double seconds) => seconds is > 0 and < 0.5 ? "<1 s" : Duration((int)Math.Round(seconds));
     private static string Duration(int seconds) => seconds >= 3600 ? $"{seconds / 3600.0:0.#} h" : seconds >= 60 ? $"{seconds / 60.0:0.#} min" : $"{seconds} s";
 
     private void Legend(Graphics g, float y)
@@ -1044,7 +1045,7 @@ public sealed partial class CurveEditorForm : Form
         if (_showReference.Checked) Item(StockC, "Base", true);
         if (_showEvidence.Checked) { Item(Good, "Stable sample"); Item(Unverified, "Unverified setting", marker: 'b'); Item(AxisText, "Survived", true); }
         if (_showCrashes.Checked) Item(CrashC, "Crash", marker: 'x');
-        if (_showHistory.Checked) Item(RunC, "Historical load", marker: 'o');
+        if (_showHistory.Checked) Item(RunC, "Observed V/F", marker: 'o');
     }
 
     private static GraphicsPath Round(RectangleF r, float rad)

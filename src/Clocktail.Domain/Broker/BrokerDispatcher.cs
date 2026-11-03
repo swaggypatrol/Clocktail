@@ -103,6 +103,15 @@ public sealed partial class BrokerDispatcher
     /// <summary>Why a GPU looks hung right now (the broker's flight recorder; <see cref="FlightRecorder.HungNow"/>), or null.</summary>
     public Func<string, string?> HungReason { get; set; } = _ => null;
 
+    /// <summary>How the broker's always-on V/F history is doing (written, queued, dropped, a write failing), for ping and
+    /// experiment "show"; null where no recorder runs (tests, an older broker answers without the field).</summary>
+    public Func<object?> HistoryStatus { get; set; } = () => null;
+
+    private object? HistoryStatusOrNull()
+    {
+        try { return HistoryStatus(); } catch (Exception) { return null; }
+    }
+
     /// <summary>
     /// One whole operation at a time: a profile op or a trial reads the profile and the experiment, writes the card and
     /// saves them, and the write window alone covers only the write in the middle (two "wall"s could leave the card at one
@@ -220,6 +229,7 @@ public sealed partial class BrokerDispatcher
                 {
                     pong = true, pid = _host.Pid, can_write = _canWrite, gpus = _gpus.Ids, game_protocol = Game.GameSession.Protocol,
                     paths = WriteRegistry.All.Select(p => new { kind = p.Kind, keys = p.Keys, values = p.Values, checks_after_write = p.AfterWrite, equal_value_proof = p.ProveEqual != null }),
+                    vf_history = HistoryStatusOrNull(),
                 });
 
             var target = _gpus.Resolve(req.GpuId);
@@ -744,7 +754,7 @@ public sealed partial class BrokerDispatcher
         switch (req.Kind)
         {
             case "show":
-                return Ok(new { success = true, path, data, experiment = Experiment.Load(path), points = Experiment.ReadLast(data, 20) });
+                return Ok(new { success = true, path, data, experiment = Experiment.Load(path), points = Experiment.ReadLast(data, 20), vf_history = HistoryStatusOrNull() });
             case "begin":
             {
                 var a = Args(req.Value);

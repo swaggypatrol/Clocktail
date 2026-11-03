@@ -3,8 +3,10 @@ using Clocktail.Domain.Vf;
 
 namespace Clocktail.Mcp.CurveEditor;
 
-/// <summary>Where the card actually ran (the residency samples under load), binned: a voltage, a clock and how many seconds.</summary>
-public sealed record RunBin(double Mv, double Mhz, int Seconds);
+/// <summary>Where the card actually ran, binned: a voltage, a clock and the observed seconds there (the broker's always-on
+/// V/F history above 825 mV and the residency samples at 50 % load or more, merged by observed time). Observed operation,
+/// not a stability result.</summary>
+public sealed record RunBin(double Mv, double Mhz, double Seconds);
 
 /// <summary>A crash pinned to a curve point (data_points' rule): the clock the curve set there when it crashed, and the
 /// clock the card ran (null when no sample sat on the point). <paramref name="CurveTrial"/>: the trial changed the curve,

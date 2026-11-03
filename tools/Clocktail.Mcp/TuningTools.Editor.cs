@@ -17,7 +17,7 @@ namespace Clocktail.Mcp;
 /// </summary>
 public sealed partial class TuningTools
 {
-    /// <summary>How far back the running points go: the residency day files.</summary>
+    /// <summary>How far back the running points go: the residency day files and the broker's V/F history day files.</summary>
     public static readonly TimeSpan RunsSpan = TimeSpan.FromDays(60);
     /// <summary>The session the window opens for its save when none is open.</summary>
     public const string EditorGame = "V/F Curve Editor";
@@ -30,7 +30,9 @@ public sealed partial class TuningTools
     [McpServerTool(Name = "curve_editor", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Open the V/F curve editor window on the person's desktop, when they ask for it. It shows this GPU's curve (dark, " +
         "points dragged by hand), every crash pinned to the curve point it happened at, the highest setting each point was " +
-        "marked stable or survived at, and where the card actually ran (the residency samples under load). Under the top of " +
+        "marked stable or survived at, and where the card actually ran over the last 60 days, weighted by observed time (the " +
+        "broker's always-on V/F history of every look above 825 mV NVVDD, light loads included, plus the residency samples at " +
+        "50% load or more; observed operation, not a stability result). Under the top of " +
         "the curve's low-voltage cliff edits reshape the cliff as a smooth transition band (no point under the band's foot is " +
         "lifted; both ends are draggable lines); above it the person drags freely, one button smooths, and the clock never " +
         "falls (the driver's own rule). Right-click a curve, crash or evidence point to select and confirm deletion of a " +
@@ -49,7 +51,8 @@ public sealed partial class TuningTools
             return Out(new { success = true, opened = false, note = "the curve editor is already open: brought to the front", last = EditorState.Last });
         }
         EditorData data;
-        try { data = EditorData(); }
+        object observed;
+        try { data = EditorData(out observed); }
         catch { EditorState.Release(); throw; }
         CurveEditorForm.Show(data, (request, progress) => SaveFromEditor(data, request, progress), point =>
         {
@@ -68,6 +71,7 @@ public sealed partial class TuningTools
             success = true, opened = true,
             note = "the window is on the person's desktop; GPU settings change only on Save as Daily. Right-click a point to delete a historical test after confirmation (immediate, independent of curve saving). Call curve_editor again later to read how it ended.",
             points = data.Mv.Length, crashes_marked = data.Crashes.Count, evidence_points = data.Evidence.Count, running_bins = data.Runs.Count,
+            observed,
             band = data.Band is { } b ? string.Create(CultureInfo.InvariantCulture, $"{data.Mv[b.Foot]}-{data.Mv[b.Top]} mV, as saved last time") : null,
             also_kept = data.AlsoKept, leftover = Leftover(), last = EditorState.Last,
         });
@@ -91,8 +95,9 @@ public sealed partial class TuningTools
             : null;
     }
 
-    /// <summary>The curve, the firmware range, the crashes on their points, each point's evidence and the running samples, read once.</summary>
-    private EditorData EditorData()
+    /// <summary>The curve, the firmware range, the crashes on their points, each point's evidence and where the card ran,
+    /// read once; <paramref name="info"/>: the observed seconds of each source and the broker's V/F history status.</summary>
+    private EditorData EditorData(out object info)
     {
         var look = card.Read();
         var pts = look.Curve.Points;
@@ -110,19 +115,29 @@ public sealed partial class TuningTools
         int[] offsets = look.Curve.Offsets();
 
         HistoryData history = new([], [], []);
-        var runs = new List<RunBin>();
         string? dir = null;
         (int, int)? band = null;
         var show = card.Broker(BrokerRequest.OpExperiment, "show");
-        var ticks = residency.Between(DateTimeOffset.Now - RunsSpan, DateTimeOffset.Now).OrderBy(t => t.At).ToList();
+        var now = DateTimeOffset.Now;
+        var ticks = residency.Between(now - RunsSpan, now);
         if (show.Ok && show.Result is { } res && res.TryGetProperty("data", out var dp) && dp.GetString() is { } dataPath)
         {
             dir = Path.GetDirectoryName(dataPath);
             band = ReadBand(dir, offsets);
             history = ReadEditorHistory(dataPath, mv, baseKhz, look.Curve);
         }
-        foreach (var g in ticks.GroupBy(t => (Mv: Math.Round(t.Uv / 1000.0), Step: (int)Math.Round(t.Mhz / 7.5))))
-            runs.Add(new RunBin(g.Key.Mv, g.Key.Step * 7.5, g.Count()));
+        // Where the card ran: the residency samples and the broker's always-on V/F history (beside the same records), one
+        // timeline weighted by observed time, streamed a UTC day at a time over the 60 days.
+        var observed = ObservedRuns(VfHistoryStore.Read(dir == null ? null : Path.Combine(dir, VfHistoryFile.DirName), now - RunsSpan, now), ticks);
+        var runs = observed.Bins;
+        var recorder = show.Ok && show.Result is { } sr && sr.TryGetProperty("vf_history", out var vh) && vh.ValueKind == JsonValueKind.Object ? vh.Clone() : (JsonElement?)null;
+        info = new
+        {
+            lightweight_seconds = Math.Round(observed.LightweightSeconds, 1),
+            residency_seconds = Math.Round(observed.ResidencySeconds, 1),
+            days = RunsSpan.TotalDays,
+            recorder = (object?)recorder ?? "the broker did not report its V/F history (an older broker, or none answering)",
+        };
 
         var (keys, also) = KeptBesideCurve();
         return new EditorData(card.Name, mv, baseKhz, offsets, Math.Min(pts.Count, VfRules.WritablePoints), lowKhz, highKhz,
@@ -134,16 +149,45 @@ public sealed partial class TuningTools
     {
         var all = Experiment.ReadLast(dataPath, int.MaxValue);
         var ticks = all.Count == 0 ? [] : residency.Between(all.Min(Experiment.StartOf), DateTimeOffset.Now);
-        return ProjectEditorHistory(all, mv, baseKhz, curve, ticks);
+        return ProjectEditorHistory(all, mv, baseKhz, curve, HistoryTimeline(all, ticks, VfHistoryFile.DirBeside(dataPath)));
     }
 
-    /// <summary>Rebuild the plotted history from visible tests and their samples, without reading or writing the GPU.
-    /// The same projection runs when opening the window and after deleting a test. Samples count once per second, however
-    /// many servers' samplers wrote them (<see cref="Residency.OnePerSecond"/>).</summary>
-    public static HistoryData ProjectEditorHistory(IReadOnlyList<DataPoint> all, double[] mv, int[] baseKhz,
-        VfCurveSnapshot curve, IReadOnlyList<Residency.Tick> samples)
+    /// <summary>The bins of where the card ran, and how many observed seconds each source gave.</summary>
+    public sealed record ObservedRunsResult(List<RunBin> Bins, double LightweightSeconds, double ResidencySeconds);
+
+    /// <summary>
+    /// Where the card ran, binned by voltage (1 mV) and clock (7.5 MHz), each bin the observed time in it: the broker's
+    /// V/F history (<paramref name="lightweight"/>, in time order, streamed) and the residency samples merged into one
+    /// timeline, so both count by elapsed time and overlapping seconds once (<see cref="VfDwell"/>). Holds the bins, not
+    /// the observations.
+    /// </summary>
+    public static ObservedRunsResult ObservedRuns(IEnumerable<VfObservation> lightweight, IReadOnlyList<Residency.Tick> residencyTicks)
     {
-        var ticks = Residency.OnePerSecond(samples);
+        var res = VfTimeline.Normalize(residencyTicks.Select(Observation)).ToList();
+        var bins = new Dictionary<(double Mv, int Step), double>();
+        double light = 0, resid = 0;
+        foreach (var w in VfDwell.Weigh(VfTimeline.MergeOrdered(lightweight, res)))
+        {
+            if (w.Seconds <= 0) continue;
+            var key = (Math.Round(w.Uv / 1000.0), (int)Math.Round(w.Mhz / 7.5));
+            bins[key] = bins.GetValueOrDefault(key) + w.Seconds;
+            if (w.Observation.Source == VfSource.Lightweight) light += w.Seconds; else resid += w.Seconds;
+        }
+        return new ObservedRunsResult([.. bins.Select(b => new RunBin(b.Key.Mv, b.Key.Step * 7.5, b.Value))], light, resid);
+    }
+
+    /// <summary>Rebuild the plotted history from visible tests and residency samples alone (one a second,
+    /// <see cref="Residency.OnePerSecond"/>), without reading or writing the GPU.</summary>
+    public static HistoryData ProjectEditorHistory(IReadOnlyList<DataPoint> all, double[] mv, int[] baseKhz,
+        VfCurveSnapshot curve, IReadOnlyList<Residency.Tick> samples) =>
+        ProjectEditorHistory(all, mv, baseKhz, curve, Timeline(samples));
+
+    /// <summary>Rebuild the plotted history from visible tests and the observations of every source
+    /// (<see cref="HistoryTimeline"/>), without reading or writing the GPU. The same projection runs when opening the
+    /// window and after deleting a test. Observations count by the time they stand for, whichever source wrote them.</summary>
+    public static HistoryData ProjectEditorHistory(IReadOnlyList<DataPoint> all, double[] mv, int[] baseKhz,
+        VfCurveSnapshot curve, VfTimeline timeline)
+    {
         var crashes = new List<CrashMark>();
         var evidence = new List<EvidenceMark>();
         var indices = new Dictionary<DataPoint, HashSet<int>>();
@@ -152,17 +196,13 @@ public sealed partial class TuningTools
             if (!indices.TryGetValue(d, out var set)) indices[d] = set = [];
             set.Add(index);
         }
-        var at = ticks.Select(t => t.At).ToList();
         foreach (var d in all.Where(d => d.Outcome == Experiment.Crash))
         {
             int[] then;
             try { then = VfOffsets.Decode(d.Curve); } catch (FormatException) { continue; }
             if (then.Length != mv.Length) continue;
-            var start = Experiment.StartOf(d);
-            int lo = at.BinarySearch(start), hi = at.BinarySearch(d.At);
-            lo = lo < 0 ? ~lo : lo; hi = hi < 0 ? ~hi : hi + 1;
-            var during = ticks.GetRange(lo, Math.Max(0, hi - lo));
-            IReadOnlyList<(int Index, uint? ClockMhz)> where = during.Count >= 10 ? CrashAt(during, d.CrashUv, curve)
+            var during = timeline.Within(Experiment.StartOf(d), d.At);
+            IReadOnlyList<(int Index, uint? ClockMhz)> where = during.Sum(o => o.Seconds) >= MinObservedSeconds ? CrashAt(during, d.CrashUv, curve)
                 : d.CrashUv is { } uv && Nearest(curve, uv) is { } p ? [(p.Index, null)] : [];
             var thenEff = CurveModel.Effective(baseKhz, then);
             foreach (var (index, clock) in where)
@@ -172,7 +212,7 @@ public sealed partial class TuningTools
                 Visit(d, index);
             }
         }
-        foreach (var (index, rec) in PointRecordsFrom(all, curve, ticks, Visit))
+        foreach (var (index, rec) in PointRecordsFrom(all, curve, timeline, Visit))
         {
             if (index >= mv.Length || (rec.StableKhz == null && rec.SurvivedKhz == null)) continue;
             evidence.Add(new EvidenceMark(index, mv[index],

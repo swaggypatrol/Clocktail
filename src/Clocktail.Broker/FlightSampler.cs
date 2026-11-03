@@ -9,10 +9,13 @@ namespace Clocktail.Broker;
 /// <summary>
 /// Looks at each GPU four times a second (core clock, NVVDD voltage, watts, temperature, utilization, limit reasons)
 /// into its <see cref="FlightRecorder"/>, so a driver reset finds the last 60 s in memory. Reads only: one NVML call
-/// per field and one rail status read, nothing written, nothing on disk. Once the driver is gone (<see cref="DriverLoss"/>)
+/// per field and one rail status read, nothing written to the GPU, the ring itself only in memory. Once the driver is gone (<see cref="DriverLoss"/>)
 /// the looks come back empty without calling it, until the broker's watch hands over to a fresh process.
+/// Each look is also handed to the always-on V/F history (<see cref="VfHistoryRecorder"/>), which keeps its time, measured
+/// NVVDD and measured core clock when NVVDD is above 825 mV: no read of its own, and its disk work is on another task.
 /// </summary>
-internal sealed class FlightSampler(GpuManager mgr, NvClient hw, IReadOnlyList<(string Id, GpuSession Session)> gpus)
+internal sealed class FlightSampler(GpuManager mgr, NvClient hw, IReadOnlyList<(string Id, GpuSession Session)> gpus,
+    VfHistoryRecorder? history = null)
 {
     public static readonly TimeSpan Every = TimeSpan.FromMilliseconds(250);
 
@@ -44,14 +47,21 @@ internal sealed class FlightSampler(GpuManager mgr, NvClient hw, IReadOnlyList<(
                 DriverLoss.Why(mgr.Nvml, [session]);
                 if (!railRead) nvml = null;
                 var look = new NvmlLook(nvml);
+                var clock = look.Read(() => nvml!.ClockMhz(h, NvmlClock.Graphics));
                 var s = new FlightSample(at, 0,
-                    look.Read(() => nvml!.ClockMhz(h, NvmlClock.Graphics)),
+                    clock,
                     uv / 1000,
                     look.Read(() => nvml!.PowerUsageMw(h)) / 1000.0,
                     look.Read(() => nvml!.TemperatureC(h)),
                     look.Read(() => nvml!.Utilization(h).Gpu),
                     look.Read(() => nvml!.ThrottleReasons(h)));
-                Recorders[id].Add(s with { ReadMs = (int)sw.ElapsedMilliseconds });
+                int readMs = (int)sw.ElapsedMilliseconds;
+                var recorder = Recorders[id];
+                recorder.Add(s with { ReadMs = readMs });
+                // The same look, its voltage as the rail reader returned it (µV, before the ring's mV): Look never throws,
+                // and the guard is for anything it could not foresee; the ring above is unchanged either way.
+                if (history != null)
+                    try { history.Look(id, at, uv, clock, readMs, recorder.Freeze()); } catch (Exception) { }
             }
             try { await Task.Delay(Every, ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { return; }
