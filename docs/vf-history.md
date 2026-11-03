@@ -141,6 +141,13 @@ Nothing is rounded to make up the difference.
   time. It is read one UTC day at a time from the stored records, without building an observation per look. 60 days at
   4 looks a second (about 20 million) bin in about 0.3 s and 18 MiB of allocation on the development machine. This haze
   is not cut to a window: the 60-day ends can be off by under 1.5 s.
+- **Only significant bins are drawn.** A bin is shown when it holds at least 1 s of observed time (four looks)
+  and at least 0.05 % of all the observed time in the span. At light load the clock follows the load, not the curve,
+  and jumps by hundreds of MHz between looks, so most such bins hold a single look and say nothing about the curve. On
+  the first day of real use, this left 166 of 1009 bins (144 of 917 between 800 and 890 mV), holding 77 % of the
+  observed time. Nothing is deleted: the records stay on disk, and `observed` reports `shown_bins`, `hidden_bins`,
+  `hidden_seconds` and the `min_bin_seconds` applied. `data_points` is unaffected (its trials have their own 10 s
+  minimum).
 - **What the read met:** `curve_editor`'s `observed.read` and `data_points`' `vf_history_read` report `files`,
   `unreadable_files`, `records`, `skipped_records` and `torn_bytes`, with a note when something could not be read.
   Missing history then reads as missing, not as time the card was not above 825 mV.
