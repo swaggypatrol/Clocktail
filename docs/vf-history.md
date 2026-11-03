@@ -23,7 +23,7 @@ client or MCP server is connected. This record feeds the curve editor's "Observe
 
 | Part | Size | Content |
 |---|---|---|
-| header | 16 B | `"CTVF"`, u16 version = 1, u16 header size = 16, u16 record size = 12, u16 reserved = 0, u32 UTC day as yyyymmdd |
+| header | 16 B | `"CTVF"`, u16 version = 1, u16 header size = 16, u16 record size = 12, u16 flags, u32 UTC day as yyyymmdd |
 | record | 12 B | u32 milliseconds since that UTC midnight, u32 NVVDD µV, u32 core MHz |
 
 The worst case is 4 records/s × 86 400 s × 12 B ≈ 4 MiB per GPU per day, which needs the voltage above 825 mV for the
@@ -32,6 +32,12 @@ until the person removes old day files.
 
 Readers treat a version-1 record at or under 825 mV as damage and skip it, because the version-1 writer never writes
 one. Changing the gate therefore requires a new format version.
+
+**Flags** (since 0.8.8; the field was reserved and 0 in 0.8.7): bit 0 means every record in the file is valid and
+later than the one before it. A reader then finds a time range by binary search instead of decoding the day. Only a
+file the 0.8.8 writer creates gets the flag; a day file 0.8.7 began keeps 0 and is read in full, as before. 0.8.7
+readers ignore the field. A reader that meets an invalid record in a flagged file (outside damage) reads that file in
+full.
 
 ### Robustness
 
@@ -43,12 +49,15 @@ one. Changing the gate therefore requires a new format version.
 - **Status:** `ping` and experiment `show` report `vf_history`, in snake_case: `written`, `queued`, `held`,
   `withheld` and `dropped` counts, `degraded`, `error`, `degraded_since`, `last_write`, `min_uv_exclusive` and `dirs`.
 - **Torn records:** a torn final record (a crash or power loss mid-write) is ignored by readers. It is cut away before
-  the next append, so later records stay aligned. A failed append is rolled back to the whole records it had.
+  the next append, so later records stay aligned, and so are whole records a power loss left as zeros at the end. A
+  failed append is rolled back to the whole records it had.
+- **A day file only grows in time.** The store writes a record only when it is later than the file's last record.
 - **Retries are idempotent.** A batch is written one UTC day at a time. When a later day fails (for example, its file
-  is held), the recorder keeps the whole batch and retries it, together with any looks queued since. On each append,
-  the store compares the batch with the file's last records (as many as the batch has) and skips milliseconds already
-  there. A day that was already written is therefore not written again, and a record that landed whole before a torn
-  write is not repeated. Each look is stored once on disk, so the size estimate above holds.
+  is held), the recorder keeps the whole batch and retries it, together with any looks queued since. A day that was
+  already written finds its records no later than the file's last one and is not written again, and a record that
+  landed whole before a torn write is not repeated. Each look is stored once on disk, so the size estimate above holds.
+- **Clock set back:** looks no later than what the day file already holds are not written. That is a gap, not records
+  out of order.
 - **Unusable day files:** a day file with another version's header, or a damaged one, is never rewritten. The day
   continues in `yyyyMMdd-1.vfh`, up to 15 extra parts, and readers read every part.
 - **Concurrent readers:** readers share the file with the writer and read whole records up to the length they found.
@@ -61,11 +70,20 @@ A hung GPU can keep answering with frozen readings until the driver resets it, s
 
 - While the window shows a hang (`FlightRecorder.HungNow`: a frozen tail that power fell into, or a blocked read), the
   held looks from the hang's start are withheld.
+- **The hang stays latched** per GPU until the readings move again (the window no longer ends frozen and no read
+  blocked in the last 3 s) or a reset ends it. A frozen stretch longer than 60 s fills the window, where it reads as
+  a steady load, because the power fall has left the window. Without the latch its looks would be written again.
 - When a driver reset is seen, the looks from where the GPU stopped answering are withheld (`FlightRecorder.Hang`, the
-  same boundary the crash trace uses, or 2 s before the reset when the window shows no hang).
+  same boundary the crash trace uses, or 2 s before the reset when the window shows no hang), or from the latched
+  hang's start when that is earlier.
+- **The reset's span is kept** for two windows. A look whose time falls in it is withheld even when it reaches the
+  recorder after the reset (a look already being read when the reset was seen).
 - At a clean stop, held looks are written up to 2 s before the stop, or up to any earlier doubt the window raises.
 - If the broker is killed, or hands over to a fresh process after losing the driver, up to the last 60 s are lost.
   They are never credited.
+
+A real steady load that holds one clock at a steady voltage and 60 % utilization or more right after a power fall
+also stays latched until its clock changes. Those looks are withheld, a gap rather than credit.
 
 Withholding is only as good as the flight recorder's hang recognition. A frozen tail counts only when utilization
 stays at 60 % or more and power has fallen into it. A hang the recorder does not recognize (and that the reset's
@@ -120,9 +138,14 @@ Nothing is rounded to make up the difference.
 ## Where it is used
 
 - **Curve editor, "Observed V/F" layer:** the last 60 days, binned by 1 mV and 7.5 MHz, each bin showing its observed
-  time. The span is streamed one UTC day at a time, so months of ticks are never held in memory. This haze is not cut to
-  a window: the 60-day ends can be off by under 1.5 s.
-- **`data_points` `by_point` and the editor's evidence marks:** only the trials' own windows of the history are read.
+  time. It is read one UTC day at a time from the stored records, without building an observation per look. 60 days at
+  4 looks a second (about 20 million) bin in about 0.3 s and 18 MiB of allocation on the development machine. This haze
+  is not cut to a window: the 60-day ends can be off by under 1.5 s.
+- **What the read met:** `curve_editor`'s `observed.read` and `data_points`' `vf_history_read` report `files`,
+  `unreadable_files`, `records`, `skipped_records` and `torn_bytes`, with a note when something could not be read.
+  Missing history then reads as missing, not as time the card was not above 825 mV.
+- **`data_points` `by_point` and the editor's evidence marks:** only the trials' own windows of the history are read,
+  and in a flagged file only those ranges of it (a 30 s trial reads tens of records, not the day's 345 600).
   An observation says where the card ran during a trial. Only a trial's recorded outcome (stable, survived, crash) says
   how that went. An observation outside every stable trial is never stable evidence, and nothing turns observed
   operation into a stable result.

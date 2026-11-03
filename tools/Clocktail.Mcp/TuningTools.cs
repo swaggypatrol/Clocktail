@@ -973,7 +973,9 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     {
         var r = card.Broker(BrokerRequest.OpExperiment, "show");
         if (!r.Ok || r.Result is not { } res) return Reply(r);
-        return Out(new { data = res.GetProperty("data"), points = res.GetProperty("points"), by_point = ByPoint(res.GetProperty("data").GetString()!) });
+        var read = new VfReadStats();
+        var byPoint = ByPoint(res.GetProperty("data").GetString()!, read);
+        return Out(new { data = res.GetProperty("data"), points = res.GetProperty("points"), by_point = byPoint, vf_history_read = ReadReport(read) });
     });
 
     /// <summary>One curve point's record across every data point the observations cover (the residency samples and the
@@ -1016,13 +1018,13 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         public int Crashes, OtherCrashes;
     }
 
-    private object ByPoint(string dataPath)
+    private object ByPoint(string dataPath, VfReadStats? read = null)
     {
         var all = Experiment.ReadLast(dataPath, int.MaxValue);
         if (all.Count == 0) return Array.Empty<object>();
         var look = card.Read();
         var daily = DailyOffsets(out _);
-        var records = PointRecords(all, look.Curve, dataPath);
+        var records = PointRecords(all, look.Curve, dataPath, read: read);
         return records.Select(kv =>
         {
             var p = look.Curve.Points.FirstOrDefault(p => p.Index == kv.Key);
@@ -1050,11 +1052,11 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// or survived trial ran it at, the lowest a crash under a curve trial found it at (the curve editor draws these beside
     /// its points).</summary>
     private SortedDictionary<int, PointRecord> PointRecords(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve, string dataPath,
-        Action<DataPoint, int>? visit = null)
+        Action<DataPoint, int>? visit = null, VfReadStats? read = null)
     {
         if (all.Count == 0) return [];
         var ticks = residency.Between(all.Min(Experiment.StartOf), DateTimeOffset.Now);
-        return PointRecordsFrom(all, curve, HistoryTimeline(all, ticks, VfHistoryFile.DirBeside(dataPath)), visit);
+        return PointRecordsFrom(all, curve, HistoryTimeline(all, ticks, VfHistoryFile.DirBeside(dataPath), read), visit);
     }
 
     /// <summary>How far past a trial's window the V/F history is read, so the window's last look has its successor
@@ -1066,9 +1068,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// broker's always-on V/F history in <paramref name="vfDir"/> (only the trials' windows of it are read, not the months
     /// between). Each counts for the time it stands for, whichever source it came from (<see cref="VfDwell"/>).
     /// </summary>
-    public static VfTimeline HistoryTimeline(IReadOnlyList<DataPoint> all, IReadOnlyList<Residency.Tick> residencyTicks, string? vfDir)
+    public static VfTimeline HistoryTimeline(IReadOnlyList<DataPoint> all, IReadOnlyList<Residency.Tick> residencyTicks, string? vfDir,
+        VfReadStats? read = null)
     {
-        var light = VfHistoryStore.ReadWindows(vfDir, all.Select(d => (Experiment.StartOf(d) - WindowMargin, d.At + WindowMargin)));
+        var light = VfHistoryStore.ReadWindows(vfDir, all.Select(d => (Experiment.StartOf(d) - WindowMargin, d.At + WindowMargin)), read);
         return VfTimeline.Build(residencyTicks.Select(Observation).Concat(light));
     }
 

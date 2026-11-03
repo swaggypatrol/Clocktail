@@ -36,7 +36,10 @@ public sealed record VfHistoryStatus(
 /// a hung GPU keeps answering with frozen readings until the driver resets it, and those looks must not become
 /// history of healthy operation. While the window says the GPU looks hung (<see cref="FlightRecorder.HungNow"/>), and when
 /// a driver reset is seen (<see cref="Reset"/>, the same hang boundary the crash trace uses), the held looks from the
-/// hang on are withheld. A look the broker never got to write (the process killed, the driver lost) is simply not there.
+/// hang on are withheld. A hang once seen stays latched for its GPU until the readings move again or a reset ends it:
+/// a frozen stretch longer than the window fills it and would otherwise read as a steady load. A reset's span is kept
+/// too, so a look already being read when the reset was seen, and handed over after it, is withheld as well. A look the
+/// broker never got to write (the process killed, the driver lost) is simply not there.
 /// </para>
 /// <para>
 /// The sampler only hands a look over (<see cref="Look"/>: a lock and a queue, no I/O, never throws to it). Writing is
@@ -59,6 +62,11 @@ public sealed class VfHistoryRecorder
         public readonly string Dir = dir;
         public readonly Queue<VfObservation> Held = new();
         public readonly LinkedList<VfObservation> Ready = new();
+        /// <summary>Where the hang the window last showed began, kept until the readings move again (or a reset ends it):
+        /// a frozen stretch longer than the window fills it and no longer reads as a hang there.</summary>
+        public DateTimeOffset? HungFrom;
+        /// <summary>The spans resets withheld, for a look already being read when the reset was seen that arrives after it.</summary>
+        public readonly List<(DateTimeOffset From, DateTimeOffset To)> Excluded = [];
     }
 
     private readonly object _gate = new();
@@ -93,12 +101,22 @@ public sealed class VfHistoryRecorder
         try
         {
             DateTimeOffset? suspect = window == null ? null : SuspectFrom(window, at);
+            bool? stuck = window == null ? null : StillStuck(window, at);
             lock (_gate)
             {
                 if (_shutDown || !_lanes.TryGetValue(id, out var lane)) return;
+                lane.Excluded.RemoveAll(x => x.To < at - 2 * Quarantine);
+                if (suspect is { } from)
+                {
+                    if (lane.HungFrom is not { } h || from < h) lane.HungFrom = from;
+                    WithholdLocked(lane, from, at);
+                }
+                else if (lane.HungFrom != null && stuck == false) lane.HungFrom = null;   // the readings move again
                 if (readMs < FlightRecorder.BlockedMs && VfHistoryFile.Admits(uv, mhz))
-                    lane.Held.Enqueue(new VfObservation(at, uv!.Value, mhz!.Value, VfSource.Lightweight));
-                if (suspect is { } from) WithholdLocked(lane, from, at);
+                {
+                    if (lane.HungFrom != null || lane.Excluded.Any(x => at >= x.From && at <= x.To)) _withheld++;
+                    else lane.Held.Enqueue(new VfObservation(at, uv!.Value, mhz!.Value, VfSource.Lightweight));
+                }
                 ReleaseLocked(lane, at - Quarantine);
             }
         }
@@ -113,7 +131,14 @@ public sealed class VfHistoryRecorder
         try
         {
             var from = FlightRecorder.Hang(window, seen)?.Stopped ?? seen - FlightRecorder.HangDetectAtLeast;
-            lock (_gate) if (_lanes.TryGetValue(id, out var lane)) WithholdLocked(lane, from, seen);
+            lock (_gate)
+            {
+                if (!_lanes.TryGetValue(id, out var lane)) return;
+                if (lane.HungFrom is { } h && h < from) from = h;   // a hang longer than the window began before it
+                lane.HungFrom = null;                                // the reset ends it; what follows is the recovered driver's
+                lane.Excluded.Add((from, seen));
+                WithholdLocked(lane, from, seen);
+            }
         }
         catch (Exception) { }
     }
@@ -129,6 +154,12 @@ public sealed class VfHistoryRecorder
         if (blocked != null && (from == null || blocked.At < from)) from = blocked.At;
         return from ?? now;
     }
+
+    /// <summary>Whether the window still ends stuck: a frozen tail (<see cref="FlightRecorder.FrozenFrom"/>, also one that
+    /// fills the window), or a blocked read in the last 3 s. A latched hang (<c>HungFrom</c>) holds until this is false.</summary>
+    public static bool StillStuck(IReadOnlyList<FlightSample> window, DateTimeOffset now) =>
+        FlightRecorder.FrozenFrom(window) != null
+        || window.Any(s => s.ReadMs >= FlightRecorder.BlockedMs && now - s.At <= TimeSpan.FromSeconds(3));
 
     private void WithholdLocked(Lane lane, DateTimeOffset from, DateTimeOffset to)
     {
@@ -278,6 +309,7 @@ public sealed class VfHistoryRecorder
                     }
                 }
                 catch (Exception) { }
+                if (lane.HungFrom is { } hung && hung < cut) cut = hung;
                 while (lane.Held.Count > 0)
                 {
                     var o = lane.Held.Dequeue();

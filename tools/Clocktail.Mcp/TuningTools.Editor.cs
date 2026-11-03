@@ -128,7 +128,8 @@ public sealed partial class TuningTools
         }
         // Where the card ran: the residency samples and the broker's always-on V/F history (beside the same records), one
         // timeline weighted by observed time, streamed a UTC day at a time over the 60 days.
-        var observed = ObservedRuns(VfHistoryStore.Read(dir == null ? null : Path.Combine(dir, VfHistoryFile.DirName), now - RunsSpan, now), ticks);
+        var read = new VfReadStats();
+        var observed = ObservedRuns(dir == null ? null : Path.Combine(dir, VfHistoryFile.DirName), now - RunsSpan, now, ticks, read);
         var runs = observed.Bins;
         var recorder = show.Ok && show.Result is { } sr && sr.TryGetProperty("vf_history", out var vh) && vh.ValueKind == JsonValueKind.Object ? vh.Clone() : (JsonElement?)null;
         info = new
@@ -136,6 +137,7 @@ public sealed partial class TuningTools
             lightweight_seconds = Math.Round(observed.LightweightSeconds, 1),
             residency_seconds = Math.Round(observed.ResidencySeconds, 1),
             days = RunsSpan.TotalDays,
+            read = ReadReport(read),
             recorder = (object?)recorder ?? "the broker did not report its V/F history (an older broker, or none answering)",
         };
 
@@ -149,7 +151,7 @@ public sealed partial class TuningTools
     {
         var all = Experiment.ReadLast(dataPath, int.MaxValue);
         var ticks = all.Count == 0 ? [] : residency.Between(all.Min(Experiment.StartOf), DateTimeOffset.Now);
-        return ProjectEditorHistory(all, mv, baseKhz, curve, HistoryTimeline(all, ticks, VfHistoryFile.DirBeside(dataPath)));
+        return ProjectEditorHistory(all, mv, baseKhz, curve, HistoryTimeline(all, ticks, VfHistoryFile.DirBeside(dataPath), new VfReadStats()));
     }
 
     /// <summary>The bins of where the card ran, and how many observed seconds each source gave.</summary>
@@ -164,17 +166,93 @@ public sealed partial class TuningTools
     public static ObservedRunsResult ObservedRuns(IEnumerable<VfObservation> lightweight, IReadOnlyList<Residency.Tick> residencyTicks)
     {
         var res = VfTimeline.Normalize(residencyTicks.Select(Observation)).ToList();
-        var bins = new Dictionary<(double Mv, int Step), double>();
+        var bins = new Dictionary<int, double>();
         double light = 0, resid = 0;
         foreach (var w in VfDwell.Weigh(VfTimeline.MergeOrdered(lightweight, res)))
         {
             if (w.Seconds <= 0) continue;
-            var key = (Math.Round(w.Uv / 1000.0), (int)Math.Round(w.Mhz / 7.5));
-            bins[key] = bins.GetValueOrDefault(key) + w.Seconds;
+            int key = BinKey(w.Uv, w.Mhz);
+            ref double sum = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(bins, key, out _);
+            sum += w.Seconds;
             if (w.Observation.Source == VfSource.Lightweight) light += w.Seconds; else resid += w.Seconds;
         }
-        return new ObservedRunsResult([.. bins.Select(b => new RunBin(b.Key.Mv, b.Key.Step * 7.5, b.Value))], light, resid);
+        return new ObservedRunsResult([.. bins.Select(b => new RunBin(b.Key >> 12, (b.Key & 0xFFF) * 7.5, b.Value))], light, resid);
     }
+
+    /// <summary>
+    /// <see cref="ObservedRuns(IEnumerable{VfObservation}, IReadOnlyList{Residency.Tick})"/> over the day files in
+    /// <paramref name="vfDir"/> from <paramref name="from"/> to <paramref name="to"/>, the same bins to the last digit, on
+    /// the stored records themselves: 60 days of looks at 4 a second are twenty million, and the editor waits for them.
+    /// Merges in time order (a look before a residency sample at the same instant), weighs by <see cref="VfDwell"/>'s rule.
+    /// </summary>
+    public static ObservedRunsResult ObservedRuns(string? vfDir, DateTimeOffset from, DateTimeOffset to,
+        IReadOnlyList<Residency.Tick> residencyTicks, VfReadStats? stats = null)
+    {
+        var res = VfTimeline.Normalize(residencyTicks.Select(Observation)).ToList();
+        var bins = new Dictionary<int, double>();
+        double light = 0, resid = 0;
+        long lightTicks = VfDwell.Interval(VfSource.Lightweight).Ticks, residTicks = VfDwell.Interval(VfSource.Residency).Ticks;
+        bool has = false, pLight = false;
+        long pT = 0;
+        uint pUv = 0, pMhz = 0;
+        void Count(long? next)
+        {
+            long interval = pLight ? lightTicks : residTicks;
+            long span = interval;
+            if (next is { } n)
+            {
+                long gap = Math.Max(0, n - pT);
+                if (gap <= interval * VfDwell.CapFactor) span = gap;
+            }
+            double seconds = span / (double)TimeSpan.TicksPerSecond;
+            if (seconds <= 0) return;
+            int key = BinKey(pUv, pMhz);
+            System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(bins, key, out _) += seconds;
+            if (pLight) light += seconds; else resid += seconds;
+        }
+        void Push(long t, uint uv, uint mhz, bool isLight)
+        {
+            if (has) Count(t);
+            (pT, pUv, pMhz, pLight, has) = (t, uv, mhz, isLight, true);
+        }
+        int ri = 0;
+        if (vfDir != null && Directory.Exists(vfDir) && to >= from)
+        {
+            var recs = new List<VfRecord>();
+            long f = from.UtcTicks, t = to.UtcTicks;
+            DateOnly first = VfHistoryFile.UtcDay(from), last = VfHistoryFile.UtcDay(to);
+            for (var day = first; day <= last; day = day.AddDays(1))
+            {
+                uint lo = day == first ? VfHistoryFile.MsOfDay(from) : 0, hi = day == last ? VfHistoryFile.MsOfDay(to) : VfHistoryFile.MsPerDay - 1;
+                VfHistoryStore.ReadDayRecords(vfDir, day, lo, hi, recs, stats);
+                long dayTicks = day.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).Ticks;
+                foreach (var r in recs)
+                {
+                    long at = dayTicks + r.Ms * TimeSpan.TicksPerMillisecond;
+                    if (at < f || at > t) continue;
+                    for (; ri < res.Count && res[ri].At.UtcTicks < at; ri++) Push(res[ri].At.UtcTicks, res[ri].Uv, res[ri].Mhz, false);
+                    Push(at, r.Uv, r.Mhz, true);
+                }
+            }
+        }
+        for (; ri < res.Count; ri++) Push(res[ri].At.UtcTicks, res[ri].Uv, res[ri].Mhz, false);
+        if (has) Count(null);
+        return new ObservedRunsResult([.. bins.Select(b => new RunBin(b.Key >> 12, (b.Key & 0xFFF) * 7.5, b.Value))], light, resid);
+    }
+
+    /// <summary>A bin's key: whole mV in the high bits, the 7.5 MHz step in the low 12 (an int hashes as itself; a long of
+    /// mV and step XORs them into a few hundred collisions).</summary>
+    private static int BinKey(uint uv, uint mhz) => ((int)Math.Round(uv / 1000.0) << 12) | ((int)Math.Round(mhz / 7.5) & 0xFFF);
+
+    /// <summary>What reading the V/F history met, for the tool's answer: "no record" and "records that could not be
+    /// read" are not the same thing.</summary>
+    public static object ReadReport(VfReadStats s) => new
+    {
+        files = s.Files, unreadable_files = s.UnreadableFiles, records = s.Records, skipped_records = s.SkippedRecords, torn_bytes = s.TornBytes,
+        note = s.UnreadableFiles > 0 || s.SkippedRecords > 0
+            ? "some V/F history could not be read (a file locked, another version's, or damaged records): that time is missing, not unobserved"
+            : null,
+    };
 
     /// <summary>Rebuild the plotted history from visible tests and residency samples alone (one a second,
     /// <see cref="Residency.OnePerSecond"/>), without reading or writing the GPU.</summary>

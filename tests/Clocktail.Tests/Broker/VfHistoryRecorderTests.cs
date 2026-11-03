@@ -121,6 +121,60 @@ public class VfHistoryRecorderTests
     }
 
     [Fact]
+    public void A_hang_frozen_for_longer_than_the_window_stays_withheld_until_the_readings_move_again()
+    {
+        // The 0.8.7 review: 10 s healthy, then 150 s frozen. Once the power fall left the 60 s window, the window was frozen
+        // from its first look, read as a steady load, and 352 frozen looks (88 s) went into the history.
+        var rig = new Rig();
+        rig.Healthy(10);
+        var frozenFrom = rig.Now;
+        for (int i = 0; i < 150 * 4; i++) rig.Look(1_030_000, 3105, watts: 140);
+        Assert.Null(FlightRecorder.HungNow(rig.Flight.Freeze(), rig.Now.AddMilliseconds(-250)));   // the window alone no longer says so
+        var movedAt = rig.Now;
+        rig.Healthy(5);                       // the readings move again: healthy looks count from here
+        rig.Idle(61);
+        rig.Recorder.FlushOnce(rig.Now);
+        Assert.DoesNotContain(rig.Written, o => o.At >= frozenFrom && o.At < movedAt);
+        Assert.Equal(40, rig.Written.Count(o => o.At < frozenFrom));
+        Assert.Equal(20, rig.Written.Count(o => o.At >= movedAt));
+        Assert.Equal(600, rig.Recorder.Status.Withheld);
+    }
+
+    [Fact]
+    public void A_reset_after_a_long_frozen_hang_withholds_from_where_the_hang_began()
+    {
+        var rig = new Rig();
+        rig.Healthy(10);
+        var frozenFrom = rig.Now;
+        for (int i = 0; i < 90 * 4; i++) rig.Look(1_030_000, 3105, watts: 140);
+        rig.Recorder.Reset(Gpu, rig.Flight.Freeze(), rig.Now.AddMilliseconds(-100));   // seen just after the last frozen look
+        rig.Healthy(5);
+        rig.Idle(61);
+        rig.Recorder.FlushOnce(rig.Now);
+        Assert.DoesNotContain(rig.Written, o => o.At >= frozenFrom && o.At < frozenFrom.AddSeconds(90));
+        Assert.Equal(60, rig.Written.Count);
+    }
+
+    [Fact]
+    public void A_look_read_before_a_reset_and_handed_over_after_it_is_withheld()
+    {
+        // The sampler takes a look's time, reads it, the reset is seen meanwhile, and only then is the look handed over.
+        var rig = new Rig();
+        rig.Healthy(30);
+        var lookAt = rig.Now;
+        var seen = lookAt.AddMilliseconds(100);
+        rig.Recorder.Reset(Gpu, rig.Flight.Freeze(), seen);
+        rig.Flight.Add(new FlightSample(lookAt, 20, 2800, 900, 400, 60, 100, 0));
+        rig.Recorder.Look(Gpu, lookAt, 900_000, 2800, 20, rig.Flight.Freeze());
+        rig.Now = lookAt.AddMilliseconds(250);
+        rig.Healthy(2);                       // after the reset: kept
+        rig.Idle(61);
+        rig.Recorder.FlushOnce(rig.Now);
+        Assert.DoesNotContain(rig.Written, o => o.At >= seen - FlightRecorder.HangDetectAtLeast && o.At <= seen);
+        Assert.Equal(8, rig.Written.Count(o => o.At > seen));
+    }
+
+    [Fact]
     public void A_failing_disk_keeps_the_batch_retries_later_and_logs_once_each_way()
     {
         var rig = new Rig { Fail = n => n <= 3 ? new IOException("disk full") : null };

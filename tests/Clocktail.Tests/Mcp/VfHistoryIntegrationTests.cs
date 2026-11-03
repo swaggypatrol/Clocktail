@@ -212,6 +212,50 @@ public sealed class VfHistoryIntegrationTests : IDisposable
         Assert.Equal(viaTicks[0].StableRanMhz, viaTimeline[0].StableRanMhz);
     }
 
+    [Fact]
+    public void The_fast_haze_matches_the_general_timeline_to_the_last_digit()
+    {
+        // Looks at about 4 a second over a midnight, with gaps and jitter, and residency seconds over part of it.
+        var rnd = new Random(7);
+        var looks = new List<VfObservation>();
+        var at = T.AddHours(-13);
+        for (int i = 0; i < 200_000; i++)
+        {
+            at = at.AddMilliseconds(rnd.Next(10) == 0 ? rnd.Next(300, 5_000) : 250 + rnd.Next(-20, 21));
+            looks.Add(new VfObservation(at, 826_000 + (uint)rnd.Next(0, 200_000), 1500 + (uint)rnd.Next(0, 1500), VfSource.Lightweight));
+        }
+        VfHistoryStore.Append(VfDir, looks);
+        var ticks = new List<Residency.Tick>();
+        for (var t = T.AddHours(-12.5); t < T.AddHours(-11.5); t = t.AddMilliseconds(rnd.Next(900, 1600)))
+            ticks.Add(new Residency.Tick(t, 900_000 + (uint)rnd.Next(0, 50_000), 2500 + (uint)rnd.Next(0, 200), 100, 400));
+        var from = T.AddHours(-12.75);
+        var to = at.AddMinutes(-10);
+        var general = TuningTools.ObservedRuns(VfHistoryStore.Read(VfDir, from, to), ticks);
+        var stats = new VfReadStats();
+        var fast = TuningTools.ObservedRuns(VfDir, from, to, ticks, stats);
+        Assert.Equal(general.LightweightSeconds, fast.LightweightSeconds);
+        Assert.Equal(general.ResidencySeconds, fast.ResidencySeconds);
+        Assert.Equal(general.Bins.OrderBy(b => b.Mv).ThenBy(b => b.Mhz), fast.Bins.OrderBy(b => b.Mv).ThenBy(b => b.Mhz));
+        Assert.True(fast.ResidencySeconds > 0);
+        Assert.Equal(0, stats.UnreadableFiles);
+        Assert.True(stats.Files >= 2);
+    }
+
+    [Fact]
+    public void A_history_file_that_cannot_be_read_is_reported_not_taken_for_no_record()
+    {
+        if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
+        VfHistoryStore.Append(VfDir, Light(T, 60));
+        var path = Path.Combine(VfDir, VfHistoryFile.DayFileName(VfHistoryFile.UtcDay(T)));
+        var stats = new VfReadStats();
+        using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            Assert.Empty(TuningTools.ObservedRuns(VfDir, T, T.AddMinutes(2), [], stats).Bins);
+        Assert.Equal(1, stats.UnreadableFiles);
+        var report = System.Text.Json.JsonSerializer.SerializeToElement(TuningTools.ReadReport(stats));
+        Assert.Equal(1, report.GetProperty("unreadable_files").GetInt32());
+        Assert.Contains("missing", report.GetProperty("note").GetString());
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
