@@ -362,6 +362,18 @@ public sealed class VfHistoryIntegrationTests : IDisposable
         Assert.NotNull(System.Text.Json.JsonSerializer.SerializeToElement(TuningTools.ReadReport(read)).GetProperty("note").GetString());
     }
 
+    [Fact]
+    public void An_evening_past_UTC_midnight_is_one_day_of_use_in_its_own_time_zone()
+    {
+        var evening = new DateTimeOffset(2026, 11, 3, 23, 30, 0, TimeSpan.Zero);
+        VfHistoryStore.Append(VfDir, [.. Light(evening, 10), .. Light(evening.AddHours(1), 10)]);   // 18:30 and 19:30 at UTC-5
+        var from = evening.AddHours(-1);
+        var to = evening.AddHours(2);
+        Assert.Equal(1, TuningTools.ObservedRuns(VfDir, from, to, [], dayOffset: TimeSpan.FromHours(-5)).ActiveDays);
+        Assert.Equal(2, TuningTools.ObservedRuns(VfDir, from, to, [], dayOffset: TimeSpan.Zero).ActiveDays);
+        Assert.Equal(1, TuningTools.ObservedRuns(VfHistoryStore.Read(VfDir, from, to), [], TimeSpan.FromHours(-5)).ActiveDays);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);

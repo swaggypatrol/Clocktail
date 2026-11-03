@@ -174,7 +174,8 @@ public sealed partial class TuningTools
     }
 
     /// <summary>The bins of where the card ran, and how many observed seconds each source gave.</summary>
-    /// <param name="ActiveDays">How many UTC days hold observed time: the span the significance floor scales with.</param>
+    /// <param name="ActiveDays">How many local calendar days hold observed time: the span the significance floor scales
+    /// with (an evening past UTC midnight is one day of use, not two).</param>
     public sealed record ObservedRunsResult(List<RunBin> Bins, double LightweightSeconds, double ResidencySeconds, int ActiveDays = 0);
 
     /// <summary>
@@ -183,8 +184,10 @@ public sealed partial class TuningTools
     /// timeline, so both count by elapsed time and overlapping seconds once (<see cref="VfDwell"/>). Holds the bins, not
     /// the observations.
     /// </summary>
-    public static ObservedRunsResult ObservedRuns(IEnumerable<VfObservation> lightweight, IReadOnlyList<Residency.Tick> residencyTicks)
+    public static ObservedRunsResult ObservedRuns(IEnumerable<VfObservation> lightweight, IReadOnlyList<Residency.Tick> residencyTicks,
+        TimeSpan? dayOffset = null)
     {
+        long offset = (dayOffset ?? LocalOffset()).Ticks;
         var res = VfTimeline.Normalize(residencyTicks.Select(Observation)).ToList();
         var bins = new Dictionary<int, double>();
         var days = new HashSet<long>();
@@ -192,7 +195,7 @@ public sealed partial class TuningTools
         foreach (var w in VfDwell.Weigh(VfTimeline.MergeOrdered(lightweight, res)))
         {
             if (w.Seconds <= 0) continue;
-            days.Add(w.At.UtcTicks / TimeSpan.TicksPerDay);
+            days.Add((w.At.UtcTicks + offset) / TimeSpan.TicksPerDay);
             int key = BinKey(w.Uv, w.Mhz);
             ref double sum = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(bins, key, out _);
             sum += w.Seconds;
@@ -208,8 +211,9 @@ public sealed partial class TuningTools
     /// Merges in time order (a look before a residency sample at the same instant), weighs by <see cref="VfDwell"/>'s rule.
     /// </summary>
     public static ObservedRunsResult ObservedRuns(string? vfDir, DateTimeOffset from, DateTimeOffset to,
-        IReadOnlyList<Residency.Tick> residencyTicks, VfReadStats? stats = null)
+        IReadOnlyList<Residency.Tick> residencyTicks, VfReadStats? stats = null, TimeSpan? dayOffset = null)
     {
+        long offset = (dayOffset ?? LocalOffset()).Ticks;
         var res = VfTimeline.Normalize(residencyTicks.Select(Observation)).ToList();
         var bins = new Dictionary<int, double>();
         var days = new HashSet<long>();
@@ -229,7 +233,7 @@ public sealed partial class TuningTools
             }
             double seconds = span / (double)TimeSpan.TicksPerSecond;
             if (seconds <= 0) return;
-            days.Add(pT / TimeSpan.TicksPerDay);
+            days.Add((pT + offset) / TimeSpan.TicksPerDay);
             int key = BinKey(pUv, pMhz);
             System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(bins, key, out _) += seconds;
             if (pLight) light += seconds; else resid += seconds;
@@ -263,6 +267,9 @@ public sealed partial class TuningTools
         if (has) Count(null);
         return new ObservedRunsResult([.. bins.Select(b => new RunBin(b.Key >> 12, (b.Key & 0xFFF) * 7.5, b.Value))], light, resid, days.Count);
     }
+
+    /// <summary>The person's UTC offset now, once per read: days of use are their calendar days.</summary>
+    private static TimeSpan LocalOffset() => TimeZoneInfo.Local.GetUtcOffset(DateTimeOffset.UtcNow);
 
     /// <summary>The bins the haze shows, and what it leaves out as passing through.</summary>
     public sealed record SignificantBins(List<RunBin> Bins, int HiddenBins, double HiddenSeconds, double MinSeconds);

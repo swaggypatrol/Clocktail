@@ -142,7 +142,8 @@ Nothing is rounded to make up the difference.
   4 looks a second (about 20 million) bin in about 0.3 s and 18 MiB of allocation on the development machine. This haze
   is not cut to a window: the 60-day ends can be off by under 1.5 s.
 - **Only significant bins are drawn.** A bin is drawn when it holds, on average, at least 1 s of observed time for
-  each UTC day in the span that holds any (four looks a day; 60 s over 60 days of use). At light load the clock follows
+  each local calendar day in the span that holds any (four looks a day; 60 s over 60 days of use). An evening
+  that runs past UTC midnight is one day of use. At light load the clock follows
   the load, not the curve, and jumps by hundreds of MHz between looks, so most such bins get a single look now and
   then and say nothing about the curve.
   - *Why per day:* with the same use, a bin's time and the floor grow together, so what is drawn does not change as the
@@ -153,7 +154,8 @@ Nothing is rounded to make up the difference.
   - *Accepted limit:* a place the card ran in for less than about 1 s per day of use over the span (30 s once in 60
     days) is not drawn. Its time still counts in a point's "Ran for".
   - On the first day of real use (one active day, a 1 s floor) this left about 1 bin in 5, holding about 77 % of the
-    observed time.
+    observed time. The floor then rises a second with each day of use, so faint dots from the first days fade out over
+    the next few: the rule settling, not lost data.
   - Nothing is deleted. The records stay on disk, a curve point's "Ran for" counts every bin, drawn or not, and the
     window's details line says how many bins are drawn and how much of the time they hold. `observed` reports
     `shown_bins`, `hidden_bins`, `hidden_seconds`, `active_days` and the `min_bin_seconds` applied. `data_points` is
