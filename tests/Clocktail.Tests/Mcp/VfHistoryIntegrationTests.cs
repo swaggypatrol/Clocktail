@@ -256,6 +256,38 @@ public sealed class VfHistoryIntegrationTests : IDisposable
         Assert.Contains("missing", report.GetProperty("note").GetString());
     }
 
+    [Fact]
+    public void The_haze_draws_only_bins_with_significant_observed_time()
+    {
+        // Ten minutes held at one point, plus light-load clocks that each passed through once (0.25 s).
+        List<RunBin> bins = [new(950, 2700, 600), new(900, 2400, 1.0), .. Enumerable.Range(0, 300).Select(i => new RunBin(830 + i % 60, 300 + i * 7.5, 0.25))];
+        var s = TuningTools.Significant(bins);
+        Assert.Equal([new RunBin(950, 2700, 600), new RunBin(900, 2400, 1.0)], s.Bins);
+        Assert.Equal(300, s.HiddenBins);
+        Assert.Equal(75, s.HiddenSeconds, 9);
+        Assert.Equal(TuningTools.MinBinSeconds, s.MinSeconds);
+    }
+
+    [Fact]
+    public void Over_a_long_span_the_floor_rises_with_the_observed_time()
+    {
+        // 60 days of about 10 h a day: a bin needs 0.05 % of the time (about 18 min), so passing looks do not pile past it.
+        List<RunBin> bins = [new(950, 2700, 60 * 36_000 - 1000), new(830, 1500, 600), new(840, 1600, 1200)];
+        var s = TuningTools.Significant(bins);
+        Assert.Equal(0.0005 * (60 * 36_000 - 1000 + 600 + 1200), s.MinSeconds, 9);
+        Assert.Equal([new RunBin(950, 2700, 60 * 36_000 - 1000), new RunBin(840, 1600, 1200)], s.Bins);
+        Assert.Equal(1, s.HiddenBins);
+    }
+
+    [Fact]
+    public void Nothing_observed_draws_nothing_and_hides_nothing()
+    {
+        var s = TuningTools.Significant([]);
+        Assert.Empty(s.Bins);
+        Assert.Equal(0, s.HiddenBins);
+        Assert.Equal(0, s.HiddenSeconds);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);

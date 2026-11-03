@@ -130,12 +130,17 @@ public sealed partial class TuningTools
         // timeline weighted by observed time, streamed a UTC day at a time over the 60 days.
         var read = new VfReadStats();
         var observed = ObservedRuns(dir == null ? null : Path.Combine(dir, VfHistoryFile.DirName), now - RunsSpan, now, ticks, read);
-        var runs = observed.Bins;
+        var shown = Significant(observed.Bins);
+        var runs = shown.Bins;
         var recorder = show.Ok && show.Result is { } sr && sr.TryGetProperty("vf_history", out var vh) && vh.ValueKind == JsonValueKind.Object ? vh.Clone() : (JsonElement?)null;
         info = new
         {
             lightweight_seconds = Math.Round(observed.LightweightSeconds, 1),
             residency_seconds = Math.Round(observed.ResidencySeconds, 1),
+            shown_bins = shown.Bins.Count,
+            hidden_bins = shown.HiddenBins,
+            hidden_seconds = Math.Round(shown.HiddenSeconds, 1),
+            min_bin_seconds = Math.Round(shown.MinSeconds, 2),
             days = RunsSpan.TotalDays,
             read = ReadReport(read),
             recorder = (object?)recorder ?? "the broker did not report its V/F history (an older broker, or none answering)",
@@ -238,6 +243,30 @@ public sealed partial class TuningTools
         for (; ri < res.Count; ri++) Push(res[ri].At.UtcTicks, res[ri].Uv, res[ri].Mhz, false);
         if (has) Count(null);
         return new ObservedRunsResult([.. bins.Select(b => new RunBin(b.Key >> 12, (b.Key & 0xFFF) * 7.5, b.Value))], light, resid);
+    }
+
+    /// <summary>The bins the haze shows, and what it leaves out as passing through.</summary>
+    public sealed record SignificantBins(List<RunBin> Bins, int HiddenBins, double HiddenSeconds, double MinSeconds);
+
+    /// <summary>A bin needs at least this much observed time to be shown: four looks of the broker's history.</summary>
+    public const double MinBinSeconds = 1.0;
+
+    /// <summary>And at least this share of all the observed time, so a long span does not let looks that only passed
+    /// through pile up past the floor.</summary>
+    public const double MinBinShare = 0.0005;
+
+    /// <summary>
+    /// The bins with enough observed time to say where the card runs: at least <see cref="MinBinSeconds"/> and
+    /// <see cref="MinBinShare"/> of the total. At light load the clock follows the load, not the curve, and moves by
+    /// hundreds of MHz between looks: most of those bins hold one look (0.25 s) and say nothing about the curve. They stay
+    /// on disk and in the totals; they are only not drawn.
+    /// </summary>
+    public static SignificantBins Significant(IReadOnlyList<RunBin> bins)
+    {
+        double total = bins.Sum(b => b.Seconds);
+        double min = Math.Max(MinBinSeconds, MinBinShare * total);
+        var shown = bins.Where(b => b.Seconds >= min).ToList();
+        return new SignificantBins(shown, bins.Count - shown.Count, total - shown.Sum(b => b.Seconds), min);
     }
 
     /// <summary>A bin's key: whole mV in the high bits, the 7.5 MHz step in the low 12 (an int hashes as itself; a long of
