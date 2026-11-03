@@ -257,35 +257,109 @@ public sealed class VfHistoryIntegrationTests : IDisposable
     }
 
     [Fact]
-    public void The_haze_draws_only_bins_with_significant_observed_time()
+    public void On_one_day_a_bin_needs_a_second_and_looks_that_passed_through_are_not_drawn()
     {
-        // Ten minutes held at one point, plus light-load clocks that each passed through once (0.25 s).
         List<RunBin> bins = [new(950, 2700, 600), new(900, 2400, 1.0), .. Enumerable.Range(0, 300).Select(i => new RunBin(830 + i % 60, 300 + i * 7.5, 0.25))];
-        var s = TuningTools.Significant(bins);
+        var s = TuningTools.Significant(bins, activeDays: 1);
         Assert.Equal([new RunBin(950, 2700, 600), new RunBin(900, 2400, 1.0)], s.Bins);
         Assert.Equal(300, s.HiddenBins);
         Assert.Equal(75, s.HiddenSeconds, 9);
-        Assert.Equal(TuningTools.MinBinSeconds, s.MinSeconds);
+        Assert.Equal(1, s.MinSeconds);
+    }
+
+    /// <summary>One day of real use as the 0.8.9 review saw it: a loaded point, a light-load cluster at 830 mV spread
+    /// over many clocks, and single looks passing through almost every clock.</summary>
+    private static List<RunBin> OneDay() =>
+    [
+        new(950, 2700, 900), new(955, 2707.5, 300),
+        .. Enumerable.Range(0, 30).Select(i => new RunBin(830, 682.5 + i * 7.5, 7)),
+        .. Enumerable.Range(0, 400).Select(i => new RunBin(800 + i % 90, 300 + i * 7.5, 0.25)),
+    ];
+
+    [Fact]
+    public void With_the_same_use_what_is_drawn_does_not_change_as_the_history_grows()
+    {
+        var day = TuningTools.Significant(OneDay(), activeDays: 1);
+        var sixty = TuningTools.Significant([.. OneDay().Select(b => b with { Seconds = b.Seconds * 60 })], activeDays: 60);
+        Assert.Equal(day.Bins.Select(b => (b.Mv, b.Mhz)), sixty.Bins.Select(b => (b.Mv, b.Mhz)));
+        Assert.Equal(day.HiddenBins, sixty.HiddenBins);
+        Assert.Equal(32, day.Bins.Count);   // the loaded point and the whole 830 mV cluster, none of the passing looks
     }
 
     [Fact]
-    public void Over_a_long_span_the_floor_rises_with_the_observed_time()
+    public void Looks_that_pass_through_a_bin_now_and_then_never_pile_up_past_the_floor()
     {
-        // 60 days of about 10 h a day: a bin needs 0.05 % of the time (about 18 min), so passing looks do not pile past it.
-        List<RunBin> bins = [new(950, 2700, 60 * 36_000 - 1000), new(830, 1500, 600), new(840, 1600, 1200)];
-        var s = TuningTools.Significant(bins);
-        Assert.Equal(0.0005 * (60 * 36_000 - 1000 + 600 + 1200), s.MinSeconds, 9);
-        Assert.Equal([new RunBin(950, 2700, 60 * 36_000 - 1000), new RunBin(840, 1600, 1200)], s.Bins);
-        Assert.Equal(1, s.HiddenBins);
+        // A quarter second a day in each of 400 bins for 60 days: 15 s each, under the 60 s floor of 60 days.
+        var s = TuningTools.Significant([new(950, 2700, 36_000), .. Enumerable.Range(0, 400).Select(i => new RunBin(800 + i % 90, 300 + i * 7.5, 15))], activeDays: 60);
+        Assert.Single(s.Bins);
+        Assert.Equal(60, s.MinSeconds);
+    }
+
+    [Fact]
+    public void A_ten_minute_region_spread_by_jitter_is_drawn_after_months_of_heavy_use()
+    {
+        // The 0.8.9 review: 10 h a day for 60 days put 0.05 % of all time at 18 min and hid a real 10 min region, more so
+        // when jitter spread it over neighbouring clocks. Per day of use the floor is 60 s, whatever the hours.
+        List<RunBin> bins = [new(950, 2700, 60 * 36_000), .. Enumerable.Range(0, 5).Select(i => new RunBin(1000, 2850 + i * 7.5, 120))];
+        var s = TuningTools.Significant(bins, activeDays: 60);
+        Assert.Equal(5, s.Bins.Count(b => b.Mv == 1000));
+        Assert.True(0.0005 * bins.Sum(b => b.Seconds) > 120);   // what 0.8.9 would have required of each of them
     }
 
     [Fact]
     public void Nothing_observed_draws_nothing_and_hides_nothing()
     {
-        var s = TuningTools.Significant([]);
+        var s = TuningTools.Significant([], activeDays: 0);
         Assert.Empty(s.Bins);
         Assert.Equal(0, s.HiddenBins);
         Assert.Equal(0, s.HiddenSeconds);
+        Assert.Null(TuningTools.RunsSummary(s, []));
+    }
+
+    [Fact]
+    public void Active_days_are_the_UTC_days_that_hold_observed_time_in_both_reads()
+    {
+        VfHistoryStore.Append(VfDir, [.. Light(T, 10), .. Light(T.AddDays(1), 10), .. Light(T.AddDays(3), 10)]);
+        var fast = TuningTools.ObservedRuns(VfDir, T.AddDays(-1), T.AddDays(5), []);
+        var general = TuningTools.ObservedRuns(VfHistoryStore.Read(VfDir, T.AddDays(-1), T.AddDays(5)), []);
+        Assert.Equal(3, fast.ActiveDays);
+        Assert.Equal(3, general.ActiveDays);
+        Assert.Equal(3, TuningTools.ObservedRuns(VfDir, T.AddDays(-1), T.AddDays(5), Ticks(T, 30)).ActiveDays);   // residency on a day already counted
+        Assert.Equal(4, TuningTools.ObservedRuns(VfDir, T.AddDays(-1), T.AddDays(5), Ticks(T.AddDays(2), 30)).ActiveDays);   // and on a day of its own
+    }
+
+    [Fact]
+    public void The_windows_line_says_what_is_drawn_and_what_it_holds()
+    {
+        var all = OneDay();
+        var line = TuningTools.RunsSummary(TuningTools.Significant(all, 1), all);
+        Assert.StartsWith($"Observed V/F: 32 of {all.Count} bins drawn, holding ", line);
+        Assert.Contains("1 s per day of use", line);
+        Assert.Contains("Ran for", line);
+    }
+
+    [Fact]
+    public void A_points_ran_for_counts_every_bin_drawn_or_not()
+    {
+        var all = OneDay();
+        var drawn = TuningTools.Significant(all, 1).Bins;
+        var data = new EditorData("GPU", [830], [700_000], [0], 1, 0, 0, null, null, [], [], drawn, null, null, [], null, [], TwoPoints, all);
+        Assert.Equal(all.Where(b => b.Mv == 830).Sum(b => b.Seconds), data.RunsForTotals.Where(b => b.Mv == 830).Sum(b => b.Seconds));
+        Assert.Same(drawn, new EditorData("GPU", [830], [700_000], [0], 1, 0, 0, null, null, [], [], drawn, null, null, [], null, [], TwoPoints).RunsForTotals);
+    }
+
+    [Fact]
+    public void A_trial_history_file_that_cannot_be_read_is_reported_whatever_its_age()
+    {
+        if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
+        var old = T.AddDays(-90);
+        VfHistoryStore.Append(VfDir, Light(old, 60));
+        var path = Path.Combine(VfDir, VfHistoryFile.DayFileName(VfHistoryFile.UtcDay(old)));
+        var read = new VfReadStats();
+        using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            TuningTools.HistoryTimeline([Trial(old, 60)], [], VfDir, read);
+        Assert.Equal(1, read.UnreadableFiles);
+        Assert.NotNull(System.Text.Json.JsonSerializer.SerializeToElement(TuningTools.ReadReport(read)).GetProperty("note").GetString());
     }
 
     public void Dispose()

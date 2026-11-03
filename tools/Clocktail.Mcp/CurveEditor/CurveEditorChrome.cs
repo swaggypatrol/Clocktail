@@ -65,7 +65,7 @@ public sealed partial class CurveEditorForm
         }
         _showOpened = Layer("Opened", "ShowOpened", true, "The GPU curve read when this window opened (dashed). Hidden where identical to the draft.");
         _showReference = Layer("Base", "ShowReference", false, "Base clocks at the opening temperature, including any P0 core offset. This is not necessarily factory stock.");
-        _showHistory = Layer("Observed V/F", "ShowHistory", true, "Where the card actually ran over the last 60 days: the always-on V/F history (every look above 825 mV, light loads included) and residency samples at ≥50% load, weighted by observed time. Brighter dots mean more time; a bin with under 1 s (or 0.05% of the time) is not drawn, since at light load the clock follows the load, not the curve. Observed operation, not a stability result; a snapshot, not live telemetry.");
+        _showHistory = Layer("Observed V/F", "ShowHistory", true, "Where the card actually ran over the last 60 days: the always-on V/F history (every look above 825 mV, light loads included) and residency samples at ≥50% load, weighted by observed time. Brighter dots mean more time; a bin with under 1 s per day of use is not drawn, since at light load the clock follows the load, not the curve. Observed operation, not a stability result; a snapshot, not live telemetry.");
         _showEvidence = Layer("Test evidence", "ShowEvidence", true, "Green: sampled clock in a stable test. Amber: the stable setting was not reached, or has no samples. Marks do not certify the current draft.");
         _showCrashes = Layer("Crashes", "ShowCrashes", true, "Crosses at crash settings; solid for curve trials, lighter for other trials.");
 
@@ -263,6 +263,7 @@ public sealed partial class CurveEditorForm
         details += _d.AlsoKept == null ? "Save as Daily applies this curve and keeps it as the Daily profile.\r\n"
             : "Other settings included in Save as Daily\r\n" + _d.AlsoKept + "\r\n";
         details += "\r\nOpened curve = the GPU snapshot read when the editor opened.\r\nObserved V/F = where the card ran (measured voltage and clock, by observed time); it is not a stability result.\r\nObserved V/F and test evidence = historical records, not live telemetry.\r\nGreen marks show sampled clocks in stable tests; amber marks are settings without matching samples.\r\nHistorical evidence does not guarantee that the current draft is stable.";
+        if (_d.RunsSummary != null) details += "\r\n" + _d.RunsSummary;
         var text = new TextBox { Multiline = true, ReadOnly = true, WordWrap = true, ScrollBars = ScrollBars.Vertical,
             Dock = DockStyle.Fill, BackColor = PlotBg, ForeColor = TextC, BorderStyle = BorderStyle.None,
             Text = details, AccessibleName = "Complete draft and save details" };

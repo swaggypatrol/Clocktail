@@ -935,7 +935,8 @@ public sealed partial class CurveEditorForm : Form
                 int curve = crashes.Count(c => c.CurveTrial);
                 lines.Add(($"Crashes: {crashes.Count}{(curve < crashes.Count ? $" ({curve} in curve trials)" : "")}; lowest setting {Fmt(crashes.Min(c => c.SetMhz))} MHz", CrashC));
             }
-            var runs = _d.Runs.Where(r => Math.Abs(r.Mv - _d.Mv[i]) < 2.5).ToList();
+            // Every bin near the point, drawn or not: the filter decides what is drawn, never how long the card ran.
+            var runs = _d.RunsForTotals.Where(r => Math.Abs(r.Mv - _d.Mv[i]) < 2.5).ToList();
             if (runs.Count > 0)
             {
                 var most = runs.MaxBy(r => r.Seconds)!;
