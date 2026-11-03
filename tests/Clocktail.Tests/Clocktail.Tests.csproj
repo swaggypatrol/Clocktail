@@ -25,6 +25,8 @@
     <ProjectReference Include="..\..\tools\Clocktail.Lab\Clocktail.Lab.csproj" />
     <ProjectReference Include="..\..\tools\Clocktail.Mcp\Clocktail.Mcp.csproj" />
     <ProjectReference Include="..\..\src\Clocktail.Cli\Clocktail.Cli.csproj" />
+    <!-- The broker's V/F history recorder (VfHistoryRecorder): tested with fake looks and a fake writer, no GPU. -->
+    <ProjectReference Include="..\..\src\Clocktail.Broker\Clocktail.Broker.csproj" />
   </ItemGroup>
 
 </Project>

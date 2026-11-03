@@ -7,6 +7,7 @@ using Clocktail.Domain.Broker;
 using Clocktail.Domain.Ownership;
 using Clocktail.Domain.Platform;
 using Clocktail.Domain.Profiles;
+using Clocktail.Domain.Vf;
 using Clocktail.Hw;
 
 const string Usage = """
@@ -178,8 +179,14 @@ static int Run()
         }
     });
     // The last 60 s of each GPU in memory; on a reset the window is saved and its crash point steps the curve there.
-    var sampler = new FlightSampler(mgr, hw, targets.Ids.Select(id => (id, targets.Resolve(id)!.Session)).ToList());
+    // The same looks above 825 mV NVVDD, as time, measured voltage and measured clock, to vf-history\ beside each journal:
+    // whether or not any client is connected (VfHistoryRecorder).
+    var vfHistory = new VfHistoryRecorder(
+        targets.Ids.ToDictionary(id => id, id => VfHistoryFile.DirBeside(targets.Resolve(id)!.Journal.Path), StringComparer.OrdinalIgnoreCase), Log);
+    var sampler = new FlightSampler(mgr, hw, targets.Ids.Select(id => (id, targets.Resolve(id)!.Session)).ToList(), vfHistory);
     KeepRunning("the flight recorder", () => sampler.RunAsync(cts.Token));
+    KeepRunning("the V/F history writer", () => vfHistory.RunAsync(() => DateTimeOffset.Now, cts.Token));
+    dispatcher.HistoryStatus = () => vfHistory.Status.Wire();
     dispatcher.HungReason = id => sampler.Recorders.TryGetValue(id, out var r) ? FlightRecorder.HungNow(r.Freeze(), DateTimeOffset.Now) : null;
     // What only a watching agent may hold goes back when no agent has been heard from for 5 minutes.
     var lease = new TrialLease(dispatcher.Dispatch, targets.Ids, () => dispatcher.LastAlive, Log);
@@ -206,6 +213,8 @@ static int Run()
     void OnReset(string evidence)
     {
         var seen = DateTimeOffset.Now;
+        // Every event of a burst: the V/F history withholds the looks of the hang it ends (idempotent, no I/O).
+        foreach (var (id, r) in sampler.Recorders) vfHistory.Reset(id, r.Freeze(), seen);
         if (!bursts.Starts(seen)) return;
         var windows = sampler.Recorders.ToDictionary(r => r.Key, r => r.Value.Freeze());   // before the recovered driver adds its own looks
         Once("the crash trace", () =>
@@ -252,6 +261,9 @@ static int Run()
     server.RunAsync(cts.Token).GetAwaiter().GetResult();
     watch?.Dispose();
     wakeWatch?.Dispose();
+    // The V/F looks still held go out (up to any doubt the window raises), for at most 3 s: a stuck disk does not hold the exit.
+    try { Task.Run(() => vfHistory.Shutdown(DateTimeOffset.Now, id => sampler.Recorders.TryGetValue(id, out var r) ? r.Freeze() : null)).Wait(TimeSpan.FromSeconds(3)); }
+    catch (Exception e) { Log($"vf history: the last write did not finish: {e.GetBaseException().Message}"); }
     Console.WriteLine($"{DateTimeOffset.Now:u} broker down");
     return 0;
 }

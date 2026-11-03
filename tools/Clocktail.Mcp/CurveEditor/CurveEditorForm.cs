@@ -15,16 +15,18 @@ namespace Clocktail.Mcp.CurveEditor;
 /// it happened on, the highest setting each point was marked stable or survived at, and where the card actually ran. The
 /// low-voltage cliff is reshaped as a transition band between two draggable lines (<see cref="CurveModel"/>); above the
 /// band the person drags points. The person's click on the save button is their own approval: the window hands the
-/// offsets to <c>save</c> (a trial, then keep_as_daily) and closes when it lands.
+/// offsets to <c>save</c> (a trial, then keep_as_daily), then shows the verified result.
 /// </summary>
-public sealed class CurveEditorForm : Form
+public sealed partial class CurveEditorForm : Form
 {
     private static Color C(int rgb, int a = 255) => Color.FromArgb(a, (rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
-    private static readonly Color Bg = C(0x111317), PlotBg = C(0x16191e), GridMinor = C(0x1f2329), GridMajor = C(0x2a2f37),
-        AxisText = C(0x8a919c), TextC = C(0xd9dde3), Dim = C(0x6f7681), CurveC = C(0xeef1f5), ChangedC = C(0xffd08a),
-        Accent = C(0xffb44a), Ghost = C(0x8796ab), StockC = C(0x58606d), CrashC = C(0xff4d6d), RunC = C(0x2ec4b6),
-        Good = C(0x6bd98f), PanelC = C(0x22262d), PanelBorder = C(0x3a404a), Primary = C(0x3d8bff), Err = C(0xff6b6b),
-        ButtonC = C(0x262a31), ButtonHover = C(0x30353e);
+    // Warm, Claude-style dark palette: charcoal and cream neutrals with a clay accent; crash, stable and unverified marks
+    // keep hues of their own so the evidence stays readable against the accent.
+    private static readonly Color Bg = C(0x1c1b19), PlotBg = C(0x22211e), GridMinor = C(0x2c2a27), GridMajor = C(0x3a3733),
+        AxisText = C(0xaba69c), TextC = C(0xf0eee6), Dim = C(0x8f8a80), CurveC = C(0xfaf9f5), ChangedC = C(0xe08a6a),
+        Accent = C(0xd97757), Ghost = C(0xb0a596), StockC = C(0x635e56), CrashC = C(0xf2557a), RunC = C(0x7fb3a3),
+        Good = C(0xa3c47e), PanelC = C(0x2a2825), PanelBorder = C(0x48443d), Primary = C(0xc96442), Err = C(0xf07a6a),
+        Unverified = C(0xe9c46a);
 
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
@@ -38,9 +40,10 @@ public sealed class CurveEditorForm : Form
     /// part starts); <see cref="_bottomManual"/> once the person dragged the foot, so moving the top keeps it.</summary>
     private int _top, _bottom;
     private bool _bottomManual;
-    private readonly Stack<(int[] Off, int Top, int Bottom, bool Manual)> _undo = new();
+    private readonly EditorHistory _history = new();
+    private readonly EditorDraft _original;
     private readonly int _maxIndex;   // the last point the card can reach (NVVDD MAX): the right end of smoothing
-    private readonly double _runMax, _peakOpened;
+    private readonly double _runMax;
 
     private float _s = 1;
     private Font _body = null!, _small = null!, _title = null!, _bold = null!;
@@ -49,7 +52,7 @@ public sealed class CurveEditorForm : Form
     private Bitmap? _layer;
     private (double, double, double, double, int, int, float) _layerKey;
 
-    private int? _hover, _sel, _hoverCrash, _hoverRun, _hoverButton;
+    private int? _hover, _sel, _hoverCrash, _hoverRun, _hoverEvidence;
     /// <summary>1: the foot line, 2: the top line, 0: neither.</summary>
     private int _hoverLine, _dragLine;
     private int? _drag;
@@ -65,7 +68,6 @@ public sealed class CurveEditorForm : Form
     private string? _saveError;
     private string _status;
     private Color _statusColor;
-    private readonly List<(RectangleF R, string Label, Action Do, bool Primary, Func<bool> Enabled)> _buttons = [];
 
     /// <summary>How the window ended, for the tool's next answer.</summary>
     public string Outcome { get; private set; } = "closed without saving";
@@ -77,20 +79,10 @@ public sealed class CurveEditorForm : Form
         _delete = delete;
         _opened = [.. data.Offsets];
         Detect();
-        _off = Rules(_opened, _top);
-        _peakOpened = CurveModel.PeakSlope(data.Mv, data.BaseKhz, _opened, _bottom, _top);
-        int changed = Enumerable.Range(0, _off.Length).Count(i => _off[i] != _opened[i]);
-        if (changed > 0)
-        {
-            var (lift, at) = MaxLift();
-            _status = $"Band {Fmt(_d.Mv[_bottom])}–{Fmt(_d.Mv[_top])} mV smoothed: {changed} points changed, up to {Signed(lift)} MHz at {Fmt(at)} mV above opened; not applied to GPU";
-            _statusColor = Accent;
-        }
-        else
-        {
-            _status = "No correction needed; drag a point to edit";
-            _statusColor = Dim;
-        }
+        _off = (int[])_opened.Clone();
+        _original = Draft();
+        _status = "Draft only. Select a point or drag to edit; the GPU is unchanged.";
+        _statusColor = Dim;
         _maxIndex = data.MaxMv is { } max ? Math.Max(1, Array.FindLastIndex(data.Mv, v => v <= max + 0.01)) : data.Mv.Length - 1;
         _runMax = data.Runs.Count == 0 ? 1 : data.Runs.Max(r => r.Seconds);
 
@@ -104,11 +96,10 @@ public sealed class CurveEditorForm : Form
         KeyPreview = true;
         Fonts();
         ResetView();
-        _buttons.Add((default, "Smooth", Smooth, false, () => !_busy));
-        _buttons.Add((default, "Undo", Undo, false, () => !_busy && _undo.Count > 0));
-        _buttons.Add((default, "Reset", Reset, false, () => !_busy));
-        _buttons.Add((default, "Cancel", Close, false, () => !_busy));
-        _buttons.Add((default, "Confirm & Save as Daily", Save, true, () => !_busy));
+        BuildChrome();
+        _sel = data.Runs.Count > 0 ? Array.FindIndex(data.Mv, v => v >= data.Runs.MaxBy(r => r.Seconds)!.Mv) : _top;
+        if (_sel < 0) _sel = _top;
+        RefreshChrome();
     }
 
     // ---- DPI ----
@@ -126,8 +117,8 @@ public sealed class CurveEditorForm : Form
         _s = Math.Max(1, dpi) / 96f;
         Fonts();
         var area = Screen.FromPoint(Cursor.Position).WorkingArea;
-        int w = Math.Min((int)(1320 * _s), (int)(area.Width * 0.94)), h = Math.Min((int)(840 * _s), (int)(area.Height * 0.92));
-        MinimumSize = new Size((int)(960 * _s), (int)(620 * _s));
+        int w = Math.Min((int)(1320 * _s), (int)(area.Width * 0.94)), h = Math.Min((int)(900 * _s), (int)(area.Height * 0.92));
+        MinimumSize = new Size(Math.Min((int)(900 * _s), area.Width), Math.Min((int)(660 * _s), area.Height));
         Bounds = new Rectangle(area.Left + (area.Width - w) / 2, area.Top + (area.Height - h) / 2, w, h);
     }
 
@@ -138,7 +129,8 @@ public sealed class CurveEditorForm : Form
             _s = Math.Max(96, (int)((long)m.WParam & 0xffff)) / 96f;
             var r = Marshal.PtrToStructure<RECT>(m.LParam);
             Fonts();
-            MinimumSize = new Size((int)(960 * _s), (int)(620 * _s));
+            var area = Screen.FromHandle(Handle).WorkingArea;
+            MinimumSize = new Size(Math.Min((int)(900 * _s), area.Width), Math.Min((int)(660 * _s), area.Height));
             Bounds = new Rectangle(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top);
             Invalidate();
             m.Result = IntPtr.Zero;
@@ -151,12 +143,18 @@ public sealed class CurveEditorForm : Form
 
     private void Fonts()
     {
-        _body?.Dispose(); _small?.Dispose(); _title?.Dispose(); _bold?.Dispose();
+        // WinForms keeps an equal Font instance instead of replacing it. Rebuilding the same fonts on handle creation
+        // would therefore leave native child controls holding disposed instances.
+        if (_body != null && Math.Abs(_body.Size - 13 * _s) < 0.01f) { LayoutChrome(); return; }
+        var old = (_body, _small, _title, _bold);
         const string face = "Segoe UI";
         _body = new Font(face, 13 * _s, GraphicsUnit.Pixel);
         _bold = new Font(face, 13 * _s, FontStyle.Bold, GraphicsUnit.Pixel);
         _small = new Font(face, 11.5f * _s, GraphicsUnit.Pixel);
-        _title = new Font(face, 17 * _s, FontStyle.Bold, GraphicsUnit.Pixel);
+        _title = new Font(face, 23 * _s, FontStyle.Bold, GraphicsUnit.Pixel);
+        ApplyChromeFonts();
+        LayoutChrome();
+        old._body?.Dispose(); old._small?.Dispose(); old._title?.Dispose(); old._bold?.Dispose();
     }
 
     protected override void OnShown(EventArgs e)
@@ -233,11 +231,16 @@ public sealed class CurveEditorForm : Form
     private double InvX(float x) => _vx0 + (x - _plot.Left) / _plot.Width * (_vx1 - _vx0);
     private double InvY(float y) => _vy0 + (_plot.Bottom - y) / _plot.Height * (_vy1 - _vy0);
 
-    private void Push()
+    private EditorDraft Draft() => new(_off, _top, _bottom, _bottomManual);
+    private void Restore(EditorDraft draft)
     {
-        _undo.Push(([.. _off], _top, _bottom, _bottomManual));
-        if (_undo.Count > 200) { var keep = _undo.Take(150).Reverse().ToList(); _undo.Clear(); foreach (var u in keep) _undo.Push(u); }
+        (_off, _top, _bottom, _bottomManual) = ((int[])draft.Offsets.Clone(), draft.Top, draft.Foot, draft.ManualFoot);
+        RefreshChrome();
+        Invalidate();
     }
+    private bool Dirty => !_original.SameAs(Draft());
+    private void Push() => _history.Begin(Draft());
+    private bool FinishEdit() { bool changed = _history.Commit(Draft()); RefreshChrome(); Invalidate(); return changed; }
 
     /// <summary>The band for the opened curve: the one it was saved with while the card still holds that curve, else detected.</summary>
     private void Detect()
@@ -251,36 +254,37 @@ public sealed class CurveEditorForm : Form
 
     private void Smooth()
     {
-        var before = _off;
+        if (_busy || _done) return;
         Push();
         _off = Rules(CurveModel.Smooth(_d.Mv, _off, _d.BaseKhz, _top, _maxIndex, _d.Writable), _top);
-        if (_off.SequenceEqual(before)) { _undo.Pop(); Say("Already smooth: no points changed", Dim); return; }
-        Say("Smoothed above the band (nondecreasing clocks, flat top preserved); click again to smooth further", Dim);
+        bool changed = FinishEdit();
+        Say(changed ? "Draft smoothed, including its transition band. GPU unchanged." : "Already smooth; no draft points changed.", Dim);
     }
 
     private void Undo()
     {
-        if (_undo.Count == 0) return;
-        (_off, _top, _bottom, _bottomManual) = _undo.Pop();
-        Say("Undone", Dim);
+        if (_history.Undo(Draft()) is { } before) { Restore(before); Say("Edit undone. GPU unchanged.", Dim); }
     }
-
+    private void Redo()
+    {
+        if (_history.Redo(Draft()) is { } after) { Restore(after); Say("Edit redone. GPU unchanged.", Dim); }
+    }
     private void Reset()
     {
-        var (off, top, bottom, manual) = (_off, _top, _bottom, _bottomManual);
         Push();
-        Detect();
-        _off = Rules(_opened, _top);
-        if (_off.SequenceEqual(off) && (_top, _bottom, _bottomManual) == (top, bottom, manual)) { _undo.Pop(); Say("Already at the opened curve", Dim); return; }
-        Say("Reset to the opened curve (transition band smoothed again)", Dim);
+        Restore(_original);
+        FinishEdit();
+        Say("Restored the exact curve read when this window opened. GPU unchanged.", Dim);
     }
-
-    private void Say(string text, Color color) { _status = text; _statusColor = color; Invalidate(); }
+    private void Say(string text, Color color) { _status = text; _statusColor = color; RefreshChrome(); Invalidate(); }
 
     private void Save()
     {
+        if (_busy) return;
         if (_done) { Close(); return; }
-        if (CurveModel.Violation(_d.Mv, _opened, _off, _d.Writable, _d.LowKhz, _d.HighKhz) is { } bad) { Say("Cannot save: " + bad, Err); return; }
+        _saveButton.Focus(); // Commit any numeric edit before copying the draft.
+        if (CurveModel.Violation(_d.Mv, _opened, _off, _d.Writable, _d.LowKhz, _d.HighKhz) is { } bad) { _saveError = bad; Say("Cannot save: " + bad, Err); return; }
+        _saveError = null;
         _busy = true;
         Cursor = Cursors.WaitCursor;
         Say("Applying to GPU…", Accent);
@@ -296,14 +300,15 @@ public sealed class CurveEditorForm : Form
                 Cursor = Cursors.Default;
                 if (result.Saved && result.Warning == null)
                 {
-                    _saved = true;
+                    _saved = _done = true;
                     Outcome = "saved: the curve was written and kept as the daily profile";
-                    Close();
+                    Say("Saved as Daily. Curve applied and readback verified.", Good);
                 }
                 else if (result.Saved)
                 {
                     // Saved, but the card did not finish switching to it (a trial's wall still on): the person reads why, then closes.
                     _saved = _done = true;
+                    _saveError = result.Warning;
                     Outcome = $"saved with a warning: {result.Warning}";
                     Say("Saved as Daily, but: " + result.Warning, Accent);
                 }
@@ -324,6 +329,21 @@ public sealed class CurveEditorForm : Form
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (_busy) { e.Cancel = true; Say("Operation in progress; please wait…", Accent); return; }
+        if (!_saved && Dirty && !_discarding && e.CloseReason == CloseReason.UserClosing)
+        {
+            var save = new TaskDialogButton("Save as Daily");
+            var discard = new TaskDialogButton("Discard draft");
+            var page = new TaskDialogPage
+            {
+                Caption = "Clocktail", Heading = "You have an unsaved curve draft",
+                Text = "Save as Daily applies the draft to your GPU and keeps it for future starts. Discard leaves the GPU unchanged.",
+                Buttons = { save, discard, TaskDialogButton.Cancel }, DefaultButton = TaskDialogButton.Cancel,
+            };
+            var choice = TaskDialog.ShowDialog(this, page);
+            if (choice == save) { e.Cancel = true; Save(); return; }
+            if (choice != discard) { e.Cancel = true; return; }
+            _discarding = true;
+        }
         if (!_saved) Outcome = _saveError == null ? "cancelled: nothing was written" : $"closed after a failed save: {_saveError}";
         base.OnFormClosing(e);
     }
@@ -335,12 +355,13 @@ public sealed class CurveEditorForm : Form
         if (!_plot.Contains(location)) return;
         var indices = new HashSet<int>();
         if (PointAt(location, draggableOnly: false) is { } i) indices.Add(i);
-        foreach (var ev in _d.Evidence)
+        foreach (var ev in _showEvidence.Checked ? _d.Evidence : [])
             if (Math.Abs(X(ev.Mv) - location.X) <= 8 * _s
                 && ((ev.StableMhz is { } st && Math.Abs(Y(st) - location.Y) <= 8 * _s)
+                    || (ev.StableRanMhz is { } ran && Math.Abs(Y(ran) - location.Y) <= 8 * _s)
                     || (ev.SurvivedMhz is { } sv && Math.Abs(Y(sv) - location.Y) <= 8 * _s)))
                 indices.Add(ev.Index);
-        var ids = _d.Crashes.Where(c => Math.Abs(X(c.Mv) - location.X) <= 8 * _s
+        var ids = (_showCrashes.Checked ? _d.Crashes : []).Where(c => Math.Abs(X(c.Mv) - location.X) <= 8 * _s
             && Math.Abs(Y(c.SetMhz) - location.Y) <= 8 * _s).Select(c => c.RecordId);
         var records = HistoryData.Select(_d.Tests, indices, ids);
         _historyMenu?.Dispose();
@@ -384,7 +405,7 @@ public sealed class CurveEditorForm : Form
                 Ui(() =>
                 {
                     _d = _d with { Crashes = history.Crashes, Evidence = history.Evidence, Tests = history.Tests };
-                    _hoverCrash = _hover = _hoverRun = null;
+                    _hoverCrash = _hover = _hoverRun = _hoverEvidence = null;
                     _busy = false;
                     Cursor = Cursors.Default;
                     Say("Historical test deleted; evidence refreshed. GPU settings unchanged.", Good);
@@ -438,6 +459,18 @@ public sealed class CurveEditorForm : Form
         return best;
     }
 
+    private int? EvidenceAt(PointF p)
+    {
+        if (!_plot.Contains(p)) return null;
+        for (int k = _d.Evidence.Count - 1; k >= 0; k--)
+        {
+            var ev = _d.Evidence[k];
+            if (Math.Abs(X(ev.Mv) - p.X) > 8 * _s) continue;
+            if (new[] { ev.StableMhz, ev.StableRanMhz, ev.SurvivedMhz }.Any(mhz => mhz is { } v && Math.Abs(Y(v) - p.Y) < 8 * _s)) return k;
+        }
+        return null;
+    }
+
     /// <summary>Which band line's tab is under the point (1: the foot's, 2: the top's, 0: neither).</summary>
     private int TabAt(PointF p) => _topTab.Contains(p) ? 2 : _footTab.Contains(p) ? 1 : 0;
 
@@ -449,12 +482,6 @@ public sealed class CurveEditorForm : Form
         if (Math.Abs(X(_d.Mv[_top]) - p.X) < 6 * _s) return 2;
         if (_bottom < _top && Math.Abs(X(_d.Mv[_bottom]) - p.X) < 6 * _s) return 1;
         return 0;
-    }
-
-    private int? ButtonAt(PointF p)
-    {
-        for (int k = 0; k < _buttons.Count; k++) if (_buttons[k].R.Contains(p)) return k;
-        return null;
     }
 
     /// <summary>The point whose voltage is nearest the mouse (for the band lines).</summary>
@@ -469,7 +496,7 @@ public sealed class CurveEditorForm : Form
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
-        if (_busy) return;
+        if (_busy || _done) return;
         if (e.Button == MouseButtons.Right)
         {
             _rightDown = _plot.Contains(e.Location) ? e.Location : null;
@@ -477,9 +504,9 @@ public sealed class CurveEditorForm : Form
         }
         if (e.Button == MouseButtons.Left)
         {
-            if (ButtonAt(e.Location) is { } b) { if (_buttons[b].Enabled()) _buttons[b].Do(); Invalidate(); return; }
+            if (_plot.Contains(e.Location)) { ActiveControl = null; Focus(); }
             int line = TabAt(e.Location);
-            int? point = line == 0 ? PointAt(e.Location, draggableOnly: true) : null;
+            int? point = line == 0 ? PointAt(e.Location, draggableOnly: false) : null;
             if (line == 0 && point == null) line = LineBodyAt(e.Location);
             if (line != 0)
             {
@@ -491,11 +518,14 @@ public sealed class CurveEditorForm : Form
             }
             if (point is { } i)
             {
+                _sel = i;
+                if (!Draggable(i)) { RefreshChrome(); Invalidate(); return; }
                 Push();
                 _drag = _sel = i;
                 _dragStart = [.. _off];
                 _dragShift = (ModifierKeys & Keys.Shift) != 0;
                 Capture = true;
+                RefreshChrome();
                 Invalidate();
                 return;
             }
@@ -523,6 +553,7 @@ public sealed class CurveEditorForm : Form
             }
             else next[k] = want;
             _off = Rules(next, k);
+            RefreshChrome();
             Invalidate();
             return;
         }
@@ -566,16 +597,15 @@ public sealed class CurveEditorForm : Form
             Invalidate();
             return;
         }
-        var before = (_hover, _hoverCrash, _hoverRun, _hoverButton, _hoverLine);
-        _hoverButton = ButtonAt(e.Location);
-        _hoverLine = _hoverButton == null ? TabAt(e.Location) : 0;
-        _hover = _hoverButton == null && _hoverLine == 0 ? PointAt(e.Location, draggableOnly: false) : null;
-        if (_hoverButton == null && _hoverLine == 0 && _hover == null) _hoverLine = LineBodyAt(e.Location);
-        _hoverCrash = _hover == null && _hoverButton == null && _hoverLine == 0 ? CrashAt(e.Location) : null;
-        _hoverRun = _hover == null && _hoverCrash == null && _hoverLine == 0 && _plot.Contains(e.Location) ? RunAt(e.Location) : null;
-        Cursor = _busy ? Cursors.WaitCursor : _hoverLine != 0 ? Cursors.SizeWE : _hover is { } h && Draggable(h) ? Cursors.SizeNS
-            : _hoverButton is { } hb && _buttons[hb].Enabled() ? Cursors.Hand : Cursors.Default;
-        if (before != (_hover, _hoverCrash, _hoverRun, _hoverButton, _hoverLine)) Invalidate();
+        var before = (_hover, _hoverCrash, _hoverRun, _hoverEvidence, _hoverLine);
+        _hoverLine = TabAt(e.Location);
+        _hover = _hoverLine == 0 ? PointAt(e.Location, draggableOnly: false) : null;
+        if (_hoverLine == 0 && _hover == null) _hoverLine = LineBodyAt(e.Location);
+        _hoverCrash = _showCrashes.Checked && _hover == null && _hoverLine == 0 ? CrashAt(e.Location) : null;
+        _hoverEvidence = _showEvidence.Checked && _hover == null && _hoverCrash == null && _hoverLine == 0 ? EvidenceAt(e.Location) : null;
+        _hoverRun = _showHistory.Checked && _hover == null && _hoverCrash == null && _hoverEvidence == null && _hoverLine == 0 && _plot.Contains(e.Location) ? RunAt(e.Location) : null;
+        Cursor = _busy ? Cursors.WaitCursor : !_done && _hoverLine != 0 ? Cursors.SizeWE : !_done && _hover is { } h && Draggable(h) ? Cursors.SizeNS : Cursors.Default;
+        if (before != (_hover, _hoverCrash, _hoverRun, _hoverEvidence, _hoverLine)) Invalidate();
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -583,15 +613,22 @@ public sealed class CurveEditorForm : Form
         base.OnMouseUp(e);
         bool menu = !_busy && e.Button == MouseButtons.Right && _rightDown is { } down && !_rightDragged
             && Math.Abs(e.X - down.X) <= 4 * _s && Math.Abs(e.Y - down.Y) <= 4 * _s;
-        // A click that moved nothing leaves no undo step.
-        if ((_drag != null || _dragLine != 0) && _dragStart != null && _undo.Count > 0 && _undo.Peek() is var u
-            && u.Off.SequenceEqual(_off) && u.Top == _top && u.Bottom == _bottom) _undo.Pop();
+        if (_drag != null || _dragLine != 0) FinishEdit();
         _drag = null; _dragStart = null; _dragLine = 0; _pan = null;
         Capture = false;
         _rightDown = null;
         Cursor = Cursors.Default;
         Invalidate();
         if (menu) HistoryMenu(e.Location);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        base.OnMouseLeave(e);
+        _hover = _hoverCrash = _hoverRun = _hoverEvidence = null;
+        _hoverLine = 0;
+        if (_drag == null && _dragLine == 0 && _pan == null && !_busy) Cursor = Cursors.Default;
+        Invalidate();
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
@@ -614,26 +651,48 @@ public sealed class CurveEditorForm : Form
         if (e.Button == MouseButtons.Left && _plot.Contains(e.Location) && PointAt(e.Location, draggableOnly: false) == null && TabAt(e.Location) == 0 && LineBodyAt(e.Location) == 0) { ResetView(); Invalidate(); }
     }
 
+    private void CancelGesture()
+    {
+        if (_drag != null || _dragLine != 0)
+        {
+            if (_history.Cancel() is { } before) Restore(before);
+            _drag = null; _dragStart = null; _dragLine = 0;
+            Say("Drag cancelled. Draft restored.", Dim);
+        }
+        _pan = null; _rightDown = null; Capture = false;
+    }
+
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        base.OnMouseCaptureChanged(e);
+        if (!Capture && (_drag != null || _dragLine != 0)) CancelGesture();
+    }
+
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
-        if (_busy || _drag != null || _dragLine != 0) return base.ProcessCmdKey(ref msg, keyData);   // not under a drag: the next move would undo it
         Keys key = keyData & Keys.KeyCode;
         bool shift = (keyData & Keys.Shift) != 0, ctrl = (keyData & Keys.Control) != 0;
-        if (ctrl && key == Keys.Z) { Undo(); return true; }
+        if (key == Keys.Escape && (_drag != null || _dragLine != 0 || _pan != null)) { CancelGesture(); return true; }
+        if (_busy || _drag != null || _dragLine != 0) return base.ProcessCmdKey(ref msg, keyData);
+        if (ctrl && key == Keys.S) { Save(); return true; }
+        if (_done) return base.ProcessCmdKey(ref msg, keyData);
+        if (ctrl && key == Keys.Z) { if (shift) Redo(); else Undo(); return true; }
+        if (ctrl && key == Keys.Y) { Redo(); return true; }
+        if (ctrl && key == Keys.D0) { ResetView(); Invalidate(); return true; }
+        if (ActiveControl != null) return base.ProcessCmdKey(ref msg, keyData);
         if (_sel is { } i && Draggable(i) && key is Keys.Up or Keys.Down)
         {
             Push();
             var next = (int[])_off.Clone();
             next[i] += (key == Keys.Up ? 1 : -1) * (shift ? 2 * CurveModel.GridKhz : CurveModel.GridKhz);
             _off = Rules(next, i);
-            Invalidate();
+            FinishEdit();
             return true;
         }
         if (_sel is { } j && key is Keys.Left or Keys.Right)
         {
             _sel = Math.Clamp(j + (key == Keys.Right ? 1 : -1), _top, Math.Min(_d.Writable, _off.Length) - 1);
-            Invalidate();
-            return true;
+            RefreshChrome(); Invalidate(); return true;
         }
         return base.ProcessCmdKey(ref msg, keyData);
     }
@@ -647,10 +706,9 @@ public sealed class CurveEditorForm : Form
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
         float s = _s, w = ClientSize.Width, h = ClientSize.Height;
-        float head = (_d.AlsoKept != null ? 132 : 112) * s;
-        _plot = new RectangleF(72 * s, head, Math.Max(100, w - 72 * s - 28 * s), Math.Max(100, h - head - 148 * s));
+        _plot = new RectangleF(72 * s, 190 * s, Math.Max(100, w - 100 * s), Math.Max(100, h - 424 * s));
 
         // The background, grid, axes and the running points: 4500 dots, drawn again only when the view changes.
         var key = (_vx0, _vx1, _vy0, _vy1, ClientSize.Width, ClientSize.Height, _s);
@@ -660,13 +718,15 @@ public sealed class CurveEditorForm : Form
             _layer = new Bitmap(Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height));
             using var lg = Graphics.FromImage(_layer);
             lg.SmoothingMode = SmoothingMode.AntiAlias;
-            lg.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            lg.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             DrawStatic(lg);
             _layerKey = key;
         }
         g.DrawImageUnscaled(_layer, 0, 0);
 
         Header(g, w);
+        Inspector(g, w, h);
+        Footer(g, w, h);
 
         g.SetClip(_plot);
 
@@ -678,22 +738,42 @@ public sealed class CurveEditorForm : Form
 
         int n = _off.Length;
         PointF[] Line(Func<int, double> mhz) => [.. Enumerable.Range(0, n).Select(i => new PointF(X(_d.Mv[i]), Y(mhz(i))))];
-        using (var sp = new Pen(StockC, 1.4f * s) { DashStyle = DashStyle.Dot }) g.DrawLines(sp, Line(i => _d.BaseKhz[i] / 1000.0));
-        if (!_opened.SequenceEqual(_off))
+        if (_showReference.Checked) using (var sp = new Pen(StockC, 1.4f * s) { DashStyle = DashStyle.Dot }) g.DrawLines(sp, Line(i => _d.BaseKhz[i] / 1000.0));
+        if (_showOpened.Checked && !_opened.SequenceEqual(_off))
             using (var gp = new Pen(Color.FromArgb(170, Ghost), 1.5f * s) { DashStyle = DashStyle.Dash }) g.DrawLines(gp, Line(i => Mhz(i, _opened)));
 
-        // the evidence: the highest setting marked stable (and survived) at each point
-        foreach (var ev in _d.Evidence)
+        // A stable label does not prove the requested clock was reached. Keep the sampled clock separate.
+        foreach (var ev in _showEvidence.Checked ? _d.Evidence : [])
         {
             if (ev.Mv < _vx0 - 5 || ev.Mv > _vx1 + 5) continue;
             float x = X(ev.Mv), half = 5 * s;
             if (ev.SurvivedMhz is { } sv && (ev.StableMhz is not { } st0 || sv > st0))
-                using (var p = new Pen(Color.FromArgb(150, Good), 1.5f * s) { DashStyle = DashStyle.Dot }) g.DrawLine(p, x - half, Y(sv), x + half, Y(sv));
+                using (var p = new Pen(Color.FromArgb(150, AxisText), 1.5f * s) { DashStyle = DashStyle.Dot }) g.DrawLine(p, x - half, Y(sv), x + half, Y(sv));
             if (ev.StableMhz is { } st)
-                using (var p = new Pen(Color.FromArgb(230, Good), 2 * s)) g.DrawLine(p, x - half, Y(st), x + half, Y(st));
+            {
+                if (ev.StableRanMhz is { } ran)
+                {
+                    using var measured = new Pen(Good, 2.2f * s);
+                    g.DrawLine(measured, x - half, Y(ran), x + half, Y(ran));
+                    if (ev.HeldBelowMhz != null)
+                    {
+                        using var link = new Pen(Color.FromArgb(125, Unverified), s) { DashStyle = DashStyle.Dot };
+                        g.DrawLine(link, x, Y(ran), x, Y(st));
+                    }
+                }
+                if (ev.StableRanMhz == null || ev.HeldBelowMhz != null)
+                {
+                    using var setting = new Pen(Unverified, 1.7f * s);
+                    g.DrawRectangle(setting, x - half, Y(st) - 3 * s, half * 2, 6 * s);
+                }
+            }
         }
 
         using (var cp = new Pen(CurveC, 2.2f * s) { LineJoin = LineJoin.Round }) g.DrawLines(cp, Line(i => Mhz(i, _off)));
+        using (var changed = new Pen(ChangedC, 2.4f * s))
+            for (int i = 1; i < n; i++)
+                if (_off[i] != _opened[i] || _off[i - 1] != _opened[i - 1])
+                    g.DrawLine(changed, X(_d.Mv[i - 1]), Y(Mhz(i - 1, _off)), X(_d.Mv[i]), Y(Mhz(i, _off)));
 
         // the points
         for (int i = 0; i < n; i++)
@@ -722,7 +802,7 @@ public sealed class CurveEditorForm : Form
         }
 
         // crashes: a solid cross for a curve trial's, a hollow one for a crash under another kind of trial
-        for (int k = 0; k < _d.Crashes.Count; k++)
+        for (int k = 0; _showCrashes.Checked && k < _d.Crashes.Count; k++)
         {
             var c = _d.Crashes[k];
             float cx = X(c.Mv), cy = Y(c.SetMhz), a = (k == _hoverCrash ? 7 : 5) * s;
@@ -751,12 +831,12 @@ public sealed class CurveEditorForm : Form
 
         Tooltip(g);
         Legend(g, _plot.Bottom + 34 * s);
-        DrawButtons(g, w, h);
     }
 
     /// <summary>A draggable label at the top of a band line.</summary>
     private RectangleF Tab(Graphics g, float x, string label, bool right, bool hot)
     {
+        if (x < _plot.Left || x > _plot.Right) return RectangleF.Empty;
         float s = _s;
         var sz = g.MeasureString(label, _small);
         float bw = sz.Width + 12 * s, bh = sz.Height + 6 * s;
@@ -770,44 +850,6 @@ public sealed class CurveEditorForm : Form
         return r;
     }
 
-    private void Header(Graphics g, float w)
-    {
-        float s = _s;
-        using (var tb = new SolidBrush(TextC)) g.DrawString("V/F Curve", _title, tb, 20 * s, 14 * s);
-        float tw = g.MeasureString("V/F Curve", _title).Width;
-        using (var db = new SolidBrush(Dim)) g.DrawString(_d.Gpu, _body, db, 20 * s + tw + 10 * s, 18 * s);
-        using (var sb = new SolidBrush(_statusColor))
-        {
-            using var format = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
-            g.DrawString(_status, _body, sb, new RectangleF(20 * s, 40 * s, w - 48 * s, 20 * s), format);
-        }
-        // the summary line: the band and what it costs, the steepness, and the crash check
-        var parts = new List<(string, Color)>();
-        parts.Add(_bottom < _top
-            ? ($"Band {Fmt(_d.Mv[_bottom])}–{Fmt(_d.Mv[_top])} mV ({_top - _bottom} steps, auto-smoothed; unchanged below)", Accent)
-            : ($"No band: unchanged below {Fmt(_d.Mv[_top])} mV", Dim));
-        double peak = CurveModel.PeakSlope(_d.Mv, _d.BaseKhz, _off, Math.Max(0, _bottom), _top);
-        parts.Add(($"Peak slope {peak:0} MHz/mV (opened {_peakOpened:0})", Dim));
-        var (lift, at) = MaxLift();
-        parts.Add((lift > 0.01 ? $"Up to +{lift:0} MHz above opened ({Fmt(at)} mV)" : "No points above opened", lift > 0.01 ? Accent : Dim));
-        int above = AboveCrash();
-        parts.Add((above > 0 ? $"⚠ {above} points at/above a crashed setting" : "No points reach a crashed setting", above > 0 ? Err : Good));
-        float x = 20 * s, y = 66 * s;
-        using var sep = new SolidBrush(Dim);
-        for (int k = 0; k < parts.Count; k++)
-        {
-            float width = g.MeasureString(parts[k].Item1, _small).Width;
-            if (x > 20 * s && x + width + 24 * s > w - 28 * s) { x = 20 * s; y += 18 * s; }
-            if (x > 20 * s) { x += 10 * s; g.DrawString("·", _small, sep, x, y); x += 14 * s; }
-            using var b = new SolidBrush(parts[k].Item2);
-            g.DrawString(parts[k].Item1, _small, b, x, y);
-            x += g.MeasureString(parts[k].Item1, _small).Width - 4 * s;
-        }
-        // What the save button also commits to: on its own line, never under anything else.
-        if (_d.AlsoKept is { } kept)
-            using (var ab = new SolidBrush(Accent)) g.DrawString("⚠ Saving as Daily also " + kept, _small, ab, 20 * s, 106 * s);
-    }
-
     /// <summary>The layer under everything that moves: the background, the plot, the grid with its labels, and where the
     /// card ran (brighter: more time there).</summary>
     private void DrawStatic(Graphics g)
@@ -816,12 +858,12 @@ public sealed class CurveEditorForm : Form
         using (var pb = new SolidBrush(PlotBg)) g.FillRectangle(pb, _plot);
         Grid(g);
         g.SetClip(_plot);
-        foreach (var r in _d.Runs.OrderBy(r => r.Seconds))
+        foreach (var r in (_showHistory.Checked ? _d.Runs : []).OrderBy(r => r.Seconds))
         {
             if (r.Mv < _vx0 - 5 || r.Mv > _vx1 + 5 || r.Mhz < _vy0 - 50 || r.Mhz > _vy1 + 50) continue;
             double t = Math.Log(1 + r.Seconds) / Math.Log(1 + _runMax);
-            float rad = (float)(1.8 + 3.0 * t) * _s;
-            using var b = new SolidBrush(Color.FromArgb((int)(35 + 190 * t), RunC));
+            float rad = (float)(1.2 + 1.8 * t) * _s;
+            using var b = new SolidBrush(Color.FromArgb((int)(18 + 100 * t), RunC));
             g.FillEllipse(b, X(r.Mv) - rad, Y(r.Mhz) - rad, rad * 2, rad * 2);
         }
         g.ResetClip();
@@ -875,17 +917,16 @@ public sealed class CurveEditorForm : Form
         PointF at;
         if ((_drag ?? _hover) is { } i)
         {
-            double now = Mhz(i, _off), was = Mhz(i, _opened);
+            double now = Mhz(i, _off);
             lines.Add(($"#{i}  {Fmt(_d.Mv[i])} mV" + (InBand(i) ? "  · Band (auto)" : i < _top ? "  · Below band (unchanged)" : ""), TextC));
-            lines.Add(($"{Fmt(now)} MHz   offset {Signed(_off[i] / 1000.0)}", CurveC));
-            if (Landed(i, _off) < now - 0.01) lines.Add(($"Lands at {Fmt(Landed(i, _off))} MHz; driver lifts to {Fmt(now)} from points to the left", Dim));
-            if (_off[i] != _opened[i]) lines.Add(($"Opened {Fmt(was)} MHz ({Signed(now - was)})", Ghost));
-            lines.Add(($"Stock {Fmt(_d.BaseKhz[i] / 1000.0)} MHz（{Signed(now - _d.BaseKhz[i] / 1000.0)}）", Dim));
+            lines.Add(($"Draft {Fmt(now)} MHz · offset {Signed(_off[i] / 1000.0)} MHz", CurveC));
+            if (Landed(i, _off) < now - 0.01) lines.Add(($"Point lands at {Fmt(Landed(i, _off))} MHz; the driver lifts it from the left", Dim));
             if (_d.Evidence.FirstOrDefault(e => e.Index == i) is { } ev)
             {
-                if (ev.StableMhz is { } st) lines.Add(($"Highest marked stable: {Fmt(st)} MHz ({Duration((int)ev.StableSeconds)}){(now > st + 0.01 ? $"; now {now - st:0} higher" : "")}", now > st + 0.01 ? Accent : Good));
-                if (ev.HeldBelowMhz is { } held && ev.StableRanMhz is { } ranSt)
-                    lines.Add(($"Held below the setting in that test: ran {Fmt(ranSt)} MHz (P90, {held:0} lower)", Dim));
+                if (ev.StableMhz is { } st) lines.Add(($"Marked stable at {Fmt(st)} MHz · {Duration((int)ev.StableSeconds)}", ev.StableRanMhz == null || ev.HeldBelowMhz != null ? Unverified : Good));
+                if (ev.StableRanMhz is { } ranSt)
+                    lines.Add(($"Sampled {Fmt(ranSt)} MHz (P90)" + (ev.HeldBelowMhz is { } held ? $" · {Fmt(held)} below setting" : ""), Good));
+                else if (ev.StableMhz != null) lines.Add(("No sampled clock for this stable record", Unverified));
                 if (ev.SurvivedMhz is { } sv && (ev.StableMhz is not { } st2 || sv > st2)) lines.Add(($"Highest survived: {Fmt(sv)} MHz", Dim));
             }
             var crashes = _d.Crashes.Where(c => c.Index == i).ToList();
@@ -917,9 +958,25 @@ public sealed class CurveEditorForm : Form
         else if (_hoverRun is { } r0)
         {
             var r = _d.Runs[r0];
-            lines.Add(($"Running  {Fmt(r.Mv)} mV · {Fmt(r.Mhz)} MHz", RunC));
-            lines.Add(($"{Duration(r.Seconds)} (samples at ≥50 % load)", Dim));
+            lines.Add(($"Observed operation  {Fmt(r.Mv)} mV · {Fmt(r.Mhz)} MHz", RunC));
+            lines.Add(($"{Duration(r.Seconds)} observed · not a stability test · not live", Dim));
             at = new PointF(X(r.Mv), Y(r.Mhz));
+        }
+        else if (_hoverEvidence is { } e0)
+        {
+            var ev = _d.Evidence[e0];
+            lines.Add(($"Test evidence · #{ev.Index} · {Fmt(ev.Mv)} mV", TextC));
+            if (ev.StableMhz is { } stable)
+            {
+                lines.Add(($"Marked stable: setting {Fmt(stable)} MHz · {Duration((int)ev.StableSeconds)}", AxisText));
+                if (ev.StableRanMhz is { } ran)
+                    lines.Add(($"Sampled {Fmt(ran)} MHz (P90)" + (ev.HeldBelowMhz is { } held ? $" · {Fmt(held)} below setting" : ""), Good));
+                else lines.Add(("No sampled clock for this stable record", Unverified));
+                if (ev.HeldBelowMhz != null) lines.Add(("The test did not demonstrate stability at the requested setting", Unverified));
+            }
+            if (ev.SurvivedMhz is { } survived) lines.Add(($"Highest survived setting: {Fmt(survived)} MHz", AxisText));
+            lines.Add(("Historical evidence · no guarantee of draft stability", Dim));
+            at = new PointF(X(ev.Mv), Y(ev.StableMhz ?? ev.SurvivedMhz ?? _vy0));
         }
         else if (_hoverLine == 2)
         {
@@ -935,9 +992,13 @@ public sealed class CurveEditorForm : Form
         }
         else return;
 
-        float s = _s, pad = 9 * s, lh = 0, tw = 0;
-        foreach (var l in lines) { var sz = g.MeasureString(l.Text, _body); tw = Math.Max(tw, sz.Width); lh = Math.Max(lh, sz.Height); }
-        float bw = tw + 2 * pad, bh = lines.Count * lh + 2 * pad - 2 * s;
+        float s = _s, pad = 10 * s, tw = Math.Min(430 * s, _plot.Width - 28 * s);
+        using var format = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.LineLimit };
+        var rows = lines.Select((line, k) => (line.Text, line.Color, Font: k == 0 ? _bold : _body,
+            Height: Math.Min(36 * s, g.MeasureString(line.Text, k == 0 ? _bold : _body, (int)tw, format).Height + 2 * s))).ToList();
+        float budget = Math.Max(18 * s, _plot.Height - 2 * pad - 8 * s), used = 0;
+        rows = rows.TakeWhile(row => { used += row.Height; return used <= budget; }).ToList();
+        float bw = tw + 2 * pad, bh = rows.Sum(row => row.Height) + 2 * pad;
         float x = at.X + 16 * s, y = at.Y - bh - 12 * s;
         if (x + bw > _plot.Right) x = at.X - bw - 16 * s;
         if (y < _plot.Top) y = at.Y + 16 * s;
@@ -950,70 +1011,41 @@ public sealed class CurveEditorForm : Form
             g.FillPath(pb, path);
             g.DrawPath(bp, path);
         }
-        for (int k = 0; k < lines.Count; k++)
-            using (var b = new SolidBrush(lines[k].Color)) g.DrawString(lines[k].Text, k == 0 ? _bold : _body, b, x + pad, y + pad + k * lh);
+        float rowY = y + pad;
+        foreach (var row in rows)
+        {
+            using var brush = new SolidBrush(row.Color);
+            g.DrawString(row.Text, row.Font, brush, new RectangleF(x + pad, rowY, tw, row.Height), format);
+            rowY += row.Height;
+        }
     }
 
+    private static string Duration(double seconds) => seconds is > 0 and < 0.5 ? "<1 s" : Duration((int)Math.Round(seconds));
     private static string Duration(int seconds) => seconds >= 3600 ? $"{seconds / 3600.0:0.#} h" : seconds >= 60 ? $"{seconds / 60.0:0.#} min" : $"{seconds} s";
 
     private void Legend(Graphics g, float y)
     {
         float s = _s, x = _plot.Left;
-        void Item(Action<float, float> swatch, string label)
+        void Item(Color color, string label, bool dashed = false, char marker = '\0')
         {
-            float width = 26 * s + g.MeasureString(label, _small).Width + 16 * s;
-            if (x > _plot.Left && x + width > _plot.Right) { x = _plot.Left; y += 20 * s; }
-            swatch(x, y + 9 * s);
-            using var b = new SolidBrush(AxisText);
-            g.DrawString(label, _small, b, x + 26 * s, y);
-            x += 26 * s + g.MeasureString(label, _small).Width + 16 * s;
+            float width = 23 * s + g.MeasureString(label, _small).Width + 18 * s;
+            if (x + width > _plot.Right) { x = _plot.Left; y += 18 * s; }
+            using var pen = new Pen(color, 2 * s) { DashStyle = dashed ? DashStyle.Dash : DashStyle.Solid };
+            if (marker == 'b') g.DrawRectangle(pen, x + 3 * s, y + 5 * s, 10 * s, 6 * s);
+            else if (marker == 'x') { g.DrawLine(pen, x + 4 * s, y + 4 * s, x + 12 * s, y + 12 * s); g.DrawLine(pen, x + 4 * s, y + 12 * s, x + 12 * s, y + 4 * s); }
+            else if (marker == 'o') { using var dot = new SolidBrush(color); g.FillEllipse(dot, x + 5 * s, y + 5 * s, 6 * s, 6 * s); }
+            else g.DrawLine(pen, x, y + 8 * s, x + 16 * s, y + 8 * s);
+            using var brush = new SolidBrush(AxisText);
+            g.DrawString(label, _small, brush, x + 23 * s, y);
+            x += width;
         }
-        Item((a, b) => { using var p = new Pen(CurveC, 2.2f * s); g.DrawLine(p, a, b, a + 20 * s, b); }, "Current");
-        Item((a, b) => { using var p = new Pen(Ghost, 1.5f * s) { DashStyle = DashStyle.Dash }; g.DrawLine(p, a, b, a + 20 * s, b); }, "Opened");
-        Item((a, b) => { using var p = new Pen(StockC, 1.4f * s) { DashStyle = DashStyle.Dot }; g.DrawLine(p, a, b, a + 20 * s, b); }, "Stock");
-        Item((a, b) => { using var br = new SolidBrush(ChangedC); g.FillEllipse(br, a + 7 * s, b - 3 * s, 6 * s, 6 * s); }, "Changed");
-        Item((a, b) => { using var br = new SolidBrush(Color.FromArgb(60, Accent)); g.FillRectangle(br, a, b - 6 * s, 20 * s, 12 * s); using var p = new Pen(ChangedC, 1.3f * s); g.DrawEllipse(p, a + 7 * s, b - 3 * s, 6 * s, 6 * s); }, "Band (auto)");
-        Item((a, b) =>
-        {
-            using var p = new Pen(CrashC, 2 * s);
-            g.DrawLine(p, a + 2 * s, b - 5 * s, a + 12 * s, b + 5 * s); g.DrawLine(p, a + 2 * s, b + 5 * s, a + 12 * s, b - 5 * s);
-            using var p2 = new Pen(Color.FromArgb(170, CrashC), 1.3f * s);
-            g.DrawLine(p2, a + 15 * s, b - 4 * s, a + 23 * s, b + 4 * s); g.DrawLine(p2, a + 15 * s, b + 4 * s, a + 23 * s, b - 4 * s);
-        }, $"Crashes ({_d.Crashes.Count}; thin = non-curve)");
-        Item((a, b) => { using var p = new Pen(Good, 2 * s); g.DrawLine(p, a + 4 * s, b, a + 16 * s, b); }, "Highest stable");
-        Item((a, b) =>
-        {
-            using var b1 = new SolidBrush(Color.FromArgb(60, RunC)); using var b2 = new SolidBrush(Color.FromArgb(220, RunC));
-            g.FillEllipse(b1, a + 2 * s, b - 2.5f * s, 5 * s, 5 * s); g.FillEllipse(b2, a + 11 * s, b - 4 * s, 8 * s, 8 * s);
-        }, "Running (brighter = more time)");
-    }
-
-    private void DrawButtons(Graphics g, float w, float h)
-    {
-        float s = _s, bh = 36 * s, y = h - bh - 16 * s, x = w - 28 * s;
-        for (int k = _buttons.Count - 1; k >= 0; k--)
-        {
-            var bt = _buttons[k];
-            string label = bt.Primary && _done ? "Close" : bt.Label;   // saved with a warning: the person reads it, then closes
-            float bw = g.MeasureString(label, _body).Width + 32 * s;
-            if (k == 2) x -= 18 * s;   // a gap between editing and leaving
-            x -= bw;
-            var r = new RectangleF(x, y, bw, bh);
-            _buttons[k] = (r, bt.Label, bt.Do, bt.Primary, bt.Enabled);
-            x -= 10 * s;
-            bool on = bt.Enabled(), hover = _hoverButton == k && on;
-            using var path = Round(r, 7 * s);
-            Color fill = bt.Primary ? (on ? (hover ? C(0x5a9cff) : Primary) : C(0x2a3a55)) : (hover ? ButtonHover : ButtonC);
-            using (var fb = new SolidBrush(fill)) g.FillPath(fb, path);
-            if (!bt.Primary) using (var bp = new Pen(PanelBorder, 1 * s)) g.DrawPath(bp, path);
-            using var tb = new SolidBrush(on ? (bt.Primary ? Color.White : TextC) : Dim);
-            var sz = g.MeasureString(label, bt.Primary ? _bold : _body);
-            g.DrawString(label, bt.Primary ? _bold : _body, tb, r.X + (r.Width - sz.Width) / 2, r.Y + (r.Height - sz.Height) / 2);
-        }
-        string hint = "Right-click a point: delete test history · Drag: edit · Shift+drag: shift segment · Drag band tabs · Wheel: zoom (Ctrl: MHz only) · Right-drag: pan · Double-click: reset view · ↑↓: nudge · Ctrl+Z: undo curve";
-        var area = new RectangleF(20 * s, y + (bh - 18 * s) / 2, Math.Max(10, x - 20 * s - 12 * s), 18 * s);
-        using var fmt = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.LineLimit };
-        using (var hb = new SolidBrush(Dim)) g.DrawString(hint, _small, hb, area, fmt);
+        Item(CurveC, "Draft");
+        if (!_off.SequenceEqual(_opened)) Item(ChangedC, "Edited");
+        if (_showOpened.Checked) Item(Ghost, "Opened", true);
+        if (_showReference.Checked) Item(StockC, "Base", true);
+        if (_showEvidence.Checked) { Item(Good, "Stable sample"); Item(Unverified, "Unverified setting", marker: 'b'); Item(AxisText, "Survived", true); }
+        if (_showCrashes.Checked) Item(CrashC, "Crash", marker: 'x');
+        if (_showHistory.Checked) Item(RunC, "Observed V/F", marker: 'o');
     }
 
     private static GraphicsPath Round(RectangleF r, float rad)
@@ -1030,8 +1062,9 @@ public sealed class CurveEditorForm : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _historyMenu?.Dispose(); _body?.Dispose(); _small?.Dispose(); _title?.Dispose(); _bold?.Dispose(); _layer?.Dispose(); }
+        if (disposing) { _controlTips.Dispose(); _historyMenu?.Dispose(); }
         base.Dispose(disposing);
+        if (disposing) { _body?.Dispose(); _small?.Dispose(); _title?.Dispose(); _bold?.Dispose(); _layer?.Dispose(); }
     }
 
     // ---- the window's own thread ----
@@ -1049,6 +1082,9 @@ public sealed class CurveEditorForm : Form
             {
                 try { Application.SetHighDpiMode(HighDpiMode.PerMonitorV2); } catch (InvalidOperationException) { }
                 try { SetThreadDpiAwarenessContext(PerMonitorV2); } catch (EntryPointNotFoundException) { }
+                Application.EnableVisualStyles();
+                // The rendering default can only be set before this process's first window; later editors keep it.
+                try { Application.SetCompatibleTextRenderingDefault(false); } catch (InvalidOperationException) { }
                 // An exception in a handler ends the window with its reason (the catch below), not with WinForms' Continue/Quit dialog.
                 try { Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException, true); } catch (InvalidOperationException) { }
                 using var form = new CurveEditorForm(data, save, delete);

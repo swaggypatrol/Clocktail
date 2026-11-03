@@ -973,10 +973,13 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     {
         var r = card.Broker(BrokerRequest.OpExperiment, "show");
         if (!r.Ok || r.Result is not { } res) return Reply(r);
-        return Out(new { data = res.GetProperty("data"), points = res.GetProperty("points"), by_point = ByPoint(res.GetProperty("data").GetString()!) });
+        var read = new VfReadStats();
+        var byPoint = ByPoint(res.GetProperty("data").GetString()!, read);
+        return Out(new { data = res.GetProperty("data"), points = res.GetProperty("points"), by_point = byPoint, vf_history_read = ReadReport(read) });
     });
 
-    /// <summary>One curve point's record across every data point the residency samples cover.</summary>
+    /// <summary>One curve point's record across every data point the observations cover (the residency samples and the
+    /// broker's always-on V/F history, merged by <see cref="VfTimeline"/>).</summary>
     public sealed class PointRecord
     {
         /// <summary>The highest offset a stable / survived trial ran the point at, and the lowest a crash under a curve
@@ -987,22 +990,41 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         /// <summary>The clock (P90) the card ran the point at in the stable trials at <see cref="StableKhz"/> (the highest
         /// of them): below the setting when a clock lock, the power limit, temperature or another core offset held it.</summary>
         public uint? StableRanMhz;
-        /// <summary>The seconds (unix) the point ran under load at <see cref="StableKhz"/> in stable trials: a second
-        /// two marks of one trial both cover counts once.</summary>
-        public readonly HashSet<long> StableCovered = [];
-        public double StableSeconds => StableCovered.Count;
+        /// <summary>The observed time the point ran at <see cref="StableKhz"/> in stable trials, by observation (its UTC
+        /// ticks): the parts of its span (seconds after the look) that stable marks covered, as a union. Two marks of one
+        /// trial that both cover a span count it once, and a mark that covers less of it does not shrink what another
+        /// covered (<see cref="VfTimeline.Within"/>).</summary>
+        public readonly Dictionary<long, List<(double Start, double End)>> StableCovered = [];
+        public double StableSeconds => StableCovered.Values.Sum(spans => spans.Sum(s => s.End - s.Start));
+
+        /// <summary>Adds a covered part of one observation's span to the union.</summary>
+        public void Cover(WeightedObservation o)
+        {
+            if (o.Seconds <= 0) return;
+            long key = o.At.UtcTicks;
+            if (!StableCovered.TryGetValue(key, out var spans)) StableCovered[key] = spans = [];
+            double start = o.SpanStart, end = o.SpanEnd;
+            for (int i = spans.Count - 1; i >= 0; i--)
+                if (spans[i].Start <= end && start <= spans[i].End)
+                {
+                    start = Math.Min(start, spans[i].Start);
+                    end = Math.Max(end, spans[i].End);
+                    spans.RemoveAt(i);
+                }
+            spans.Add((start, end));
+        }
         /// <summary>Crashes under a curve trial; and crashes under any other trial (memory, XBAR, power, a limit, the fans,
         /// a core P0 offset), which ran here but are not the curve's evidence.</summary>
         public int Crashes, OtherCrashes;
     }
 
-    private object ByPoint(string dataPath)
+    private object ByPoint(string dataPath, VfReadStats? read = null)
     {
         var all = Experiment.ReadLast(dataPath, int.MaxValue);
         if (all.Count == 0) return Array.Empty<object>();
         var look = card.Read();
         var daily = DailyOffsets(out _);
-        var records = PointRecords(all, look.Curve);
+        var records = PointRecords(all, look.Curve, dataPath, read: read);
         return records.Select(kv =>
         {
             var p = look.Curve.Points.FirstOrDefault(p => p.Index == kv.Key);
@@ -1029,25 +1051,55 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// <summary>Every curve point's record across the data points the residency samples cover: the highest offset a stable
     /// or survived trial ran it at, the lowest a crash under a curve trial found it at (the curve editor draws these beside
     /// its points).</summary>
-    private SortedDictionary<int, PointRecord> PointRecords(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve,
-        Action<DataPoint, int>? visit = null)
+    private SortedDictionary<int, PointRecord> PointRecords(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve, string dataPath,
+        Action<DataPoint, int>? visit = null, VfReadStats? read = null)
     {
         if (all.Count == 0) return [];
         var ticks = residency.Between(all.Min(Experiment.StartOf), DateTimeOffset.Now);
-        return PointRecordsFrom(all, curve, ticks, visit);
+        return PointRecordsFrom(all, curve, HistoryTimeline(all, ticks, VfHistoryFile.DirBeside(dataPath), read), visit);
     }
 
-    /// <summary><see cref="PointRecords"/> over given samples, counted once per second (<see cref="Residency.OnePerSecond"/>).</summary>
+    /// <summary>How far past a trial's window the V/F history is read, so the window's last look has its successor
+    /// (<see cref="VfDwell"/>).</summary>
+    private static readonly TimeSpan WindowMargin = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// The observations the trials' windows hold, every source in one timeline: the residency samples given, and the
+    /// broker's always-on V/F history in <paramref name="vfDir"/> (only the trials' windows of it are read, not the months
+    /// between). Each counts for the time it stands for, whichever source it came from (<see cref="VfDwell"/>).
+    /// </summary>
+    public static VfTimeline HistoryTimeline(IReadOnlyList<DataPoint> all, IReadOnlyList<Residency.Tick> residencyTicks, string? vfDir,
+        VfReadStats? read = null)
+    {
+        var light = VfHistoryStore.ReadWindows(vfDir, all.Select(d => (Experiment.StartOf(d) - WindowMargin, d.At + WindowMargin)), read);
+        return VfTimeline.Build(residencyTicks.Select(Observation).Concat(light));
+    }
+
+    /// <summary>A residency sample as an observation: its utilization and power with it.</summary>
+    public static VfObservation Observation(Residency.Tick t) => new(t.At, t.Uv, t.Mhz, VfSource.Residency, t.Util, t.W);
+
+    public static VfTimeline Timeline(IReadOnlyList<Residency.Tick> ticks) => VfTimeline.Build(ticks.Select(Observation));
+
+    /// <summary><see cref="PointRecords"/> over residency samples alone, one a second (<see cref="Residency.OnePerSecond"/>).</summary>
     public static SortedDictionary<int, PointRecord> PointRecordsFrom(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve,
-        IReadOnlyList<Residency.Tick> samples, Action<DataPoint, int>? visit = null)
+        IReadOnlyList<Residency.Tick> samples, Action<DataPoint, int>? visit = null) =>
+        PointRecordsFrom(all, curve, Timeline(samples), visit);
+
+    /// <summary>
+    /// Every curve point's record over the observations of every source. An observation says where the card ran; only a
+    /// data point's own outcome says how that went: an observation outside every stable or survived trial is no stable
+    /// evidence, however long the card ran there, and no observation makes one.
+    /// </summary>
+    public static SortedDictionary<int, PointRecord> PointRecordsFrom(IReadOnlyList<DataPoint> all, VfCurveSnapshot curve,
+        VfTimeline timeline, Action<DataPoint, int>? visit = null)
     {
         var records = new SortedDictionary<int, PointRecord>();
-        var ticks = Residency.OnePerSecond(samples);
         foreach (var d in all)
         {
             var start = Experiment.StartOf(d);
-            var during = ticks.Where(t => t.At >= start && t.At <= d.At).ToList();
-            if (during.Count < 10) continue;   // before the sampler, or too short to say anything
+            // The trial's window [start, end): only observed time inside it counts (VfTimeline.Within).
+            var during = timeline.Within(start, d.At);
+            if (during.Sum(o => o.Seconds) < MinObservedSeconds) continue;   // before the samplers, or too short to say anything
             int[] offsets;
             try { offsets = VfOffsets.Decode(d.Curve); } catch (FormatException) { continue; }
             // A crash belongs to where the card was when it fell over, not to the whole trial; and to the curve only when
@@ -1084,7 +1136,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
                             if (rec.StableRanMhz is not { } r || s.ClockMhz > r) rec.StableRanMhz = s.ClockMhz;
                             near ??= [.. during.Select(t => Nearest(curve, t.Uv)!.Index)];
                             for (int i = 0; i < during.Count; i++)
-                                if (near[i] == s.Index) rec.StableCovered.Add(during[i].At.ToUnixTimeSeconds());
+                                if (near[i] == s.Index) rec.Cover(during[i]);
                         }
                         break;
                     case Experiment.Survived when rec.SurvivedKhz is not { } ks || off > ks:
@@ -1103,13 +1155,25 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// flight recorder's rule, and the last 30 s before it are what counts. When the flight recorder found the crash
     /// voltage, the crash is the point nearest it alone.
     /// </summary>
-    public static IReadOnlyList<(int Index, uint? ClockMhz)> CrashAt(IReadOnlyList<Residency.Tick> during, uint? crashUv, VfCurveSnapshot curve)
+    public static IReadOnlyList<(int Index, uint? ClockMhz)> CrashAt(IReadOnlyList<Residency.Tick> during, uint? crashUv, VfCurveSnapshot curve) =>
+        CrashAt(Timeline(during).Items, crashUv, curve);
+
+    /// <summary>
+    /// <see cref="CrashAt(IReadOnlyList{Residency.Tick}, uint?, VfCurveSnapshot)"/> over observations of every source. The
+    /// frozen tail is found where it can be: in the residency samples, which carry utilization and power (a voltage and a
+    /// clock alone cannot tell a hang from a steady load), and every observation from it on is cut. The broker's V/F
+    /// history never wrote a hang's looks in the first place (<c>VfHistoryRecorder</c> withholds them on the flight
+    /// recorder's own hang boundary), so its observations need no cut of their own.
+    /// </summary>
+    public static IReadOnlyList<(int Index, uint? ClockMhz)> CrashAt(IReadOnlyList<WeightedObservation> during, uint? crashUv, VfCurveSnapshot curve)
     {
         if (curve.Points.Count == 0 || during.Count == 0) return [];
         // A tail that is the whole trial is a load pinned at the curve's cap, not a hang: only one power fell into is cut.
-        var frozen = FlightRecorder.FrozenFrom([.. during.Select(t => new FlightSample(t.At, 0, t.Mhz, t.Uv / 1000, t.W, null, t.Util, null))]);
-        IReadOnlyList<Residency.Tick> live = frozen == null || frozen.At == during[0].At ? during : [.. during.Where(t => t.At < frozen.At)];
-        List<Residency.Tick> last = live.Count == 0 ? [] : [.. live.Where(t => t.At >= live[^1].At - TimeSpan.FromSeconds(30))];
+        var rich = during.Where(o => o.Observation.UtilPercent != null).ToList();
+        var frozen = rich.Count == 0 ? null : FlightRecorder.FrozenFrom([.. rich.Select(o => new FlightSample(o.At, 0, o.Mhz, o.Uv / 1000,
+            o.Observation.Watts, null, o.Observation.UtilPercent, null))]);
+        IReadOnlyList<WeightedObservation> live = frozen == null || frozen.At == rich[0].At ? during : [.. during.Where(t => t.At < frozen.At)];
+        List<WeightedObservation> last = live.Count == 0 ? [] : [.. live.Where(t => t.At >= live[^1].At - TimeSpan.FromSeconds(30))];
         var stays = Stays(last, curve);
         if (crashUv is { } uv && Nearest(curve, uv) is { } p)
             return [(p.Index, stays.FirstOrDefault(s => s.Index == p.Index)?.ClockMhz)];
@@ -1126,21 +1190,27 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         return frozen == null || frozen.At == samples[0].At ? samples : [.. samples.Where(s => s.At < frozen.At)];
     }
 
-    /// <summary>A curve point a run of samples sat on, with the clock it ran there (P90 of those samples).</summary>
-    private sealed record Stay(int Index, double Mv, double Share, int Samples, uint ClockMhz);
+    /// <summary>Observed time under which a trial says nothing about the points it ran (ten residency seconds before).</summary>
+    public const double MinObservedSeconds = 10;
 
-    /// <summary>The curve points a run of samples sat on (nearest by voltage), most first.</summary>
-    private static List<Stay> Stays(IReadOnlyList<Residency.Tick> ticks, VfCurveSnapshot curve)
+    /// <summary>A curve point a run of observations sat on, its share of their observed time, and the clock it ran there
+    /// (time-weighted P90).</summary>
+    private sealed record Stay(int Index, double Mv, double Share, double Seconds, uint ClockMhz);
+
+    /// <summary>The curve points a run of observations sat on (nearest by voltage), most observed time first.</summary>
+    private static List<Stay> Stays(IReadOnlyList<WeightedObservation> obs, VfCurveSnapshot curve)
     {
-        if (ticks.Count == 0 || curve.Points.Count == 0) return [];
-        return ticks.GroupBy(t => Nearest(curve, t.Uv)!)
+        var timed = obs.Where(o => o.Seconds > 0).ToList();
+        double total = timed.Sum(o => o.Seconds);
+        if (timed.Count == 0 || total <= 0 || curve.Points.Count == 0) return [];
+        return timed.GroupBy(t => Nearest(curve, t.Uv)!)
             .Select(g =>
             {
-                var clocks = g.Select(t => t.Mhz).Order().ToList();
-                return new Stay(g.Key.Index, g.Key.VoltageUv / 1000.0, Math.Round(g.Count() / (double)ticks.Count, 2), g.Count(),
-                    clocks[(int)Math.Round(0.9 * (clocks.Count - 1))]);
+                var group = g.ToList();
+                double seconds = group.Sum(o => o.Seconds);
+                return new Stay(g.Key.Index, g.Key.VoltageUv / 1000.0, Math.Round(seconds / total, 2), seconds, VfTimeline.P90Mhz(group));
             })
-            .OrderByDescending(s => s.Samples).ToList();
+            .OrderByDescending(s => s.Seconds).ToList();
     }
 
     private static string Describe(IReadOnlyList<Stay> stays) => string.Join(", ", stays.Where(s => s.Share >= 0.05).Select(s =>
@@ -1158,9 +1228,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         var ticks = residency.Between(at.GetDateTimeOffset(), DateTimeOffset.Now);
         if (ticks.Count == 0) return $"\n\nUnder load: no loaded samples (utilization stayed below {Residency.MinUtilPct}%).";
         var curve = card.Read().Curve;
-        var end = ticks.Where(t => t.At >= ticks[^1].At - TimeSpan.FromSeconds(30)).ToList();
+        var all = Timeline(ticks).Items;
+        var end = all.Where(t => t.At >= all[^1].At - TimeSpan.FromSeconds(30)).ToList();
         last = $"\n\nLast 30 s: {Describe(Stays(end, curve))}";
-        return $"\n\nUnder load ({ticks.Count} s): {Describe(Stays(ticks, curve))}";
+        return $"\n\nUnder load ({ticks.Count} s): {Describe(Stays(all, curve))}";
     }
 
     /// <summary>Each rail's output from the power monitor and its current limit, for the agent to pick a limit from, and

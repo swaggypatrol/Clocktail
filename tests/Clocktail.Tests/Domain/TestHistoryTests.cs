@@ -163,7 +163,10 @@ public sealed class TestHistoryTests : IDisposable
         var first = Stable(T, 60);
         var second = Stable(T, 120);
         var h = Project([first, second], Run(T, 120));
-        Assert.Equal(120, h.Evidence.Single(e => e.Index == 0).StableSeconds);   // not 60 + 120
+        // Not 60 + 120. Observed time inside the trial's window [T, T+120 s) (VfTimeline.Within): the samples sit at
+        // +0.5 s, so the first half second is unobserved and the last sample's second is cut at the window's end. This
+        // was 120 (a whole second per sample, even past the end) before trial windows were clipped.
+        Assert.Equal(119.5, h.Evidence.Single(e => e.Index == 0).StableSeconds, 9);
         Assert.Equal(2, h.Tests.Count);                                          // each mark still listed, deletable
     }
 
@@ -172,7 +175,8 @@ public sealed class TestHistoryTests : IDisposable
     {
         var ticks = Run(T, 60, ms: 100).Concat(Run(T, 60, ms: 600)).ToList();
         Assert.Equal(60, Residency.OnePerSecond(ticks).Count);
-        Assert.Equal(60, Project([Stable(T, 60)], ticks).Evidence.Single(e => e.Index == 0).StableSeconds);
+        // Not 120; the window [T, T+60 s) starts 0.1 s before the first sample (clipped windows; was 60 before).
+        Assert.Equal(59.9, Project([Stable(T, 60)], ticks).Evidence.Single(e => e.Index == 0).StableSeconds, 9);
     }
 
     [Fact]
@@ -181,9 +185,10 @@ public sealed class TestHistoryTests : IDisposable
         var a = Stable(T, 30);
         var b = Stable(T.AddSeconds(100), 30);
         var ticks = Run(T, 30).Concat(Run(T.AddSeconds(100), 30)).ToList();
-        Assert.Equal(60, Project([a, b], ticks).Evidence.Single().StableSeconds);
+        // 29.5 s observed inside each 30 s window (samples at +0.5 s, cut at the window's end; was 30 + 30 before clipping).
+        Assert.Equal(59, Project([a, b], ticks).Evidence.Single().StableSeconds, 9);
         var higher = Stable(T.AddSeconds(200), 30, "15000*2");
-        Assert.Equal(30, Project([a, b, higher], [.. ticks, .. Run(T.AddSeconds(200), 30)]).Evidence.Single().StableSeconds);
+        Assert.Equal(29.5, Project([a, b, higher], [.. ticks, .. Run(T.AddSeconds(200), 30)]).Evidence.Single().StableSeconds, 9);
     }
 
     [Fact]

@@ -198,7 +198,7 @@ public class JudgeLockTests : IDisposable
         if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
         File.WriteAllText(_path, """{"Pid":100,"RunId":"run-1"}""");
         var reader = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var closer = Task.Run(async () => { await Task.Delay(100); reader.Dispose(); });
+        var closer = ReleaseSoon(reader, 100);
         JudgeLock.Release(_path, "run-1");
         await closer;
         Assert.False(File.Exists(_path));
@@ -207,6 +207,14 @@ public class JudgeLockTests : IDisposable
     /// <summary>The handle a taker checks a lock through (<c>TakeOver</c>) and a holder gives it back through (<c>Release</c>):
     /// it lets others do nothing but delete.</summary>
     private static FileStream Checking(string path) => new(path, FileMode.Open, FileAccess.Read, FileShare.Delete);
+
+    // The code under test blocks while retrying. Release the simulated reader on its own thread: a busy Windows
+    // test runner may otherwise starve a Task.Run continuation until after the lock's entire retry budget.
+    private static Task ReleaseSoon(IDisposable reader, int milliseconds) => Task.Factory.StartNew(() =>
+    {
+        Thread.Sleep(milliseconds);
+        reader.Dispose();
+    }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
     /// <summary>While another process checks or gives back the lock, the broker cannot read it. Its judge read that as no
     /// lock, so a write landed under a live run. A lock that stays open is busy, never free, and names no run.</summary>
@@ -235,7 +243,7 @@ public class JudgeLockTests : IDisposable
         if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
         File.WriteAllText(_path, """{"Pid":100,"RunId":"r1","Label":"burn"}""");
         var check = Checking(_path);
-        var closer = Task.Run(async () => { await Task.Delay(30); check.Dispose(); });
+        var closer = ReleaseSoon(check, 30);
         try { Assert.Contains("burn", JudgeLock.BusyReason(_path, _host)); }
         finally { await closer; }
     }
@@ -248,14 +256,14 @@ public class JudgeLockTests : IDisposable
         if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
         File.WriteAllText(_path, """{"Pid":999,"RunId":"old"}""");   // its process is gone
         var check = Checking(_path);
-        var closer = Task.Run(async () => { await Task.Delay(200); check.Dispose(); });
+        var closer = ReleaseSoon(check, 200);
         try { Assert.True(JudgeLock.TryAcquire(_path, new JudgeLock.Info(100, "run-1"), _host, NoLocal, out var by), by); }
         finally { await closer; }
         Assert.Equal("run-1", JudgeLock.Live(_path, _host, out _)!.RunId);
 
         var mine = new JudgeLock.Info(100, "run-1");
         check = Checking(_path);
-        closer = Task.Run(async () => { await Task.Delay(200); check.Dispose(); });
+        closer = ReleaseSoon(check, 200);
         try { Assert.True(JudgeLock.Settle(_path, mine, _host, NoLocal, out var by), by); }
         finally { await closer; }
         Assert.Equal("run-1", JudgeLock.Live(_path, _host, out _)!.RunId);
