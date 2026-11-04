@@ -568,7 +568,7 @@ public sealed partial class TuningTools
     [McpServerTool(Name = "lab_status", ReadOnly = true, OpenWorld = false), Description(
         "Where a lab job is: running, done, stopped or failed, and what to do next. tune_memory's sweep: every step so far " +
         "(offset, bandwidth, latency, memory clock, temperature, P-state, spread), raw paired comparisons, edge_mhz and candidate_mhz; best_mhz is set only after confirmation and recovery. failure_recording reports confirmed/rejected/unknown and the measured trial_id; unknown failure records stop further candidates. " +
-        "tune_uncore: each comparison and the best setting. game_test: the step it plays, the levers applied, per pattern the " +
+        "tune_uncore: each comparison, the best setting and failure_recording; unresolved failures stop the search, and incomplete recovery suppresses recommendations. game_test: the step it plays, the levers applied, per pattern the " +
         "fps, clocks, power and temperature, the heavy → light jumps and how many leapt, the seconds near the curve's top, its " +
         "result (survived, failed, unjudged), recovery errors and why. With no job, the latest.")]
     public string LabStatus([Description("The job (sweep-…, uncore-… or game-…); omit for the latest.")] string? job = null) => Guard(() =>

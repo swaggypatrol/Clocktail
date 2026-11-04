@@ -1,13 +1,8 @@
-using System.Diagnostics;
-using System.Globalization;
 using System.Text.Json;
 using Clocktail.Domain.Broker;
-using Clocktail.Domain.Platform;
 
 namespace Clocktail.Lab;
 
-/// <summary>What tune_memory asks for: the card, its curve (the trials write it back after each P0 write), the daily memory
-/// offset, and the steps.</summary>
 /// <summary>What tune_memory asks for. CUDA work alone ran in P1 on the reference card, also with Boost Lock held (2026-10-21),
 /// and the memory offset is a P0 offset: each step checks the memory clock rose with the offset, so an offset that is not in
 /// force while the lab runs stops the sweep instead of misleading it.</summary>
@@ -60,9 +55,6 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
     private int? _best;
     private bool _confirmed;
     private bool _confirmationAttempted;
-    /// <summary>Why the candidates must not be compared (a failure not on record), or null.</summary>
-    private string? _noConfirmation;
-    private RecordingResult? _failureRecording;
     /// <summary>The scan put no step ahead of the daily offset: it stands with nothing compared.</summary>
     private bool _dailyUnbeaten;
     /// <summary>The warm-up at the daily offset: the memory clock the first step is checked against.</summary>
@@ -183,37 +175,9 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
         return steps[^1].OffsetMhz;
     }
 
-    /// <summary>Whether the first stop in the steps was a slowdown that lasted (the two-step rules), not a failure or a step
-    /// that could not be judged: the best offset then rests on speed alone, which a warmer card lowers too.</summary>
-    public static bool SlowedDown(IReadOnlyList<SweepStep> steps)
-    {
-        for (int i = 0; i < steps.Count; i++)
-            if (Edge(steps.Take(i + 1).ToList()) is { } e) return e.BeganAtStepBefore;
-        return false;
-    }
-
-    /// <summary>What the next words say of a slowdown that lasted (the two-step rules), with <paramref name="best"/> the
-    /// edge's side: when it ended the sweep (its last step, not for the trend), that a lab_test memory at the best offset as
-    /// slow as the stopping step's means heat; for the trend, which runs on past a slowdown, where it began. Empty when no
-    /// slowdown came first, or when a slowdown did not end a sweep that is not for the trend.</summary>
     /// <summary>Why the service did not record a step's result, or null when it did (or did not answer: a lost answer says
     /// nothing either way, as before). A refusal is the service's word that the trial in force is not the step's.</summary>
     public static string? Refused(BrokerResponse? r) => r is { Ok: false } ? r.Error ?? r.Code ?? "refused" : null;
-
-    public static string SlowdownWords(IReadOnlyList<SweepStep> steps, bool trend, int best)
-    {
-        for (int i = 0; i < steps.Count; i++)
-            if (Edge(steps.Take(i + 1).ToList()) is { } e)
-            {
-                if (!e.BeganAtStepBefore) return "";
-                if (trend)
-                    return Inv($"A slowdown that lasted began at {steps[i - 1].OffsetMhz:+0;-0;0} MHz (the trend ran on past it), and a warmer card slows the memory as error retries do: the steps ran back to back, so read their temperatures beside their speed. ");
-                return i == steps.Count - 1
-                    ? Inv($"A slowdown stopped it, and a warmer card slows the memory as error retries do: at {best:+0;-0;0} MHz, a lab_test memory as slow as the stopping step's means heat, not the edge. ")
-                    : "";
-            }
-        return "";
-    }
 
     public static SweepStep Step(int offsetMhz, LabResult r, int? resets)
     {
@@ -233,11 +197,7 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
         if (card == null) return Finish(SweepStatus.Failed, "another lab job is running on this card: lab_status, or lab_stop", null);
         try
         {
-            var show = Broker("show");
-            if (show is not { Ok: true, Result: { } res } || !res.TryGetProperty("experiment", out var exp) || exp.ValueKind != JsonValueKind.Object)
-                return Finish(SweepStatus.Failed, "no experiment session is open: begin_session first", null);
-            if (exp.TryGetProperty("Trial", out var t) && t.ValueKind == JsonValueKind.Object)
-                return Finish(SweepStatus.Failed, "a trial is in force: back_to_daily (or keep_as_daily) first, so the sweep starts from the daily profile", null);
+            if (SessionProblem("sweep") is { } problem) return Finish(SweepStatus.Failed, problem, null);
 
             Save(SweepStatus.Running, null, null, $"warming the memory for {spec.WarmupSeconds} s at the daily offset");
             LabResult warm;
@@ -364,36 +324,6 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
         {
             return Finish(SweepStatus.Failed, $"the sweep stopped: {e.GetType().Name}: {e.Message}", null);
         }
-    }
-
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static int? TryCount(DateTime since)
-    {
-        try { return SystemLog.Count(SystemLog.DriverResetFilter, since.AddSeconds(-2)); } catch (InvalidOperationException) { return null; }
-    }
-
-    protected virtual void Settle()
-    {
-        for (int i = 0; i < 3 && !StopAsked; i++) Thread.Sleep(1000);
-    }
-
-    protected virtual int? CountResets(DateTime since) => OperatingSystem.IsWindows() ? TryCount(since) : null;
-
-    private RecordingResult RecordFailure(string? trialId, string note)
-    {
-        _failureRecording = RecordingResult.From(Broker("crash", note, key: trialId), trialId);
-        if (_failureRecording.State != RecordingResult.Confirmed)
-            _noConfirmation = $"failure recording {_failureRecording.State}: {_failureRecording.Detail}";
-        return _failureRecording;
-    }
-
-    private bool RecordResetRecovery(string? stamp, string? trialId)
-    {
-        bool recorded = CrashRecorded(stamp);
-        string? detail = recorded ? null : Inv($"the service had not recorded the driver reset within {CrashRecordWait.TotalSeconds:0} s");
-        _failureRecording = new(recorded ? RecordingResult.Confirmed : RecordingResult.Unknown, detail, trialId);
-        if (!recorded) _noConfirmation = detail;
-        return recorded;
     }
 
     /// <summary>One comparison, with one retry for disturbed measurements. All writes, runs and result attribution use
@@ -535,8 +465,8 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
         if (state == SweepStatus.Done && !_confirmationAttempted && _effective.Count > 0)
         {
             _confirmationAttempted = true;
-            if (_noConfirmation != null)
-                why += "; no candidates were compared: " + _noConfirmation;
+            if (FailureRecordingProblem is { } noConfirmation)
+                why += "; no candidates were compared: " + noConfirmation;
             else if (ConfirmCandidates() is { } unjudged)
             {
                 _best = null;
@@ -561,7 +491,7 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
                 : Inv($"paired comparisons recommend {b:+0;-0;0} MHz; equivalent performance prefers a lower offset. "))
                 + "The daily profile has been restored. Validate actual gains in a repeatable game or benchmark before keeping a candidate as daily. The scan boundary is reported separately as edge_mhz."
             : recovery != null ? "Recovery is incomplete: inspect the broker's answer and use back_to_daily before further tuning."
-            : _noConfirmation != null
+            : FailureRecordingProblem != null
                 ? "No recommendation: verify the measured trial's failure record in the broker log (failure_recording retains its trial_id) and recovery before further tuning. back_to_daily and card_report check the card; no more candidates were written after the unresolved record."
             : null;
         Save(state, at, why, next);
@@ -573,7 +503,7 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
     {
         var candidates = Candidates();
         var s = new SweepStatus(Path.GetFileName(JobDir), state, _started, DateTime.UtcNow, at, _bufferMib, _steps,
-            _confirmed ? _best : null, why, next, Best(_effective), candidates.Count > 0 ? candidates[0] : null, _comparisons, _confirmed, _failureRecording);
+            _confirmed ? _best : null, why, next, Best(_effective), candidates.Count > 0 ? candidates[0] : null, _comparisons, _confirmed, FailureRecording);
         SaveStatus(s);
     }
 

@@ -1,7 +1,6 @@
 using System.Text.Json;
 using Clocktail.Domain.Broker;
 using Clocktail.Domain.Clocks;
-using Clocktail.Domain.Platform;
 
 namespace Clocktail.Lab;
 
@@ -313,7 +312,7 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
 }
 
 public sealed record UncoreStatus(string Job, string State, DateTime StartedUtc, DateTime UpdatedUtc, string Stage, UncoreSetting Start,
-    UncoreSetting Best, ulong? BufferMib, IReadOnlyList<Comparison> Comparisons, string? Why, string? Next);
+    UncoreSetting Best, ulong? BufferMib, IReadOnlyList<Comparison> Comparisons, string? Why, string? Next, RecordingResult? FailureRecording = null);
 
 /// <summary>
 /// The uncore tuner as a job: the search above with each comparison run on the card. Each setting goes on as a trial through
@@ -322,7 +321,7 @@ public sealed record UncoreStatus(string Job, string State, DateTime StartedUtc,
 /// nothing is kept: the status names the best setting for the person to try, once it has beaten the daily settings again in
 /// a comparison of its own.
 /// </summary>
-public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Action<string>? log = null)
+public class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Action<string>? log = null)
     : LabJob(spec.StableId, spec.Pci, spec.GraceSeconds, jobDir, labExe)
 {
     private readonly DateTime _started = DateTime.UtcNow;
@@ -339,11 +338,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         if (card == null) return Finish(SweepStatus.Failed, "another lab job is running on this card: lab_status, or lab_stop");
         try
         {
-            var show = Broker("show");
-            if (show is not { Ok: true, Result: { } res } || !res.TryGetProperty("experiment", out var exp) || exp.ValueKind != JsonValueKind.Object)
-                return Finish(SweepStatus.Failed, "no experiment session is open: begin_session first");
-            if (exp.TryGetProperty("Trial", out var t) && t.ValueKind == JsonValueKind.Object)
-                return Finish(SweepStatus.Failed, "a trial is in force: back_to_daily (or keep_as_daily) first, so the tuner starts from the daily profile");
+            if (SessionProblem("tuner") is { } problem) return Finish(SweepStatus.Failed, problem);
 
             Save(SweepStatus.Running, null, $"warming the card for {spec.WarmupSeconds} s at {spec.Start}");
             var warm = MeasureAlone(spec.WarmupSeconds, "l2,memory", null, log);
@@ -382,12 +377,12 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         _stage = stage;
         Save(SweepStatus.Running, null, $"{stage}: {b} against {a}");
         var runs = new List<UncoreRun>();
-        string? stamp = null, candidateId = null;
+        string? stamp = null, trialId = null;
         UncoreRun Run(UncoreSetting s)
         {
             var started = DateTime.UtcNow;
             var r = MeasureAlone(spec.Seconds, "l2,memory", _bufferMib, log);
-            int? resets = OperatingSystem.IsWindows() ? Resets(started) : null;
+            int? resets = CountResets(started);
             var run = UncoreRun.Of(r, resets);
             runs.Add(run);
             return run;
@@ -416,7 +411,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         {
             runs.Clear();
             if (Write(a) is { } wa) return Done(Comparison.Unjudged, $"the service did not write the incumbent: {wa}");
-            stamp = TrialAt();
+            stamp = TrialAt(out _, out trialId);
             var a1 = Run(a);
             if (a1.DriverResets > 0) return Reset(a1, candidate: false);
             // lab_stop kills the measuring child: its run is inconclusive, and that is not the candidate's failure.
@@ -424,8 +419,8 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
             if (Moved() is { } m1) return m1;
             if (a1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the incumbent's own run did not pass: " + (a1.Detail ?? a1.Verdict));
             if (Write(b) is { } wb) return Done(Comparison.Failed, $"the service refused the candidate: {wb}");
-            stamp = TrialAt(out bool answered, out candidateId);
-            if (!answered || string.IsNullOrWhiteSpace(candidateId))
+            stamp = TrialAt(out bool answered, out trialId);
+            if (!answered || string.IsNullOrWhiteSpace(trialId))
                 return Done(Comparison.Unjudged, "the service could not identify the candidate to measure: update the service and rerun");
             var b1 = Run(b);
             if (b1.DriverResets > 0) return Reset(b1, candidate: true);
@@ -440,7 +435,7 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
             if (Moved() is { } m3) return m3;
             if (b2.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the candidate's run could not be judged: " + (b2.Detail ?? b2.Verdict));
             if (Write(a) is { } wa2) return Done(Comparison.Unjudged, $"the service did not write the incumbent back: {wa2}");
-            stamp = TrialAt();
+            stamp = TrialAt(out _, out trialId);
             var a2 = Run(a);
             if (a2.DriverResets > 0) return Reset(a2, candidate: false);
             if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");
@@ -470,7 +465,9 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         // A bad bit with the GPU alive: recorded here, against the candidate.
         Comparison Crash(UncoreRun r)
         {
-            Broker("crash", $"tune_uncore {b}: {r.Detail}", key: candidateId);   // the candidate's trial, and no other
+            var recording = RecordFailure(trialId, $"tune_uncore {b}: {r.Detail}");
+            if (recording.State != RecordingResult.Confirmed)
+                return Done(Comparison.Unjudged, $"{r.Detail ?? "the candidate's run failed"}; {FailureRecordingProblem}");
             Thread.Sleep(5000);
             return Done(Comparison.Failed, r.Detail ?? "the candidate's run failed");
         }
@@ -483,7 +480,8 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         Comparison Reset(UncoreRun r, bool candidate)
         {
             lease?.Dispose();
-            CrashRecorded(stamp);
+            if (!RecordResetRecovery(stamp, trialId))
+                return Done(Comparison.Unjudged, $"{r.Detail ?? "a driver reset during the run"}; {FailureRecordingProblem}; no recommendation");
             return candidate ? Done(Comparison.Failed, r.Detail ?? "the candidate's run ended in a driver reset")
                 : Done(Comparison.Unjudged, "a driver reset during the incumbent's run: " + (r.Detail ?? "it failed"));
         }
@@ -511,23 +509,25 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
         _wrote = true;
         var r = Broker("try", JsonSerializer.Serialize(args));
         if (r is not { Ok: true }) return r?.Error ?? "no answer from the service (it may have landed)";
-        Thread.Sleep(3000);
+        Settle();
         return null;
-    }
-
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static int? Resets(DateTime since)
-    {
-        try { return SystemLog.Count(SystemLog.DriverResetFilter, since.AddSeconds(-2)); } catch (InvalidOperationException) { return null; }
     }
 
     private int Finish(string state, string why)
     {
         // The daily profile goes back on whatever happened (after a driver reset the service has done it already), and the
         // status says so when it did not.
-        if (_wrote && DailyBack("tune_uncore finished") is { } notBack) why += "; " + notBack;
+        string? recovery = _wrote ? DailyBack("tune_uncore finished") : null;
+        if (recovery != null)
+        {
+            why += "; " + recovery;
+            state = SweepStatus.Failed;
+            _best = spec.Start;
+        }
         string? next = state == SweepStatus.Done && _best != spec.Start
             ? Inv($"best {_best}: tell the person; to try it, adjust_xbar to {_best.XbarMhz:+0;-0;0} MHz and {_best.DemandMv:+0;-0;0} mV, set_clock_ratio {_best.Ratio:0.000}, set_voltage_boost {_best.BoostPct} % (each in its own steps), then lab_test, stress_test and their games; keep_as_daily (ask)")
+            : recovery != null ? "Recovery is incomplete: inspect the broker's answer and use back_to_daily before further tuning."
+            : FailureRecordingProblem != null ? "No recommendation: verify the measured trial's failure record in the broker log (failure_recording retains its trial_id) and recovery before further tuning."
             : null;
         Save(state, why, null, next);
         log?.Invoke($"{state}: {why}");
@@ -535,5 +535,5 @@ public sealed class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Ac
     }
 
     private void Save(string state, string? why, string? doing, string? next = null) =>
-        SaveStatus(new UncoreStatus(Path.GetFileName(JobDir), state, _started, DateTime.UtcNow, doing ?? _stage, spec.Start, _best, _bufferMib, _log, why, next));
+        SaveStatus(new UncoreStatus(Path.GetFileName(JobDir), state, _started, DateTime.UtcNow, doing ?? _stage, spec.Start, _best, _bufferMib, _log, why, next, FailureRecording));
 }

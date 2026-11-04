@@ -297,15 +297,7 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         pr.Completed = alive && !ct.IsCancellationRequested;
         _phase = -1;
 
-        List<LabSample> mine;
-        lock (_lock) mine = _samples.Where(x => x.Phase == index).ToList();
-        pr.SmMhzP50 = P50(mine.Select(x => (double?)x.SmMhz));
-        pr.MemMhzP50 = P50(mine.Select(x => (double?)x.MemMhz));
-        pr.WattsP50 = P50(mine.Select(x => x.BoardW));
-        pr.WattsMax = mine.Select(x => x.BoardW).Max();
-        pr.TempP50 = P50(mine.Select(x => (double?)x.TempC));
-        pr.TempMax = mine.Select(x => (double?)x.TempC).Max();
-        pr.PState = mine.Where(x => x.PState != null).GroupBy(x => x.PState).OrderByDescending(g => g.Count()).Select(g => $"P{g.Key}").FirstOrDefault();
+        SummarizeSamples(index, pr);
         if (kind == LabPhase.L2)
         {
             pr.Gbps = P50(l2Gbps.Select(x => (double?)x));
@@ -461,6 +453,12 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         pr.Seconds = Math.Round(_now() - t0, 1);
         pr.Completed = alive && pr.Error == null && !ct.IsCancellationRequested;
         _phase = -1;
+        SummarizeSamples(index, pr);
+        return pr;
+    }
+
+    private void SummarizeSamples(int index, PhaseResult pr)
+    {
         List<LabSample> mine;
         lock (_lock) mine = _samples.Where(x => x.Phase == index).ToList();
         pr.SmMhzP50 = P50(mine.Select(x => (double?)x.SmMhz));
@@ -470,7 +468,6 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         pr.TempP50 = P50(mine.Select(x => (double?)x.TempC));
         pr.TempMax = mine.Select(x => (double?)x.TempC).Max();
         pr.PState = mine.Where(x => x.PState != null).GroupBy(x => x.PState).OrderByDescending(g => g.Count()).Select(g => $"P{g.Key}").FirstOrDefault();
-        return pr;
     }
 
     /// <summary>The soloist's launches for one phase: the rotating window, the per-lane tally, the units calibrated on the

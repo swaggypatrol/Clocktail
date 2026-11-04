@@ -80,6 +80,13 @@ The memory and uncore searches share positive-metric validation and the paired g
 their own objectives: memory considers bandwidth and latency, while uncore targets L2 bandwidth and constrains DRAM and
 core costs. No combined synthetic score is treated as game FPS.
 
+Both jobs also share the session recheck, failure-record acknowledgement and reset-recovery wait. An unresolved failure
+stops the uncore search as well: it ends as `failed`, resets `best` to `start` and offers no candidate to apply. Its
+`failure_recording` has the same fields as memory's, including the measured trial ID (the incumbent's too, when that
+is what reset). A confirmed candidate failure can be followed by other comparisons; a reset in the incumbent ends the
+search even after recovery. The measurement lease is released before waiting for reset recovery. A failed final
+restoration also ends uncore as `failed`, resets `best` to `start` and reports recovery as incomplete.
+
 ## Status and evidence
 
 `lab_status` / `lab_stop` serve all background jobs. The memory status adds:
