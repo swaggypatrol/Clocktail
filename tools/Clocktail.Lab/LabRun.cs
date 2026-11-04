@@ -24,13 +24,7 @@ public sealed record LabConfig(IReadOnlyList<(LabPhase Kind, double Seconds)> Ph
     uint Seed = 0x5EED, int SampleMs = 100, int ChunkMs = 150, double PulseDuty = 0.6, double MaxTempC = double.PositiveInfinity, double TelemetryLostSeconds = 10)
 {
     public static IReadOnlyList<(LabPhase, double)> Parse(string list, double seconds)
-    {
-        var kinds = list.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(s => Enum.TryParse<LabPhase>(s, true, out var k) ? k : throw new ArgumentException($"'{s}' is not a phase (burn, light, pulse, solo, leap, memory, latency, l2)"))
-            .ToList();
-        if (kinds.Count == 0) throw new ArgumentException("no phase given");
-        return kinds.Select(k => (k, seconds / kinds.Count)).ToList();
-    }
+        => Clocktail.Domain.Lab.LabTestPlan.Parse(list, seconds).Select(s => (Enum.Parse<LabPhase>(s.Phase, true), s.Seconds)).ToArray();
 }
 
 public sealed record PatternResult(string Pattern, double Gbps, double CvPct, int Chunks);

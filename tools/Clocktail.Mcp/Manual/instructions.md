@@ -28,6 +28,8 @@ Ask the person before stock, load_preset, keep_as_daily, set_daily_power_limit, 
 By default `stress_test` and `lab_test` stop only when the card comes within 2 °C of NVIDIA's slowdown point; with a `maxTempC` they also stop there. `game_test` stops only at a `maxTempC` it is given, and the background sweeps (`tune_memory`, `tune_uncore`) make no thermal stop. NVIDIA's own protection stays active throughout.
 
 ## Tool map
+Choose a testing goal: `lab_test` for V/F validation (default core profile, 150 s), `tune_memory` for memory search, `tune_uncore` for XBAR/ratio/boost search, and `game_test` or the user's game for graphics confirmation. `lab_test` also has memory/uncore/all workload profiles; explicit custom phases retain the old equal split. Follow background jobs with `lab_status` / `lab_stop`. Memory `best_mhz` is a confirmed recommendation; `edge_mhz` is the scan boundary. Other backends are optional cross-checks.
+
 | Area | Tools |
 |---|---|
 | Read the current GPU | `card_report`, `card_settings`, `gpu_status`, `limiter`, `curve_around`, `diagnostic_report` |

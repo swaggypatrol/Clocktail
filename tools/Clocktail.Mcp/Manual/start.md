@@ -20,6 +20,8 @@ No extra software tuning envelope, mandatory clock/voltage pairing or model-spec
 A confirmation code is not consent: present the returned question, wait for the person's yes, then use that one-time code. Legacy `CLOCKTAIL_CONFIRM=off` does not bypass consent.
 
 ## Tools
+Choose the goal first: `lab_test` for V/F verification (default core profile, 150 s), `tune_memory` for memory search, `tune_uncore` for XBAR/ratio/boost search, and `game_test` or the user's game for graphics confirmation. Explicit phase lists remain available for advanced diagnosis. Use `lab_status` / `lab_stop` for background jobs; a memory scan boundary (`edge_mhz`) is separate from a confirmed recommendation (`best_mhz`).
+
 | Area | Tools |
 |---|---|
 | Read the current GPU | `card_report`, `card_settings`, `gpu_status`, `limiter`, `curve_around`, `diagnostic_report` |

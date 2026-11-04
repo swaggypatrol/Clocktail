@@ -41,7 +41,7 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
 
     /// <summary>Takes the card for this job, or null when another job holds it. Held until the holder is disposed or the
     /// process ends (an abandoned mutex is taken over: its job is gone).</summary>
-    protected IDisposable? ClaimCard()
+    protected virtual IDisposable? ClaimCard()
     {
         var m = new Mutex(false, LabCard.JobMutex(stableId));
         try
@@ -60,7 +60,7 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
 
     /// <summary>"alive" once a minute: the service hands back trial-only settings when no agent says it is there; and
     /// alive.json, this process and its start, for whoever asks whether the job still runs.</summary>
-    protected Timer Heartbeat() => new(_ =>
+    protected virtual Timer Heartbeat() => new(_ =>
     {
         Broker("alive");
         try
@@ -95,7 +95,7 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     /// waits so (<see cref="JudgeLock.Info.Waits"/>), so such an operation finishes rather than stop part-way. How each
     /// answer is taken: <see cref="Quiet"/>.
     /// </summary>
-    protected IDisposable? Hold(Action<string>? log)
+    protected virtual IDisposable? Hold(Action<string>? log)
     {
         string path = JudgeLock.DefaultPath(), local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var until = DateTime.UtcNow.AddMinutes(LeaseWaitMinutes);
@@ -223,7 +223,7 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     /// under its load. A child that hangs past its time and the grace, dies, or writes no result is a measurement that could
     /// not be made (inconclusive, the runner's), not a result about the card: a driver reset, which a GPU hang brings within
     /// the TDR delay, is counted apart by the caller.</summary>
-    protected LabResult Measure(int seconds, string phases, ulong? capMib)
+    protected virtual LabResult Measure(int seconds, string phases, ulong? capMib)
     {
         string json = Path.Combine(jobDir, $"run-{DateTime.UtcNow:HHmmssfff}.json");
         var psi = new ProcessStartInfo(labExe) { UseShellExecute = false, CreateNoWindow = true };

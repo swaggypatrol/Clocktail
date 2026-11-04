@@ -262,15 +262,16 @@ public sealed class UncoreSearch(UncoreSpec spec, Func<string, UncoreSetting, Un
         foreach (var a in new[] { a1, a2 })
             if (a.Verdict != LabResult.Pass) return new(Comparison.Unjudged, "the incumbent's own run did not pass: " + (a.Detail ?? a.Verdict));
         if (new[] { a1, b1, b2, a2 }.Any(r => r.Shared)) return new(Comparison.Unjudged, $"other work kept sharing the GPU for {LabJob.SharedWaitMinutes} minutes: speeds are not the card's alone; close it (a screen saver too) and run again");
-        if (new[] { a1, b1, b2, a2 }.Any(r => r.L2Gbps is not > 0 || r.DramGbps is not > 0 || r.MemSmMhz is not > 0))
+        if (new[] { a1, b1, b2, a2 }.Any(r => !PairedMetric.Valid(r.L2Gbps) || !PairedMetric.Valid(r.DramGbps) || !PairedMetric.Valid(r.MemSmMhz)))
             return new(Comparison.Unjudged, "a reading is missing");
-        double r1 = b1.L2Gbps!.Value / a1.L2Gbps!.Value, r2 = b2.L2Gbps!.Value / a2.L2Gbps!.Value;
+        var paired = PairedMetric.Of(a1.L2Gbps, b1.L2Gbps, b2.L2Gbps, a2.L2Gbps)!;
+        double r1 = paired.FirstRatio, r2 = paired.SecondRatio;
         double ra = a2.L2Gbps!.Value / a1.L2Gbps!.Value, rb = b2.L2Gbps!.Value / b1.L2Gbps!.Value;
-        double l2 = (Math.Sqrt(r1 * r2) - 1) * 100;
-        double dram = (Math.Sqrt(b1.DramGbps!.Value / a1.DramGbps!.Value * (b2.DramGbps!.Value / a2.DramGbps!.Value)) - 1) * 100;
-        double core = (Math.Sqrt(b1.MemSmMhz!.Value / a1.MemSmMhz!.Value * (b2.MemSmMhz!.Value / a2.MemSmMhz!.Value)) - 1) * 100;
+        double l2 = paired.ChangePct;
+        double dram = PairedMetric.Of(a1.DramGbps, b1.DramGbps, b2.DramGbps, a2.DramGbps)!.ChangePct;
+        double core = PairedMetric.Of(a1.MemSmMhz, b1.MemSmMhz, b2.MemSmMhz, a2.MemSmMhz)!.ChangePct;
         // The gain itself, before the rules that weigh what it costs: both pairs up, and enough on the geometric mean.
-        bool gain = r1 > 1 + Eps / 2 && r2 > 1 + Eps / 2 && l2 >= Eps * 100;
+        bool gain = paired.Increased(Eps);
         Judgement Is(string outcome, string why, string? veto = null, bool disturbed = false) =>
             new(outcome, why, Math.Round(l2, 2), Math.Round(dram, 2), Math.Round(core, 2), gain && !disturbed, veto, disturbed);
         // The cliff first: the core pinned near 1610 MHz is no reading off, and the XBAR climb answers it with more demand.

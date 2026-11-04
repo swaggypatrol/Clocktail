@@ -11,8 +11,8 @@ namespace Clocktail.Lab;
 /// <summary>What tune_memory asks for. CUDA work alone ran in P1 on the reference card, also with Boost Lock held (2026-10-21),
 /// and the memory offset is a P0 offset: each step checks the memory clock rose with the offset, so an offset that is not in
 /// force while the lab runs stops the sweep instead of misleading it.</summary>
-/// Trend: a slower step does not stop the sweep (only a failure, a shared GPU or an offset not in force does), so it shows
-/// the whole curve of bandwidth and latency against the offset; the best is still the step before the first slower one.
+/// Trend: scan through performance dips; a failed or unjudgeable measurement still ends the scan. The scan boundary and
+/// the independently compared recommendation are separate status fields.
 public sealed record SweepSpec(string StableId, string Pci, string Curve, int DailyMhz, int FromMhz, int ToMhz, int StepMhz,
     int Seconds = 60, int WarmupSeconds = 60, int GraceSeconds = 45, bool Trend = false);
 
@@ -22,7 +22,8 @@ public sealed record SweepStep(int OffsetMhz, string Verdict, double? Gbps, doub
     string? PState = null, double? BusyBeforePct = null, ulong? OthersVramMib = null, bool Shared = false, string? Watch = null);
 
 public sealed record SweepStatus(string Job, string State, DateTime StartedUtc, DateTime UpdatedUtc, int? AtMhz, ulong? BufferMib,
-    IReadOnlyList<SweepStep> Steps, int? BestMhz, string? Why, string? Next)
+    IReadOnlyList<SweepStep> Steps, int? BestMhz, string? Why, string? Next, int? EdgeMhz = null, int? CandidateMhz = null,
+    IReadOnlyList<MemoryComparison>? Comparisons = null, bool Confirmed = false)
 {
     public const string Running = "running", Done = "done", Stopped = "stopped", Failed = "failed";
 }
@@ -33,10 +34,11 @@ public sealed record SweepStatus(string Job, string State, DateTime StartedUtc, 
 /// errors by retrying them (EDR): past its edge the memory does not fail, it gets slower, first in latency, then in
 /// bandwidth. So a step stops the sweep when it fails, or when it is slower and the step before was already slower the
 /// same way (<see cref="Edge"/>): one slower step is watched, not trusted, because the memory's timings change at some
-/// clocks and a single run can be noise. The best offset is the step before the slowdown began. It runs in a process of its own with no GPU library
+/// clocks and a single run can be noise. A suspected slowdown is rechecked; a short list is compared and confirmed before
+/// naming a recommendation, separately from the scan boundary. It runs in a process of its own with no GPU library
 /// loaded: each measurement is a child lab process, so a hang or a driver reset ends a measurement, not the sweep.
 /// </summary>
-public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<string>? log = null)
+public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<string>? log = null)
     : LabJob(spec.StableId, spec.Pci, spec.GraceSeconds, jobDir, labExe)
 {
     /// <summary>Bandwidth under the best step before it by more than this (0.5 %), at two steps in a row: the memory got
@@ -53,6 +55,11 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     public const double LatencyNoise = 0.002;
 
     private readonly List<SweepStep> _steps = [];
+    private readonly List<SweepStep> _effective = [];
+    private readonly List<MemoryComparison> _comparisons = [];
+    private int? _best;
+    private bool _confirmed;
+    private bool _confirmationAttempted;
     /// <summary>The warm-up at the daily offset: the memory clock the first step is checked against.</summary>
     private (int OffsetMhz, double MemMhz)? _warm;
     private bool _wrote;
@@ -72,10 +79,12 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
         if (last.Verdict != LabResult.Pass) return new(last.Detail ?? $"the step {last.Verdict}", false, Unjudged: last.Verdict != LabResult.Fail);
         if (last.Shared)
             return new(Inv($"other work kept sharing the GPU at this step for {SharedWaitMinutes} minutes ({last.OthersVramMib} MiB of video memory, {last.BusyBeforePct:0} % busy): its speed is not the memory's alone; close it (a screen saver too) and run again"), false, Unjudged: true);
+        if (!PairedMetric.Valid(last.MemMhz) || !PairedMetric.Valid(last.Gbps) || !PairedMetric.Valid(last.LatencyNs))
+            return new("the measured memory clock, bandwidth or latency is missing: the step cannot establish that the offset ran", false, Unjudged: true);
         if (steps.Count < 2)
-            return warm is { } w && NotInForce(w.OffsetMhz, w.MemMhz, last) is { } first ? new(first, false, Unjudged: true) : null;
+            return warm is { } w && InForce(w.OffsetMhz, w.MemMhz, last) is { } first ? new(first, false, Unjudged: true) : null;
         var prev = steps[^2];
-        if (NotInForce(prev.OffsetMhz, prev.MemMhz, last) is { } why) return new(why, false, Unjudged: true);
+        if (InForce(prev.OffsetMhz, prev.MemMhz, last) is { } why) return new(why, false, Unjudged: true);
         int n = steps.Count - 1;
         if (Under(steps, n) is { } u && Under(steps, n - 1) is { } u0)
             return new(Inv($"bandwidth stayed under the best step's: {u0.Gbps:0.#} then {u.Gbps:0.#} GB/s ({u0.Pct:+0.0;-0.0} %, {u.Pct:+0.0;-0.0} %){Warmer(u.FromC, last.TempP50)}: slower two steps running. {SlowerWhy}"), true);
@@ -93,9 +102,11 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
 
     /// <summary>Why a step's offset was not in force: NVML's memory clock follows the offset 1:1 (13801 → 14159 MHz at +358 on
     /// the reference card), so a clock that rose less than half the step from where it was means the offset is not in force
-    /// while the lab runs (a P-state without it), and nothing after can be judged. Null when it followed or a clock is missing.</summary>
-    private static string? NotInForce(int fromMhz, double? fromClock, SweepStep last) =>
-        last.OffsetMhz > fromMhz && last.MemMhz is { } mm && fromClock is { } pm && mm - pm < (last.OffsetMhz - fromMhz) / 2.0
+    /// while the lab runs (a P-state without it), and nothing after can be judged. Missing clocks cannot establish that it ran.</summary>
+    public static string? InForce(int fromMhz, double? fromClock, SweepStep last) =>
+        !PairedMetric.Valid(fromClock) || !PairedMetric.Valid(last.MemMhz) ? "the actual memory clock could not be read: whether the offset ran is unknown"
+        : last.OffsetMhz != fromMhz && last.MemMhz is { } mm && fromClock is { } pm
+            && (mm - pm) * Math.Sign((long)last.OffsetMhz - fromMhz) < Math.Abs((long)last.OffsetMhz - fromMhz) / 2.0
             ? Inv($"the memory clock did not follow the offset ({pm:0} → {mm:0} MHz for {last.OffsetMhz - fromMhz:+0} MHz, {last.PState ?? "P?"}): the offset is not in force while the lab runs")
             : null;
 
@@ -148,8 +159,8 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
     private static bool Rising(IReadOnlyList<SweepStep> steps, int i) =>
         i >= 1 && steps[i].LatencyNs is { } l && steps[i - 1].LatencyNs is { } p && l > p * (1 + LatencyNoise);
 
-    /// <summary>The highest offset to keep: the step before the slowdown that stopped the sweep began (the stopping step's, or
-    /// the one before it for the two-step rules), or the last when nothing stopped it.</summary>
+    /// <summary>The scan-side boundary candidate (legacy helper name): the step before the first scan edge, or the last
+    /// when no edge was seen. Reported as edge_mhz, never used by itself as the final recommendation.</summary>
     public static int? Best(IReadOnlyList<SweepStep> steps)
     {
         if (steps.Count == 0) return null;
@@ -219,11 +230,25 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 return Finish(SweepStatus.Failed, "a trial is in force: back_to_daily (or keep_as_daily) first, so the sweep starts from the daily profile", null);
 
             Save(SweepStatus.Running, null, null, $"warming the memory for {spec.WarmupSeconds} s at the daily offset");
-            var warm = MeasureAlone(spec.WarmupSeconds, "memory", null, log);
+            LabResult warm;
+            using (var lease = Hold(log))
+            {
+                if (lease == null) return Finish(StopAsked ? SweepStatus.Stopped : SweepStatus.Failed, "the baseline could not acquire the measurement lease", null);
+                var baseline = TrialAt(out bool answered);
+                if (!answered || baseline != null)
+                    return Finish(SweepStatus.Failed, "the daily baseline could not be verified before warm-up; no offsets were tested", null);
+                warm = MeasureAlone(spec.WarmupSeconds, "memory", null, log);
+                if (!SameTrial(TrialAt(out answered), baseline) || !answered)
+                    return Finish(SweepStatus.Failed, "the baseline changed during warm-up; no offsets were tested", null);
+            }
+            if (StopAsked) return Finish(SweepStatus.Stopped, "stopped (lab_stop)", null);
             if (warm.Verdict != LabResult.Pass)
                 return Finish(SweepStatus.Failed, $"the warm-up at the daily offset ({spec.DailyMhz:+0;-0;0} MHz) did not pass: {string.Join("; ", warm.Reasons)}", null);
+            if (warm.Shared || warm.Phases.FirstOrDefault(p => p.Kind == LabPhase.Memory) is not { MemMhzP50: > 0, Gbps: > 0 } wm
+                || !PairedMetric.Valid(wm.MemMhzP50) || !PairedMetric.Valid(wm.Gbps))
+                return Finish(SweepStatus.Failed, "the warm-up lacks an unshared, measured memory clock and bandwidth: no offsets were tested", null);
             _bufferMib = warm.BufferMib;
-            if (warm.Phases.FirstOrDefault(p => p.Kind == LabPhase.Memory)?.MemMhzP50 is { } warmMhz) _warm = (spec.DailyMhz, warmMhz);
+            _warm = (spec.DailyMhz, wm.MemMhzP50!.Value);
 
             // The steps from FromMhz by StepMhz, and ToMhz itself when the steps do not land on it (+358 by 100 to +3000: +2958, +3000).
             var offsets = new List<int>();
@@ -252,7 +277,7 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                             return Finish(SweepStatus.Failed, w == null
                                 ? $"no answer from the service for {offset:+0;-0;0} MHz: it may have landed, so the daily profile goes back on"
                                 : $"the service did not write {offset:+0;-0;0} MHz: {w.Error}", offset);
-                        Thread.Sleep(3000);
+                        Settle();
                     }
                     stamp = TrialAt(out bool answered, out trialId);
                     if (!answered || trial && string.IsNullOrWhiteSpace(trialId))
@@ -269,12 +294,13 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                     if (r.Verdict != LabResult.Fail && !SameTrial(TrialAt(), stamp))
                         return Finish(SweepStatus.Failed, $"{offset:+0;-0;0} MHz: the trial on the card changed during the measurement: the step is not this offset's", offset);
                 }
-                int? resets = OperatingSystem.IsWindows() ? TryCount(started) : null;
+                int? resets = CountResets(started);
                 var step = Step(offset, r, resets);
                 _steps.Add(step);
-                var edge = Edge(_steps, _warm);
+                _effective.Add(step);
+                var edge = Edge(_effective, _warm);
                 string? signal = edge?.Why;
-                _steps[^1] = step with { Signal = signal, Watch = signal == null ? Watch(_steps) : null };
+                _steps[^1] = step with { Signal = signal, Watch = signal == null ? Watch(_effective) : null };
                 File.AppendAllText(Path.Combine(JobDir, "steps.jsonl"), JsonSerializer.Serialize(_steps[^1], JsonLine) + "\n");
                 string line = Line(_steps[^1]);
                 log?.Invoke(line);
@@ -301,13 +327,19 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
                 // than write its next step over that trial.
                 if (trial && Refused(Broker("stable", $"tune_memory: {line}", key: trialId)) is { } ns)
                     return Finish(SweepStatus.Failed, $"{offset:+0;-0;0} MHz passed, but it was not marked stable: {ns}", offset);
-                if (end == StepEnd.StableThenStop) return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz: {signal}", offset);
+                if (end == StepEnd.StableThenStop)
+                {
+                    int reference = Best(_effective) ?? spec.DailyMhz;
+                    var recheck = Compare("slowdown recheck", reference, offset);
+                    if (recheck.Outcome == MemoryComparison.Unjudged)
+                        return Finish(StopAsked ? SweepStatus.Stopped : SweepStatus.Failed, recheck.Why, offset);
+                    MemoryComparisonRules.Recheck(_effective, recheck);
+                    if (recheck.Outcome is MemoryComparison.Slower or MemoryComparison.Failed)
+                        return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz: {recheck.Why}", offset);
+                    Broker("note", $"tune_memory: the scan's slowdown at {offset:+0;-0;0} MHz did not repeat in A B B A ({recheck.Outcome}); continuing");
+                }
             }
-            return Finish(SweepStatus.Done, _steps.Any(s => s.Signal != null)
-                ? Inv($"reached {spec.ToMhz:+0;-0;0} MHz (the trend: the sweep would have stopped at {_steps.First(s => s.Signal != null).OffsetMhz:+0;-0;0} MHz)")
-                : _steps.Any(s => s.Watch != null)
-                    ? Inv($"reached {spec.ToMhz:+0;-0;0} MHz with no slowdown that lasted (slower once at {string.Join(", ", _steps.Where(s => s.Watch != null).Select(s => Inv($"{s.OffsetMhz:+0;-0;0}")))} MHz, faster again after)")
-                    : $"reached {spec.ToMhz:+0;-0;0} MHz with nothing slower", null);
+            return Finish(SweepStatus.Done, $"reached {spec.ToMhz:+0;-0;0} MHz; scan readings and any paired rechecks are kept separately", null);
         }
         catch (Exception e) when (e is not OutOfMemoryException)
         {
@@ -321,6 +353,128 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
         try { return SystemLog.Count(SystemLog.DriverResetFilter, since.AddSeconds(-2)); } catch (InvalidOperationException) { return null; }
     }
 
+    protected virtual void Settle()
+    {
+        for (int i = 0; i < 3 && !StopAsked; i++) Thread.Sleep(1000);
+    }
+
+    protected virtual int? CountResets(DateTime since) => OperatingSystem.IsWindows() ? TryCount(since) : null;
+
+    /// <summary>One comparison, with one retry for disturbed measurements. All writes, runs and result attribution use
+    /// the same lease protocol as the scan. The measuring child has ended before settings or records change.</summary>
+    private MemoryComparison Compare(string stage, int a, int b)
+    {
+        MemoryComparison Once()
+        {
+            var runs = new List<SweepStep>();
+            string? stamp = null, trialId = null, problem = null;
+            string outcome = MemoryComparison.Unjudged;
+            bool fault = false, reset = false;
+            int faultOffset = a;
+
+            bool Write(int offset)
+            {
+                if (StopAsked) { problem = "stopped (lab_stop)"; return false; }
+                var w = Try(offset);
+                if (w is not { Ok: true }) { problem = $"the comparison could not write {offset:+0;-0;0} MHz: {w?.Error ?? "no answer"}"; return false; }
+                Settle();
+                stamp = TrialAt(out bool answered, out trialId);
+                if (!answered || string.IsNullOrWhiteSpace(trialId)) { problem = "the comparison's trial identity could not be read"; return false; }
+                return true;
+            }
+
+            bool Run(int offset)
+            {
+                if (StopAsked) { problem = "stopped (lab_stop)"; return false; }
+                Save(SweepStatus.Running, offset, null, $"{stage}: A {a:+0;-0;0}, B {b:+0;-0;0} MHz; run {runs.Count + 1}/4");
+                var started = DateTime.UtcNow;
+                var r = MeasureAlone(spec.Seconds, "memory,latency", _bufferMib, log);
+                var step = Step(offset, r, CountResets(started));
+                runs.Add(step);
+                if (StopAsked) { problem = "stopped (lab_stop)"; return false; }
+                if (step.Verdict == LabResult.Fail)
+                {
+                    fault = true; reset = step.DriverResets > 0; faultOffset = offset;
+                    outcome = offset == b ? MemoryComparison.Failed : MemoryComparison.Unjudged;
+                    problem = $"{offset:+0;-0;0} MHz failed: {step.Detail}";
+                    return false;
+                }
+                if (!SameTrial(TrialAt(), stamp)) { problem = "the trial changed during the comparison"; return false; }
+                if (Edge([step]) is { } invalid) { problem = invalid.Why; return false; }
+                if (_warm is not { } warm) { problem = "the comparison has no measured baseline clock"; return false; }
+                if (InForce(warm.OffsetMhz, warm.MemMhz, step) is { } unknown) { problem = unknown; return false; }
+                return true;
+            }
+
+            MemoryComparison? result = null;
+            using (var lease = Hold(log))
+            {
+                if (lease == null) problem = StopAsked ? "stopped (lab_stop)" : "another run holds the card";
+                else if (Write(a) && Run(a) && Write(b) && Run(b) && Run(b))
+                {
+                    // Both candidate runs are on this exact trial, and the real clock followed the offset in both.
+                    var preliminary = InForce(runs[0].OffsetMhz, runs[0].MemMhz, runs[1])
+                        ?? InForce(runs[0].OffsetMhz, runs[0].MemMhz, runs[2]);
+                    if (preliminary != null) problem = preliminary;
+                    else if (Refused(Broker("stable", $"tune_memory {stage}: two bit-checked runs at {b:+0;-0;0} MHz", key: trialId)) is { } refused)
+                        problem = "the candidate's measured trial could not be recorded: " + refused;
+                    else if (Write(a) && Run(a)) result = MemoryComparisonRules.Judge(stage, a, b, runs);
+                }
+            }
+            // Release the measurement lease before a reset's recovery or a live fault's restoration.
+            if (fault)
+            {
+                if (reset && !CrashRecorded(stamp))
+                {
+                    outcome = MemoryComparison.Unjudged;
+                    problem += "; reset recovery has not been confirmed; no recommendation";
+                }
+                else if (!reset && Refused(Broker("crash", $"tune_memory {stage}: {faultOffset:+0;-0;0} MHz: {problem}", key: trialId)) is { } refused)
+                {
+                    outcome = MemoryComparison.Unjudged;
+                    problem += "; the failing trial could not be recorded: " + refused;
+                }
+            }
+            return result ?? new MemoryComparison(stage, a, b, outcome, problem ?? "the comparison did not finish", runs);
+        }
+
+        MemoryComparison? comparison = null;
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            comparison = Once();
+            _comparisons.Add(comparison);
+            File.AppendAllText(Path.Combine(JobDir, "comparisons.jsonl"), JsonSerializer.Serialize(comparison, JsonLine) + "\n");
+            string line = $"tune_memory {stage}: {b:+0;-0;0} vs {a:+0;-0;0} MHz: {comparison.Outcome}: {comparison.Why}";
+            log?.Invoke(line);
+            Broker("note", line);
+            if (!comparison.Disturbed || StopAsked) break;
+        }
+        return comparison!;
+    }
+
+    private string? ConfirmCandidates()
+    {
+        var shortlist = Candidates();
+        if (shortlist.Count == 0) return "no scan candidate had complete measured results";
+        var compared = new List<MemoryComparison>();
+        foreach (int candidate in shortlist.Where(c => c != spec.DailyMhz || shortlist.Count == 1))
+        {
+            var c = Compare("candidate", spec.DailyMhz, candidate);
+            compared.Add(c);
+            if (c.Outcome == MemoryComparison.Unjudged) return c.Why;
+        }
+        _best = MemoryComparisonRules.Pick(spec.DailyMhz, compared);
+        if (_best == null) return "none of the candidate comparisons could establish a recommendation";
+        if (_best != spec.DailyMhz)
+        {
+            var confirm = Compare("confirm", spec.DailyMhz, _best.Value);
+            if (confirm.Outcome is MemoryComparison.Unjudged or MemoryComparison.Failed) { _best = null; return confirm.Why; }
+            _best = MemoryComparisonRules.Pick(spec.DailyMhz, [confirm]);
+        }
+        _confirmed = _best != null;
+        return null;
+    }
+
     private static readonly JsonSerializerOptions JsonLine = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
     public static string Line(SweepStep s) => Inv($"{s.OffsetMhz:+0;-0;0} MHz: {s.Verdict}") +
@@ -331,22 +485,48 @@ public sealed class MemorySweep(SweepSpec spec, string jobDir, string labExe, Ac
 
     private int Finish(string state, string why, int? at)
     {
+        if (state == SweepStatus.Done && !_confirmationAttempted && _effective.Count > 0)
+        {
+            _confirmationAttempted = true;
+            if (ConfirmCandidates() is { } unjudged)
+            {
+                _best = null;
+                state = StopAsked ? SweepStatus.Stopped : SweepStatus.Failed;
+                why += "; confirmation incomplete: " + unjudged;
+            }
+        }
+        if (state != SweepStatus.Done) { _best = null; _confirmed = false; }
         // The daily offset goes back on whatever happened (after a driver reset the service has done it already), and the
         // status says so when it did not.
-        if (_wrote && DailyBack("tune_memory finished") is { } notBack) why += "; " + notBack;
-        int? best = Best(_steps);
-        string? next = state == SweepStatus.Done && best is { } b
-            ? Inv($"the edge's side is {b:+0;-0;0} MHz (the step before any slowdown that lasted). ") + SlowdownWords(_steps, spec.Trend, b) + ("Read the steps for where bandwidth stops rising: past that an offset buys latency only, which frames may not feel: judge it in frames, not in the lab's numbers. Tell the person; set_memory_offset there in steps of at most 250 MHz, judge it against the daily offset with a memory-sensitive benchmark A B B A (a ray-traced one, as Speedway), their games have the last word, keep_as_daily (ask); if a game fails, step down")
-            : null;
-        Save(state, at, why, next, best);
+        string? recovery = _wrote ? DailyBack("tune_memory finished") : null;
+        if (recovery != null)
+        {
+            why += "; " + recovery;
+            state = SweepStatus.Failed;
+            _best = null;
+            _confirmed = false;
+        }
+        string? next = state == SweepStatus.Done && _confirmed && _best is { } b
+            ? Inv($"paired comparisons recommend {b:+0;-0;0} MHz; equivalent performance prefers a lower offset. ")
+                + "The daily profile has been restored. Validate actual gains in a repeatable game or benchmark before keeping a candidate as daily. The scan boundary is reported separately as edge_mhz."
+            : recovery != null ? "Recovery is incomplete: inspect the broker's answer and use back_to_daily before further tuning." : null;
+        Save(state, at, why, next);
         log?.Invoke($"{state}: {why}");
         return state == SweepStatus.Failed ? 1 : 0;
     }
 
-    private void Save(string state, int? at, string? why, string? next, int? best = null)
+    private void Save(string state, int? at, string? why, string? next)
     {
-        var s = new SweepStatus(Path.GetFileName(JobDir), state, _started, DateTime.UtcNow, at, _bufferMib, _steps, best ?? Best(_steps), why, next);
+        var candidates = Candidates();
+        var s = new SweepStatus(Path.GetFileName(JobDir), state, _started, DateTime.UtcNow, at, _bufferMib, _steps,
+            _confirmed ? _best : null, why, next, Best(_effective), candidates.Count > 0 ? candidates[0] : null, _comparisons, _confirmed);
         SaveStatus(s);
+    }
+
+    private IReadOnlyList<int> Candidates()
+    {
+        var failed = _comparisons.Where(c => c.Outcome == MemoryComparison.Failed).Select(c => c.B).ToHashSet();
+        return MemoryComparisonRules.Shortlist(_effective.Where(s => !failed.Contains(s.OffsetMhz)).ToArray());
     }
 
     private BrokerResponse? Try(int offsetMhz)

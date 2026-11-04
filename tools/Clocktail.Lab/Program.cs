@@ -9,7 +9,9 @@ using Clocktail.Lab.Game;
 if (args.Length == 0 || args[0] is "-h" or "--help")
 {
     Console.WriteLine("""
+        clocktail-lab run --profile core|memory|uncore|all [--seconds N] [--json FILE] [--gpu-pci ID]
         clocktail-lab run --phases burn,light,pulse,solo,leap,memory,latency,l2 --seconds N [--json FILE] [--gpu-pci ID] [--target-w W]
+                          (custom schedules accept burn:30,solo:60,leap:60 with --seconds 150)
                           [--light-div N] [--mem-fraction F] [--mem-cap-mib M] [--inject-at N] [--max-temp-c C]
         clocktail-lab sweep-memory --job DIR      (the job's spec.json; detaches itself; status in DIR\status.json)
         clocktail-lab tune-uncore --job DIR       (the same, for the uncore tuner)
@@ -37,7 +39,10 @@ try
     {
         case "run":
         {
-            var phases = LabConfig.Parse(O("phases") ?? "burn", D("seconds", 60));
+            var plan = O("profile") is { } goal ? Clocktail.Domain.Lab.LabTestPlan.Create(goal, O("phases"),
+                O("seconds") is { } duration ? int.Parse(duration, CultureInfo.InvariantCulture) : null) : null;
+            var phases = plan == null ? LabConfig.Parse(O("phases") ?? "burn", D("seconds", 60))
+                : LabConfig.Parse(plan.PhaseArgument, plan.Seconds);
             var cfg = new LabConfig(phases, TargetW: D("target-w", 0), LightDiv: (int)D("light-div", 64), MaxTempC: D("max-temp-c", double.PositiveInfinity));
             using var cu = CudaApi.Load();
             int ordinal = Ordinal(cu, O("gpu-pci"));

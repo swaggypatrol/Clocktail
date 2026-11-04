@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using Clocktail.Domain.Boost;
 using Clocktail.Domain.Broker;
 using Clocktail.Domain.Clocks;
+using Clocktail.Domain.Lab;
 using Clocktail.Domain.Ownership;
 using Clocktail.Domain.Platform;
 using Clocktail.Domain.Vf;
@@ -21,7 +22,6 @@ namespace Clocktail.Mcp;
 public sealed partial class TuningTools
 {
     public const int MaxLabSeconds = 600;
-    private static readonly string[] LabPhases = ["burn", "light", "pulse", "solo", "leap", "memory", "latency", "l2"];
     private static readonly JsonSerializerOptions SnakeJson = new() { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
     /// <summary>The lab: CLOCKTAIL_LAB_EXE, or clocktail-lab.exe beside this server (setup installs them together).</summary>
@@ -102,19 +102,21 @@ public sealed partial class TuningTools
     }
 
     [McpServerTool(Name = "lab_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Run bit-checked core, memory, latency and cache-oriented lab workloads on current settings. Available phases include burn, light, pulse, solo and leap. Verify the intended operating point actually ran; interrupted/shared or inconclusive measurements do not establish stability. It stops within 2 °C of NVIDIA's slowdown point, and at maxTempC when one is given.")]
+        "Validate current settings by goal: core (default: burn, high-point solo and heavy/light leap), memory, uncore or all. Each profile gives its key phases their own time. Advanced callers can choose custom phases instead. Verify the intended operating point actually ran; interrupted/shared or inconclusive measurements do not establish stability. It stops within 2 °C of NVIDIA's slowdown point, and at maxTempC when one is given.")]
     public string LabTest(
-        [Description("Phases, comma-separated: burn, light, pulse, solo (the top of the curve, judged per pipe; give it 60 s or more of its own), leap (the jump from the middle of the curve to its top that games make; 60 s or more of its own), memory, latency, l2 (the crossbar: a 32 MiB region walked over and over). Default burn,pulse,light,memory,latency.")] string phases = "burn,pulse,light,memory,latency",
-        [Description("Run length in seconds, 10..600 (default 60), split evenly between the phases.")] int seconds = 60,
+        [Description("Advanced custom phases instead of a profile: burn, light, pulse, solo, leap, memory, latency, l2. Bare lists split seconds evenly (default 60 s); phase:seconds lists give individual durations. Omit for the core profile.")] string? phases = null,
+        [Description("Total run budget, up to 600 s. Omit for the profile's budget: core 150, memory 90, uncore 60, all 270 s. Profiles can be lengthened; custom phases allow shorter screening runs, 10 s or more.")] int? seconds = null,
         [Description("Steer burn to this board power, W (default: no steering, every thread).")] double? targetW = null,
         [Description("Light: one thread in this many (default 64: 64 SMs busy).")] int lightDiv = 64,
         [Description("What this run is meant to show, for the log.")] string? note = null,
-        [Description("Also stop the run if the GPU reaches this temperature, °C. Omitted: it stops only within 2 °C of NVIDIA's slowdown point.")] int? maxTempC = null) => Guard(() =>
+        [Description("Also stop the run if the GPU reaches this temperature, °C. Omitted: it stops only within 2 °C of NVIDIA's slowdown point.")] int? maxTempC = null,
+        [Description("Test goal: core (default), memory, uncore or all. Use tune_memory / tune_uncore to search, and game_test or the user's game to validate graphics. Omit when giving custom phases.")] string? profile = null) => Guard(() =>
     {
         string exe = LabExe() ?? throw new InvalidOperationException("clocktail-lab.exe is not beside this server: run npx -y clocktail@latest setup");
-        var list = phases.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(p => p.ToLowerInvariant()).ToList();
-        if (list.Count == 0 || list.Any(p => !LabPhases.Contains(p))) throw new ArgumentException($"phases are {string.Join(", ", LabPhases)}");
-        if (seconds < 10 || seconds > MaxLabSeconds) throw new ArgumentException($"seconds is 10..{MaxLabSeconds}");
+        var plan = LabTestPlan.Create(profile, phases, seconds);
+        int duration = plan.Seconds;
+        var list = plan.Stages.Select(s => s.Phase).ToList();
+        if (duration < 10 || duration > MaxLabSeconds) throw new ArgumentException($"seconds is 10..{MaxLabSeconds}");
         if (lightDiv is < 2 or > 4096) throw new ArgumentException("lightDiv is 2..4096");
         if (targetW is { } tw && (!double.IsFinite(tw) || tw <= 0)) throw new ArgumentException("targetW must be positive and finite");
         int? maxC = MaxTemp(maxTempC);
@@ -123,7 +125,7 @@ public sealed partial class TuningTools
         Directory.CreateDirectory(dir);
         string jsonPath = Path.Combine(dir, $"run-{Guid.NewGuid():n}.json");
         var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
-        foreach (var a in new[] { "run", "--phases", string.Join(",", list), "--seconds", seconds.ToString(CultureInfo.InvariantCulture), "--json", jsonPath,
+        foreach (var a in new[] { "run", "--phases", plan.PhaseArgument, "--seconds", duration.ToString(CultureInfo.InvariantCulture), "--json", jsonPath,
                                   "--gpu-pci", card.PciBusId, "--light-div", lightDiv.ToString(CultureInfo.InvariantCulture) })
             psi.ArgumentList.Add(a);
         if (targetW is { } w) { psi.ArgumentList.Add("--target-w"); psi.ArgumentList.Add(w.ToString(CultureInfo.InvariantCulture)); }
@@ -149,11 +151,11 @@ public sealed partial class TuningTools
         {
             before = card.Read();
             started = DateTime.UtcNow;
-            residency.StressUntil(DateTimeOffset.Now.AddSeconds(seconds + 60));
+            residency.StressUntil(DateTimeOffset.Now.AddSeconds(duration + 60));
             p = Process.Start(psi) ?? throw new InvalidOperationException("the lab did not start");
             if (OperatingSystem.IsWindows()) children?.Add(p);   // it never outlives this server
             var stderr = p.StandardError.ReadToEndAsync();
-            var deadline = started.AddSeconds(seconds + grace + 30);
+            var deadline = started.AddSeconds(duration + grace + 30);
             while (!p.WaitForExit(500))
             {
                 try
@@ -205,7 +207,7 @@ public sealed partial class TuningTools
         bool failed = resets > 0 || labVerdict == "fail";
         bool runner = !failed && !hot && (hung || code is not (0 or 4 or 5) || labVerdict == "none");
         string verdict = resets > 0 ? $"driver reset ({resets}) during the run"
-            : hung ? $"the lab did not finish within {seconds + grace + 30} s and no driver reset followed: the run's fault, not the card's"
+            : hung ? $"the lab did not finish within {duration + grace + 30} s and no driver reset followed: the run's fault, not the card's"
             : hot ? string.Create(CultureInfo.InvariantCulture, $"thermal stop at {stopC:0} °C ({hotWhy}): stopped by lab_test, not a pass or a crash")
             : labVerdict == "none" ? $"the lab ended without a result (exit code {code})"
             : labVerdict;
@@ -230,14 +232,17 @@ public sealed partial class TuningTools
 
         bool trial = hold.Trial != null;   // in force when the run began: the trial it measured
         string summary = string.Create(CultureInfo.InvariantCulture,
-            $"Lab {string.Join(",", list)}, {seconds} s: {verdict}{(reasons.Count > 0 ? $" ({string.Join("; ", reasons)})" : "")}. P50 {mhz} MHz @ NVVDD {mv} mV (curve point {pointIndex}); max {held.Max(s => s.Telemetry?.TemperatureC)} °C")
+            $"Lab {plan.Profile}: {string.Join(",", list)}, {duration} s: {verdict}{(reasons.Count > 0 ? $" ({string.Join("; ", reasons)})" : "")}. P50 {mhz} MHz @ NVVDD {mv} mV (curve point {pointIndex}); max {held.Max(s => s.Telemetry?.TemperatureC)} °C")
             + (shared ? $"; other work shared the GPU ({others:0} MiB, {busy:0} %)" : "") + (note != null ? $". Purpose: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
-        bool crashRecorded = failed && RecordCrash(hold, resets, $"lab {string.Join(",", list)} {seconds} s: {verdict}");
+        bool crashRecorded = failed && RecordCrash(hold, resets, $"lab {string.Join(",", list)} {duration} s: {verdict}");
         return Out(new
         {
             passed = !failed && !hot && labVerdict == "pass",
             verdict,
+            profile = plan.Profile,
+            planned_seconds = duration,
+            schedule = plan.Stages.Select(s => new { phase = s.Phase, seconds = s.Seconds }),
             reasons,
             exit_code = code,
             driver_resets = resets,
@@ -357,14 +362,14 @@ public sealed partial class TuningTools
     }
 
     [McpServerTool(Name = "tune_memory", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Run a background memory-offset sweep over a user-selected range, using this GPU's reported offsets and current curve. Each candidate is measured through a trial; correctness and sustained performance guide the search. Search increments are not recommended daily settings. Follow with lab_status, stop with lab_stop; nothing is kept automatically.")]
+        "Search memory offsets in the background. Screen the requested range, recheck suspected slowdowns A B B A, then compare up to three candidates against the daily offset and confirm the winner. Equivalent performance prefers a lower offset. Missing actual clocks or disturbed comparisons name no best. lab_status separates the scan boundary from a confirmed recommendation; lab_stop cancels. Restore daily settings and keep nothing automatically.")]
     public string TuneMemory(
         [Description("The highest memory offset to try, MHz, within this GPU's reported range.")] int toMhz,
         [Description("MHz per step, 25..100 (default 50).")] int stepMhz = 50,
         [Description("The first offset, MHz (default: the offset currently on this GPU, within its reported range).")] int? fromMhz = null,
         [Description("Seconds the lab measures each step, 30..300 (default 60).")] int seconds = 60,
         [Description("true: a slower step does not stop the sweep, only a failure does, so it shows the whole trend of " +
-            "bandwidth and latency up to toMhz; the best is still the step before the first slowdown that lasted.")] bool trend = false) => Guard(() =>
+            "bandwidth and latency up to toMhz. The recommendation is still chosen by paired candidate comparisons.")] bool trend = false) => Guard(() =>
     {
         if (stepMhz is < 25 or > 100) throw new ArgumentException("stepMhz is 25..100");
         if (seconds is < 30 or > 300) throw new ArgumentException("seconds is 30..300");
@@ -372,7 +377,7 @@ public sealed partial class TuningTools
         var (exe, look) = JobPreflight();
         var p0 = card.WithDriver(Pstates20Reader.Read).P0(ClockDomain.Memory) ?? throw new InvalidOperationException("the memory offset is unreadable");
         int daily = p0.DeltaKhz / 1000, from = fromMhz ?? daily;
-        if (from * 1000 < p0.MinKhz || toMhz * 1000 > p0.MaxKhz) throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000}..{p0.MaxKhz / 1000} MHz");
+        if ((long)from * 1000 < p0.MinKhz || (long)toMhz * 1000 > p0.MaxKhz) throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000}..{p0.MaxKhz / 1000} MHz");
         if (toMhz <= from) throw new ArgumentException($"toMhz must be above the first offset ({from} MHz)");
 
         var (job, dir, detached) = StartJob(exe, "sweep", "sweep-memory", new
@@ -380,12 +385,14 @@ public sealed partial class TuningTools
             stable_id = card.StableId, pci = card.PciBusId, curve = VfOffsets.Encode(look.Curve.Offsets()), daily_mhz = daily,
             from_mhz = from, to_mhz = toMhz, step_mhz = stepMhz, seconds, warmup_seconds = 60, grace_seconds = 45, trend,
         });
-        int steps = (toMhz - from) / stepMhz + 1;
+        int steps = (toMhz - from + stepMhz - 1) / stepMhz + 1;
         card.Broker(BrokerRequest.OpExperiment, "note", string.Create(CultureInfo.InvariantCulture, $"tune_memory started: {from:+0;-0;0} → {toMhz:+0;-0;0} MHz in {stepMhz} MHz steps, {seconds} s each ({job})"));
         return Out(new
         {
             started = true, job, dir, from_mhz = from, to_mhz = toMhz, step_mhz = stepMhz, steps, trend,
-            minutes_at_most = Math.Ceiling((60 + steps * (seconds + 20)) / 60.0),
+            scan_minutes_estimate = Math.Ceiling((60 + steps * (seconds + 20)) / 60.0),
+            confirmation_runs_at_most = 32,
+            timing_note = "the scan estimate excludes paired slowdown rechecks, candidate confirmation and waits for other GPU work; each comparison is four runs and may retry once",
             detached = detached ? null : StaysInJob,
             next = "lab_status to follow it (each step adds a line); lab_stop ends it. The daily profile goes back on at the end; nothing is kept without the person",
         });
@@ -560,7 +567,7 @@ public sealed partial class TuningTools
 
     [McpServerTool(Name = "lab_status", ReadOnly = true, OpenWorld = false), Description(
         "Where a lab job is: running, done, stopped or failed, and what to do next. tune_memory's sweep: every step so far " +
-        "(offset, bandwidth, latency, memory clock, temperature, P-state, spread, what stopped it) and the best offset. " +
+        "(offset, bandwidth, latency, memory clock, temperature, P-state, spread), raw paired comparisons, edge_mhz and candidate_mhz; best_mhz is set only after confirmation and recovery. " +
         "tune_uncore: each comparison and the best setting. game_test: the step it plays, the levers applied, per pattern the " +
         "fps, clocks, power and temperature, the heavy → light jumps and how many leapt, the seconds near the curve's top, its " +
         "result (survived, failed, unjudged), recovery errors and why. With no job, the latest.")]
