@@ -362,7 +362,7 @@ public sealed partial class TuningTools
     }
 
     [McpServerTool(Name = "tune_memory", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Search memory offsets in the background. Screen the requested range, recheck suspected slowdowns A B B A, then compare up to three candidates against the daily offset and confirm the winner. Equivalent performance prefers a lower offset. Missing actual clocks or disturbed comparisons name no best. lab_status separates the scan boundary from a confirmed recommendation; lab_stop cancels. Restore daily settings and keep nothing automatically.")]
+        "Search memory offsets in the background. Screen the requested range, recheck suspected slowdowns A B B A, then compare up to three candidates, including a bandwidth/latency compromise when a slot is free, against the daily offset and confirm the winner. Equivalent performance prefers a lower offset. Missing actual clocks, disturbed comparisons or an unacknowledged failure record name no best. lab_status separates the scan boundary from a confirmed recommendation; lab_stop cancels. Restore daily settings and keep nothing automatically.")]
     public string TuneMemory(
         [Description("The highest memory offset to try, MHz, within this GPU's reported range.")] int toMhz,
         [Description("MHz per step, 25..100 (default 50).")] int stepMhz = 50,
@@ -567,7 +567,7 @@ public sealed partial class TuningTools
 
     [McpServerTool(Name = "lab_status", ReadOnly = true, OpenWorld = false), Description(
         "Where a lab job is: running, done, stopped or failed, and what to do next. tune_memory's sweep: every step so far " +
-        "(offset, bandwidth, latency, memory clock, temperature, P-state, spread), raw paired comparisons, edge_mhz and candidate_mhz; best_mhz is set only after confirmation and recovery. " +
+        "(offset, bandwidth, latency, memory clock, temperature, P-state, spread), raw paired comparisons, edge_mhz and candidate_mhz; best_mhz is set only after confirmation and recovery. failure_recording reports confirmed/rejected/unknown and the measured trial_id; unknown failure records stop further candidates. " +
         "tune_uncore: each comparison and the best setting. game_test: the step it plays, the levers applied, per pattern the " +
         "fps, clocks, power and temperature, the heavy → light jumps and how many leapt, the seconds near the curve's top, its " +
         "result (survived, failed, unjudged), recovery errors and why. With no job, the latest.")]

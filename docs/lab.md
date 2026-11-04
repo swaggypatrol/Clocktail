@@ -60,7 +60,11 @@ lists still work; schedules also travel through `--phases` without losing indivi
    it). A loss must repeat; otherwise update only the effective scan readings and continue. Original scan readings remain intact. `trend:true` scans through performance dips, with correctness and
    measurement validity still required.
 4. Shortlist at most three measured settings: the lowest offset on the joint bandwidth/latency plateau, the bandwidth
-   winner and the latency winner, with duplicates removed. They are candidates, not recommendations. When the daily
+   winner and the latency winner, with duplicates removed. A spare slot is filled by a nondominated compromise: no other
+   measured setting matches or improves both metrics while strictly improving at least one. Choose the point closest to
+   their joint best when distances use the existing 0.5% bandwidth / 1% latency comparison tolerances. These distances
+   guide candidate coverage; paired measurements establish any gain. There are still at most three candidates, each
+   requiring the same paired validation. When the daily
    offset is the only one, no step measured ahead of it: it stays, and nothing is compared.
 5. Compare candidates A B B A against the same daily offset. A useful gain repeats in both pairs and does not incur a
    material regression in the other metric. A repeated-setting spread over 2% in bandwidth or latency retries the
@@ -88,6 +92,7 @@ core costs. No combined synthetic score is treated as game FPS.
 | `comparisons` | Raw A B B A runs, outcomes, bandwidth and latency changes, and disturbance flags |
 | `best_mhz` | A paired recommendation after confirmation and verified restoration; null otherwise |
 | `confirmed` | Whether the job completed that comparison/restoration path |
+| `failure_recording` | Latest failure-record acknowledgement or reset-recovery outcome: `state` is `confirmed`, `rejected` or `unknown`; `detail` explains a rejection/uncertainty and `trial_id` retains the measured trial identity |
 
 `steps.jsonl` and `comparisons.jsonl` retain scan and comparison readings separately. No scan reading is rewritten to
 hide a recheck. `scan_minutes_estimate` covers only the scan; slowdown rechecks, candidate confirmations, retries and
@@ -96,7 +101,11 @@ most 32 individual runs including one disturbance retry per comparison. Slowdown
 
 User cancellation, another trial replacing the measured settings, missing clocks, an interrupted measuring process or
 an incomplete recovery cannot produce a confirmed recommendation. A scan that ends in a failure the service has not put
-on record (a driver reset not recorded in time, a crash it refused) compares no candidates. Correctness failures name the trial actually measured;
+on record (a driver reset not recorded in time, a crash it refused) compares no candidates. Failure-record requests with
+no authoritative reply are `unknown`, including timeouts and broken pipes; the request may have been lost or committed
+with its reply lost. Both the scan and paired-comparison paths stop that job's further candidate writes, keep `best_mhz`
+null and `confirmed:false`, and preserve the measured trial ID in `failure_recording`. Normal restoration is still
+attempted. Verify the original failure record and recovery before starting another job. Correctness failures name the trial actually measured;
 runner/telemetry failures remain unjudged. Nothing is kept as daily automatically.
 
 ## Compatibility in 0.9.0

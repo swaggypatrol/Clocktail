@@ -101,4 +101,36 @@ public class MemoryComparisonTests
         Assert.Equal(100, MemoryComparisonRules.Pick(0, [higher, lower]));
         Assert.Equal(100, MemoryComparisonRules.Pick(0, [lower, higher]));
     }
+
+    [Fact]
+    public void A_spare_slot_covers_the_nondominated_compromise_when_joint_plateau_is_empty()
+    {
+        var scan = new[] { S(0), S(50, 1530, 520), S(100, 1515, 500), S(150, 1500, 490) };
+        var shortlist = MemoryComparisonRules.Shortlist(scan);
+        Assert.Equal(3, shortlist.Count);
+        Assert.Contains(100, shortlist);
+        var comparisons = shortlist.Select(offset =>
+        {
+            var candidate = scan.Single(s => s.OffsetMhz == offset);
+            return MemoryComparisonRules.Judge("candidate", 0, offset, [scan[0], candidate, candidate, scan[0]]);
+        }).ToArray();
+        Assert.Equal(100, MemoryComparisonRules.Pick(0, comparisons));
+        Assert.Equal(shortlist, MemoryComparisonRules.Shortlist(scan.Reverse().ToArray()));
+    }
+
+    [Fact]
+    public void The_compromise_favors_balance_over_a_point_almost_identical_to_an_extreme()
+    {
+        var shortlist = MemoryComparisonRules.Shortlist([S(0), S(50, 1530, 520), S(75, 1529, 519), S(100, 1515, 500), S(150, 1500, 490)]);
+        Assert.Equal(3, shortlist.Count);
+        Assert.Contains(100, shortlist);
+        Assert.DoesNotContain(75, shortlist);
+    }
+
+    [Fact]
+    public void A_dominated_point_does_not_fill_a_spare_slot()
+    {
+        var shortlist = MemoryComparisonRules.Shortlist([S(0), S(50, 1530, 520), S(100, 1490, 510), S(150, 1500, 490)]);
+        Assert.Equal(new[] { 50, 150 }, shortlist);
+    }
 }

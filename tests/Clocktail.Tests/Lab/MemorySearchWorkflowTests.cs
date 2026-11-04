@@ -19,6 +19,9 @@ public sealed class MemorySearchWorkflowTests : IDisposable
         private readonly Dictionary<int, int> _measures = [];
         public readonly List<(int Offset, string? Trial)> Stable = [];
         public readonly List<(int Offset, string? Trial)> Crashes = [];
+        public readonly List<(int Offset, string? Trial)> CrashAttempts = [];
+        public int WritesAfterCrash;
+        public string? CrashReply;
         public Func<int, int, string, PhaseResult, PhaseResult> Alter = (_, _, _, phase) => phase;
         public bool StopInComparison, ChangeTrialInComparison, FailRestore, ChangeBaseline;
         /// <summary>The offset whose scan step sees a driver reset, and whether the service then records it.</summary>
@@ -41,6 +44,7 @@ public sealed class MemorySearchWorkflowTests : IDisposable
                     object? trial = _id == null ? null : new { At = _stamp, Id = _id };
                     return new(true, Result: JsonSerializer.SerializeToElement(new { experiment = new { Trial = trial } }));
                 case "try":
+                    if (CrashAttempts.Count > 0) WritesAfterCrash++;
                     using (var json = JsonDocument.Parse(request.Value!)) Offset = json.RootElement.GetProperty("memory_khz").GetInt32() / 1000;
                     _id = "trial-" + ++Generation;
                     _stamp = "stamp-" + Generation;
@@ -50,7 +54,18 @@ public sealed class MemorySearchWorkflowTests : IDisposable
                     Stable.Add((Offset, request.Key)); return new(true);
                 case "crash":
                     if (request.Key != _id) return new(false, "trial changed");
-                    Crashes.Add((Offset, request.Key)); _id = null; _stamp = null; Offset = 0; return new(true);
+                    CrashAttempts.Add((Offset, request.Key));
+                    switch (CrashReply)
+                    {
+                        case "missing": return null;
+                        case "timeout": throw new TimeoutException("request lost before delivery");
+                        case "io": throw new IOException("pipe broke before delivery");
+                        case "refused": return new(false, "failure record rejected");
+                    }
+                    Crashes.Add((Offset, request.Key)); _id = null; _stamp = null; Offset = 0;
+                    if (CrashReply == "recorded-no-reply") return null;
+                    if (CrashReply == "recorded-timeout") throw new TimeoutException("record committed; reply lost");
+                    return new(true);
                 case "finish-job":
                     if (FailRestore) return new(false, "simulated readback mismatch");
                     Restores++; Offset = 0; _id = null; _stamp = null; return new(true);
@@ -146,6 +161,111 @@ public sealed class MemorySearchWorkflowTests : IDisposable
             Assert.Contains("No recommendation", status.Next);
             Assert.Equal(3, rig.Generation);   // the scan's writes (+50, +100, +150) and nothing after
         }
+        Assert.Equal(1, rig.Restores);
+    }
+
+    [Theory]
+    [InlineData("missing", RecordingResult.Unknown, false)]
+    [InlineData("timeout", RecordingResult.Unknown, false)]
+    [InlineData("io", RecordingResult.Unknown, false)]
+    [InlineData("recorded-no-reply", RecordingResult.Unknown, true)]
+    [InlineData("recorded-timeout", RecordingResult.Unknown, true)]
+    [InlineData("refused", RecordingResult.Rejected, false)]
+    public void A_scan_fault_needs_an_authoritative_recording_reply_before_any_candidate_write(string reply, string state, bool reachedBroker)
+    {
+        var rig = new Rig(_dir, 150)
+        {
+            CrashReply = reply,
+            Alter = (offset, _, _, phase) =>
+            {
+                if (phase.Kind == LabPhase.Memory)
+                {
+                    phase.Gbps = 1500 + offset * 0.3;
+                    if (offset == 150) phase.MemoryErrors = 1;
+                }
+                return phase;
+            },
+        };
+        Assert.Equal(0, rig.Run());
+        var status = Status();
+        Assert.Null(status.BestMhz);
+        Assert.False(status.Confirmed);
+        Assert.Empty(status.Comparisons!);
+        Assert.Equal(state, status.FailureRecording!.State);
+        Assert.Equal(Assert.Single(rig.CrashAttempts).Trial, status.FailureRecording.TrialId);
+        Assert.Equal(reachedBroker ? 1 : 0, rig.Crashes.Count);
+        Assert.Equal(0, rig.WritesAfterCrash);
+        Assert.Equal(3, rig.Generation);
+        Assert.Equal(1, rig.Restores);
+        Assert.Contains("No recommendation", status.Next);
+    }
+
+    [Theory]
+    [InlineData("missing", RecordingResult.Unknown, false)]
+    [InlineData("timeout", RecordingResult.Unknown, false)]
+    [InlineData("io", RecordingResult.Unknown, false)]
+    [InlineData("recorded-no-reply", RecordingResult.Unknown, true)]
+    [InlineData("recorded-timeout", RecordingResult.Unknown, true)]
+    [InlineData("refused", RecordingResult.Rejected, false)]
+    public void A_comparison_fault_cannot_fall_through_to_the_next_candidate_when_its_record_is_unresolved(string reply, string state, bool reachedBroker)
+    {
+        var rig = new Rig(_dir) { CrashReply = reply, Alter = ComparisonFault };
+        Assert.Equal(1, rig.Run());
+        var status = Status();
+        Assert.Null(status.BestMhz);
+        Assert.False(status.Confirmed);
+        Assert.Equal(MemoryComparison.Unjudged, Assert.Single(status.Comparisons!).Outcome);
+        Assert.Equal(state, status.FailureRecording!.State);
+        Assert.Equal(Assert.Single(rig.CrashAttempts).Trial, status.FailureRecording.TrialId);
+        Assert.Equal(reachedBroker ? 1 : 0, rig.Crashes.Count);
+        Assert.Equal(0, rig.WritesAfterCrash);
+        Assert.Equal(1, rig.Restores);
+        Assert.Contains("No recommendation", status.Next);
+    }
+
+    private static PhaseResult ComparisonFault(int offset, int nth, string _, PhaseResult phase)
+    {
+        if (phase.Kind == LabPhase.Memory)
+        {
+            phase.Gbps = 1500 + offset * 0.3;
+            if (offset == 100 && nth == 2) phase.MemoryErrors = 1;
+        }
+        if (phase.Kind == LabPhase.Latency && offset == 50) phase.LatencyNs = 490;
+        return phase;
+    }
+
+    [Fact]
+    public void An_acknowledged_comparison_failure_allows_other_candidates_to_be_measured()
+    {
+        var rig = new Rig(_dir) { Alter = ComparisonFault };
+        Assert.Equal(0, rig.Run());
+        var status = Status();
+        Assert.Equal(50, status.BestMhz);
+        Assert.True(status.Confirmed);
+        Assert.Equal(RecordingResult.Confirmed, status.FailureRecording!.State);
+        Assert.Equal(Assert.Single(rig.Crashes).Trial, status.FailureRecording.TrialId);
+        Assert.True(rig.WritesAfterCrash > 0);
+        Assert.Equal(1, rig.Restores);
+    }
+
+    [Fact]
+    public void A_balanced_candidate_is_shortlisted_compared_and_confirmed()
+    {
+        var rig = new Rig(_dir, 150)
+        {
+            Alter = (offset, _, _, phase) =>
+            {
+                if (phase.Kind == LabPhase.Memory) phase.Gbps = offset switch { 50 => 1530, 100 => 1515, _ => 1500 };
+                if (phase.Kind == LabPhase.Latency) phase.LatencyNs = offset switch { 50 => 520, 150 => 490, _ => 500 };
+                return phase;
+            },
+        };
+        Assert.Equal(0, rig.Run());
+        var status = Status();
+        Assert.Equal(100, status.BestMhz);
+        Assert.True(status.Confirmed);
+        Assert.Contains(status.Comparisons!, c => c.Stage == "candidate" && c.B == 100 && c.Outcome == MemoryComparison.Better);
+        Assert.Contains(status.Comparisons!, c => c.Stage == "confirm" && c.B == 100 && c.Outcome == MemoryComparison.Better);
         Assert.Equal(1, rig.Restores);
     }
 

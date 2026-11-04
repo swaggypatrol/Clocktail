@@ -41,7 +41,8 @@ public static class MemoryComparisonRules
     }
 
     /// <summary>At most three scan candidates: the least offset on the joint performance plateau, the bandwidth winner,
-    /// and the latency winner. These are a shortlist, not recommendations, until compared and confirmed.</summary>
+    /// and the latency winner. A spare slot admits a nondominated compromise between bandwidth and latency, closest to
+    /// their joint best in units of the existing comparison tolerances. These are candidates until compared and confirmed.</summary>
     public static IReadOnlyList<int> Shortlist(IReadOnlyList<SweepStep> steps)
     {
         var valid = steps.Where(r => MemorySweep.Edge([r]) == null).ToList();
@@ -51,7 +52,27 @@ public static class MemoryComparisonRules
             .OrderBy(r => r.OffsetMhz).FirstOrDefault();
         var bandwidth = valid.OrderByDescending(r => r.Gbps).ThenBy(r => r.OffsetMhz).First();
         var latency = valid.OrderBy(r => r.LatencyNs).ThenBy(r => r.OffsetMhz).First();
-        return new[] { plateau ?? bandwidth, bandwidth, latency }.Select(r => r.OffsetMhz).Distinct().ToArray();
+        var selected = new[] { plateau ?? bandwidth, bandwidth, latency }.DistinctBy(r => r.OffsetMhz).ToList();
+        if (selected.Count < 3)
+        {
+            // Descending bandwidth, then ascending latency, makes the strictly improving latency points the Pareto
+            // frontier. Equal performance keeps the lowest offset. No quadratic all-pairs dominance scan is needed.
+            var frontier = new List<SweepStep>();
+            double lowestLatency = double.PositiveInfinity;
+            foreach (var point in valid.OrderByDescending(r => r.Gbps).ThenBy(r => r.LatencyNs).ThenBy(r => r.OffsetMhz))
+                if (point.LatencyNs!.Value < lowestLatency)
+                {
+                    frontier.Add(point);
+                    lowestLatency = point.LatencyNs.Value;
+                }
+            var existing = selected.Select(r => r.OffsetMhz).ToHashSet();
+            var compromise = frontier.Where(r => !existing.Contains(r.OffsetMhz))
+                .OrderBy(r => Math.Max((1 - r.Gbps!.Value / gb) / MemorySweep.BandwidthFall,
+                    (r.LatencyNs!.Value / lat - 1) / MemorySweep.LatencyRise))
+                .ThenBy(r => r.OffsetMhz).FirstOrDefault();
+            if (compromise != null) selected.Add(compromise);
+        }
+        return selected.Select(r => r.OffsetMhz).ToArray();
     }
 
     /// <summary>Normalize every comparison to the same baseline, using bandwidth first and latency to break a plateau;

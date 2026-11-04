@@ -23,7 +23,7 @@ public sealed record SweepStep(int OffsetMhz, string Verdict, double? Gbps, doub
 
 public sealed record SweepStatus(string Job, string State, DateTime StartedUtc, DateTime UpdatedUtc, int? AtMhz, ulong? BufferMib,
     IReadOnlyList<SweepStep> Steps, int? BestMhz, string? Why, string? Next, int? EdgeMhz = null, int? CandidateMhz = null,
-    IReadOnlyList<MemoryComparison>? Comparisons = null, bool Confirmed = false)
+    IReadOnlyList<MemoryComparison>? Comparisons = null, bool Confirmed = false, RecordingResult? FailureRecording = null)
 {
     public const string Running = "running", Done = "done", Stopped = "stopped", Failed = "failed";
 }
@@ -62,6 +62,7 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
     private bool _confirmationAttempted;
     /// <summary>Why the candidates must not be compared (a failure not on record), or null.</summary>
     private string? _noConfirmation;
+    private RecordingResult? _failureRecording;
     /// <summary>The scan put no step ahead of the daily offset: it stands with nothing compared.</summary>
     private bool _dailyUnbeaten;
     /// <summary>The warm-up at the daily offset: the memory clock the first step is checked against.</summary>
@@ -323,13 +324,14 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
                     // only against that one (until 0.8.3 it went to whatever trial was in force, one written since too).
                     // The candidates are compared only once the failure is on record and the card is back: comparisons write
                     // new trials, and one written over an unrecorded crash (or a reset still settling) takes its blame.
-                    if (trial && step.DriverResets is not > 0 && Refused(Broker("crash", $"tune_memory {offset:+0;-0;0} MHz: {step.Detail}", key: trialId)) is { } nc)
+                    if (trial && step.DriverResets is not > 0)
                     {
-                        _noConfirmation = "the failure was not recorded against its trial";
-                        return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz failed: {step.Detail} (not recorded against a trial: {nc})", offset);
+                        var recording = RecordFailure(trialId, $"tune_memory {offset:+0;-0;0} MHz: {step.Detail}");
+                        if (recording.State != RecordingResult.Confirmed)
+                            return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz failed: {step.Detail} (recording {recording.State}: {recording.Detail})", offset);
                     }
-                    if (trial && step.DriverResets is > 0 && !CrashRecorded(stamp))
-                        _noConfirmation = Inv($"the service had not recorded the driver reset within {CrashRecordWait.TotalSeconds:0} s");
+                    if (trial && step.DriverResets is > 0)
+                        RecordResetRecovery(stamp, trialId);
                     return Finish(SweepStatus.Done, $"{offset:+0;-0;0} MHz failed: {step.Detail}", offset);
                 }
                 // Too hot, telemetry lost, the runner failing, a shared GPU, an offset not in force: the step says nothing
@@ -376,6 +378,23 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
     }
 
     protected virtual int? CountResets(DateTime since) => OperatingSystem.IsWindows() ? TryCount(since) : null;
+
+    private RecordingResult RecordFailure(string? trialId, string note)
+    {
+        _failureRecording = RecordingResult.From(Broker("crash", note, key: trialId), trialId);
+        if (_failureRecording.State != RecordingResult.Confirmed)
+            _noConfirmation = $"failure recording {_failureRecording.State}: {_failureRecording.Detail}";
+        return _failureRecording;
+    }
+
+    private bool RecordResetRecovery(string? stamp, string? trialId)
+    {
+        bool recorded = CrashRecorded(stamp);
+        string? detail = recorded ? null : Inv($"the service had not recorded the driver reset within {CrashRecordWait.TotalSeconds:0} s");
+        _failureRecording = new(recorded ? RecordingResult.Confirmed : RecordingResult.Unknown, detail, trialId);
+        if (!recorded) _noConfirmation = detail;
+        return recorded;
+    }
 
     /// <summary>One comparison, with one retry for disturbed measurements. All writes, runs and result attribution use
     /// the same lease protocol as the scan. The measuring child has ended before settings or records change.</summary>
@@ -441,15 +460,19 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
             // Release the measurement lease before a reset's recovery or a live fault's restoration.
             if (fault)
             {
-                if (reset && !CrashRecorded(stamp))
+                if (reset && !RecordResetRecovery(stamp, trialId))
                 {
                     outcome = MemoryComparison.Unjudged;
                     problem += "; reset recovery has not been confirmed; no recommendation";
                 }
-                else if (!reset && Refused(Broker("crash", $"tune_memory {stage}: {faultOffset:+0;-0;0} MHz: {problem}", key: trialId)) is { } refused)
+                else if (!reset)
                 {
-                    outcome = MemoryComparison.Unjudged;
-                    problem += "; the failing trial could not be recorded: " + refused;
+                    var recording = RecordFailure(trialId, $"tune_memory {stage}: {faultOffset:+0;-0;0} MHz: {problem}");
+                    if (recording.State != RecordingResult.Confirmed)
+                    {
+                        outcome = MemoryComparison.Unjudged;
+                        problem += $"; failure recording {recording.State}: {recording.Detail}";
+                    }
                 }
             }
             return result ?? new MemoryComparison(stage, a, b, outcome, problem ?? "the comparison did not finish", runs);
@@ -538,8 +561,8 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
                 : Inv($"paired comparisons recommend {b:+0;-0;0} MHz; equivalent performance prefers a lower offset. "))
                 + "The daily profile has been restored. Validate actual gains in a repeatable game or benchmark before keeping a candidate as daily. The scan boundary is reported separately as edge_mhz."
             : recovery != null ? "Recovery is incomplete: inspect the broker's answer and use back_to_daily before further tuning."
-            : state == SweepStatus.Done && _noConfirmation != null
-                ? "No recommendation: the failure must be on record before candidates are compared. back_to_daily, check the card (card_report), then run tune_memory again below the failing offset."
+            : _noConfirmation != null
+                ? "No recommendation: verify the measured trial's failure record in the broker log (failure_recording retains its trial_id) and recovery before further tuning. back_to_daily and card_report check the card; no more candidates were written after the unresolved record."
             : null;
         Save(state, at, why, next);
         log?.Invoke($"{state}: {why}");
@@ -550,7 +573,7 @@ public class MemorySweep(SweepSpec spec, string jobDir, string labExe, Action<st
     {
         var candidates = Candidates();
         var s = new SweepStatus(Path.GetFileName(JobDir), state, _started, DateTime.UtcNow, at, _bufferMib, _steps,
-            _confirmed ? _best : null, why, next, Best(_effective), candidates.Count > 0 ? candidates[0] : null, _comparisons, _confirmed);
+            _confirmed ? _best : null, why, next, Best(_effective), candidates.Count > 0 ? candidates[0] : null, _comparisons, _confirmed, _failureRecording);
         SaveStatus(s);
     }
 
