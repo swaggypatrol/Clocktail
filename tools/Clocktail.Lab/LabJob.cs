@@ -203,7 +203,7 @@ public abstract class LabJob(string stableId, string pci, int graceSeconds, stri
     /// back_to_daily in between took the trial off the record as survived, and the crash went to the daily profile. True
     /// once recorded.
     /// </summary>
-    protected bool CrashRecorded(string? stamp) => Recorded(() => (TrialAt(out bool answered), answered), stamp, CrashRecordWait, Thread.Sleep);
+    protected virtual bool CrashRecorded(string? stamp) => Recorded(() => (TrialAt(out bool answered), answered), stamp, CrashRecordWait, Thread.Sleep);
 
     /// <summary><see cref="CrashRecorded"/>'s wait: <paramref name="look"/> asked every second until the service answers
     /// with a trial other than <paramref name="stamp"/> (<see cref="SameTrial"/>; no answer says nothing: a busy pipe, a

@@ -30,8 +30,9 @@ a short total. The answer reports `profile`, `planned_seconds` and the exact `sc
 
 Explicit bare phase lists keep the legacy equal split. For example, `phases: "burn,pulse,light,memory,latency"` with
 `seconds: 60` runs each for 12 s; omitting `seconds` with custom phases still means 60 s. Explicit schedules are also
-accepted: `phases: "burn:30,solo:60,leap:60"`, `seconds: 150`. Every item must have a positive duration and the durations
-must sum to the stated total. Giving both a profile and custom phases is an error.
+accepted: `phases: "burn:30,solo:60,leap:60"`, with `seconds` omitted (the run is the durations' sum, 150 s) or stated.
+Every item must have a positive duration and the durations must sum to a stated total. No phase may be shorter than
+1 s, in a schedule or an equal split. Giving both a profile and custom phases is an error.
 
 The isolated CLI supports the same profile budgets with `clocktail-lab run --profile core`. Existing direct CLI phase
 lists still work; schedules also travel through `--phases` without losing individual phase durations.
@@ -55,11 +56,12 @@ lists still work; schedules also travel through `--phases` without losing indivi
 2. Scan the requested offsets. Each step checks bits, bandwidth, latency and whether the real memory clock followed
    the requested offset. A failed, shared or unjudgeable step cannot be marked stable.
 3. Two successive bandwidth/latency regressions are a recheck trigger. Before ending a non-trend scan, measure the
-   reference and suspect setting A B B A. A loss must repeat; otherwise update only the effective scan readings and
-   continue. Original scan readings remain intact. `trend:true` scans through performance dips, with correctness and
+   suspect setting A B B A against the step it was judged slower than (the best bandwidth or lowest latency before
+   it). A loss must repeat; otherwise update only the effective scan readings and continue. Original scan readings remain intact. `trend:true` scans through performance dips, with correctness and
    measurement validity still required.
 4. Shortlist at most three measured settings: the lowest offset on the joint bandwidth/latency plateau, the bandwidth
-   winner and the latency winner, with duplicates removed. They are candidates, not recommendations.
+   winner and the latency winner, with duplicates removed. They are candidates, not recommendations. When the daily
+   offset is the only one, no step measured ahead of it: it stays, and nothing is compared.
 5. Compare candidates A B B A against the same daily offset. A useful gain repeats in both pairs and does not incur a
    material regression in the other metric. A repeated-setting spread over 2% in bandwidth or latency retries the
    comparison once, then leaves it unjudged if it is still disturbed. Equivalent performance prefers the lower offset.
@@ -93,7 +95,8 @@ waiting for other GPU work take additional time. Up to three candidate compariso
 most 32 individual runs including one disturbance retry per comparison. Slowdown rechecks are additional.
 
 User cancellation, another trial replacing the measured settings, missing clocks, an interrupted measuring process or
-an incomplete recovery cannot produce a confirmed recommendation. Correctness failures name the trial actually measured;
+an incomplete recovery cannot produce a confirmed recommendation. A scan that ends in a failure the service has not put
+on record (a driver reset not recorded in time, a crash it refused) compares no candidates. Correctness failures name the trial actually measured;
 runner/telemetry failures remain unjudged. Nothing is kept as daily automatically.
 
 ## Compatibility in 0.9.0

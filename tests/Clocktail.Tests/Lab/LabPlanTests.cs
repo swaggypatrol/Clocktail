@@ -53,6 +53,23 @@ public class LabPlanTests
         Assert.Throws<ArgumentException>(() => LabConfig.Parse(phases, seconds));
 
     [Fact]
+    public void A_schedule_without_seconds_runs_for_the_sum_of_its_durations()
+    {
+        var plan = LabTestPlan.Create(phases: "burn:30, solo : 60 ,leap:60");
+        Assert.Equal(150, plan.Seconds);
+        Assert.Equal(["burn", "solo", "leap"], plan.Stages.Select(s => s.Phase));
+        Assert.Equal([30.0, 60, 60], plan.Stages.Select(s => s.Seconds));
+        Assert.Throws<ArgumentException>(() => LabTestPlan.Create(phases: "burn:30.5,solo:60"));
+        Assert.Equal(91, LabTestPlan.Create(phases: "burn:30.5,solo:60.5").Seconds);
+    }
+
+    [Theory]
+    [InlineData("burn:0.5,solo:9.5", 10)]
+    [InlineData("burn,burn,burn,burn,burn,burn,burn,burn,burn,burn,burn,burn,burn,burn,burn,burn,burn,burn,burn,burn", 10)]
+    public void No_phase_is_shorter_than_a_second(string phases, int seconds) =>
+        Assert.Throws<ArgumentException>(() => LabTestPlan.Create(phases: phases, seconds: seconds));
+
+    [Fact]
     public void A_profile_and_custom_phases_cannot_silently_override_each_other() =>
         Assert.Throws<ArgumentException>(() => LabTestPlan.Create("memory", "burn", 90));
 }

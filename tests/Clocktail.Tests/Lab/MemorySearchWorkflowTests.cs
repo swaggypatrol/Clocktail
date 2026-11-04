@@ -21,13 +21,17 @@ public sealed class MemorySearchWorkflowTests : IDisposable
         public readonly List<(int Offset, string? Trial)> Crashes = [];
         public Func<int, int, string, PhaseResult, PhaseResult> Alter = (_, _, _, phase) => phase;
         public bool StopInComparison, ChangeTrialInComparison, FailRestore, ChangeBaseline;
+        /// <summary>The offset whose scan step sees a driver reset, and whether the service then records it.</summary>
+        public int? ResetAt;
+        public bool ResetRecorded = true;
         private bool _stopFired, _changeFired;
 
         protected override IDisposable? ClaimCard() => new Token();
         protected override IDisposable? Hold(Action<string>? log) => new Token();
         protected override Timer Heartbeat() => new(_ => { }, null, Timeout.Infinite, Timeout.Infinite);
         protected override void Settle() { }
-        protected override int? CountResets(DateTime since) => 0;
+        protected override int? CountResets(DateTime since) => Offset == ResetAt ? 1 : 0;
+        protected override bool CrashRecorded(string? stamp) => ResetRecorded;
 
         protected override BrokerResponse? Send(BrokerRequest request)
         {
@@ -78,7 +82,7 @@ public sealed class MemorySearchWorkflowTests : IDisposable
     private SweepStatus Status() => JsonSerializer.Deserialize<SweepStatus>(File.ReadAllText(Path.Combine(_dir, "status.json")), LabJson.Options)!;
 
     [Fact]
-    public void A_flat_scan_recommends_the_baseline_after_paired_confirmation_and_restores_it()
+    public void A_flat_scan_keeps_the_baseline_without_comparing_it_to_itself_and_restores_it()
     {
         var rig = new Rig(_dir);
         Assert.Equal(0, rig.Run());
@@ -87,9 +91,62 @@ public sealed class MemorySearchWorkflowTests : IDisposable
         Assert.Equal(0, status.BestMhz);
         Assert.Equal(100, status.EdgeMhz);
         Assert.True(status.Confirmed);
-        Assert.Equal(4, Assert.Single(status.Comparisons!).Runs.Count);
+        Assert.Empty(status.Comparisons!);
+        Assert.Contains("stays", status.Next);
         Assert.Equal(1, rig.Restores);
         Assert.Equal(0, rig.Offset);
+    }
+
+    [Fact]
+    public void A_slowdown_is_rechecked_against_the_step_it_was_measured_against()
+    {
+        // +50 reads lucky once; +100 is not under it; +150 and +200 are, so the slowdown is judged against +50, not
+        // against +100 (the step before its onset). Rechecking +50 corrects it, and the scan runs on with no new edge.
+        var rig = new Rig(_dir, 300)
+        {
+            Alter = (offset, nth, _, phase) =>
+            {
+                if (phase.Kind == LabPhase.Memory)
+                    phase.Gbps = nth == 1 && offset == 50 ? 1515 : nth == 1 && offset == 100 ? 1507.5 : 1500;
+                return phase;
+            },
+        };
+        Assert.Equal(0, rig.Run());
+        var status = Status();
+        var recheck = Assert.Single(status.Comparisons!, c => c.Stage == "slowdown recheck");
+        Assert.Equal((50, 200), (recheck.A, recheck.B));
+        Assert.Equal(300, status.EdgeMhz);
+        Assert.Contains(status.Steps, s => s.OffsetMhz == 300);
+        Assert.Equal(0, status.BestMhz);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_driver_reset_not_on_record_compares_no_candidates(bool recorded)
+    {
+        var rig = new Rig(_dir, 150)
+        {
+            ResetAt = 150, ResetRecorded = recorded,
+            Alter = (offset, _, _, phase) => { if (phase.Kind == LabPhase.Memory) phase.Gbps = 1500 + offset * 0.3; return phase; },
+        };
+        Assert.Equal(0, rig.Run());
+        var status = Status();
+        Assert.Equal(SweepStatus.Done, status.State);
+        if (recorded)
+        {
+            Assert.NotEmpty(status.Comparisons!);
+            Assert.Equal(100, status.BestMhz);
+        }
+        else
+        {
+            Assert.Empty(status.Comparisons!);
+            Assert.Null(status.BestMhz);
+            Assert.False(status.Confirmed);
+            Assert.Contains("No recommendation", status.Next);
+            Assert.Equal(3, rig.Generation);   // the scan's writes (+50, +100, +150) and nothing after
+        }
+        Assert.Equal(1, rig.Restores);
     }
 
     [Fact]
@@ -236,7 +293,12 @@ public sealed class MemorySearchWorkflowTests : IDisposable
     [InlineData(false)]
     public void A_stop_or_another_trial_during_confirmation_names_nothing_and_restores(bool stopped)
     {
-        var rig = new Rig(_dir) { StopInComparison = stopped, ChangeTrialInComparison = !stopped };
+        // A gain, so a candidate comparison runs (a flat scan compares nothing).
+        var rig = new Rig(_dir)
+        {
+            StopInComparison = stopped, ChangeTrialInComparison = !stopped,
+            Alter = (offset, _, _, phase) => { if (phase.Kind == LabPhase.Memory) phase.Gbps = 1500 + offset * 0.3; return phase; },
+        };
         rig.Run();
         var status = Status();
         Assert.Equal(stopped ? SweepStatus.Stopped : SweepStatus.Failed, status.State);

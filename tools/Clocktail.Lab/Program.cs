@@ -39,8 +39,11 @@ try
     {
         case "run":
         {
+            // A profile takes whole seconds; a schedule with no --seconds runs for the sum of its durations.
             var plan = O("profile") is { } goal ? Clocktail.Domain.Lab.LabTestPlan.Create(goal, O("phases"),
-                O("seconds") is { } duration ? int.Parse(duration, CultureInfo.InvariantCulture) : null) : null;
+                    O("seconds") is { } duration ? int.TryParse(duration, NumberStyles.Integer, CultureInfo.InvariantCulture, out int whole) ? whole
+                        : throw new ArgumentException("--seconds is a whole number of seconds with --profile") : null)
+                : O("seconds") == null && O("phases") is { } custom ? Clocktail.Domain.Lab.LabTestPlan.Create(phases: custom) : null;
             var phases = plan == null ? LabConfig.Parse(O("phases") ?? "burn", D("seconds", 60))
                 : LabConfig.Parse(plan.PhaseArgument, plan.Seconds);
             var cfg = new LabConfig(phases, TargetW: D("target-w", 0), LightDiv: (int)D("light-div", 64), MaxTempC: D("max-temp-c", double.PositiveInfinity));

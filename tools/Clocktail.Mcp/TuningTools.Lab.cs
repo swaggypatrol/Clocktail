@@ -105,7 +105,7 @@ public sealed partial class TuningTools
         "Validate current settings by goal: core (default: burn, high-point solo and heavy/light leap), memory, uncore or all. Each profile gives its key phases their own time. Advanced callers can choose custom phases instead. Verify the intended operating point actually ran; interrupted/shared or inconclusive measurements do not establish stability. It stops within 2 °C of NVIDIA's slowdown point, and at maxTempC when one is given.")]
     public string LabTest(
         [Description("Advanced custom phases instead of a profile: burn, light, pulse, solo, leap, memory, latency, l2. Bare lists split seconds evenly (default 60 s); phase:seconds lists give individual durations. Omit for the core profile.")] string? phases = null,
-        [Description("Total run budget, up to 600 s. Omit for the profile's budget: core 150, memory 90, uncore 60, all 270 s. Profiles can be lengthened; custom phases allow shorter screening runs, 10 s or more.")] int? seconds = null,
+        [Description("Total run budget, up to 600 s. Omit for the profile's budget: core 150, memory 90, uncore 60, all 270 s; for a phase:seconds schedule, its sum. Profiles can be lengthened; custom phases allow shorter screening runs, 10 s or more, at least 1 s per phase.")] int? seconds = null,
         [Description("Steer burn to this board power, W (default: no steering, every thread).")] double? targetW = null,
         [Description("Light: one thread in this many (default 64: 64 SMs busy).")] int lightDiv = 64,
         [Description("What this run is meant to show, for the log.")] string? note = null,
