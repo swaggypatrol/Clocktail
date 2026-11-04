@@ -153,7 +153,7 @@ public class JudgeLockTests : IDisposable
         if (!OperatingSystem.IsWindows()) return;   // share modes are enforced on Windows only, where Clocktail runs
         File.WriteAllText(_path, """{"Pid":100,"RunId":"a","Label":"burn"}""");
         var writer = new FileStream(_path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-        var closer = Task.Run(async () => { await Task.Delay(100); writer.Dispose(); });
+        var closer = ReleaseSoon(writer, 100);
         try
         {
             Assert.False(JudgeLock.TryAcquire(_path, new JudgeLock.Info(100, "b"), _host, NoLocal, out var by));
