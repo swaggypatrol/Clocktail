@@ -12,7 +12,7 @@ Diagnose the actual device and operation; do not fall back to a supplied profile
 | Driver rejects or readback differs | Report the actual rejection or mismatch. Do not claim success or substitute another card's value. |
 | Capability or sensor unavailable | Report missing support for that control or layout; do not copy a stock value from another board. |
 | Busy measurement or write window | Wait for it or stop the relevant job; concurrent changes invalidate attribution. |
-| Partial profile application | Explain `not_applied` and the affected groups; inspect the actual card state. |
+| Partial profile application | Report the requested and current values in `not_applied`. An omitted group may still have active offsets. A busy card stops application without dropping the group. |
 | Driver reset | Let recovery settle, then inspect trial data and current settings before further changes. |
 | Test stops hot | It reached the user's `maxTempC`, or (stress_test, lab_test) came within 2 °C of NVIDIA's slowdown point; the answer says which. Neither a pass nor proof the setting failed. |
 | Benchmark is shared or disturbed | Close competing workloads or wait and repeat; do not select a tuning result from contaminated timing. |

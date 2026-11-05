@@ -15,8 +15,8 @@ There are no stock clock, voltage, power, fan or offset values to copy from a bu
 | `flatten_curve` | Lower a flat top from the selected voltage | yes |
 | `set_curve` | Whole per-point V/F curve | yes |
 | `shift_curve` | Move the current curve left by the selected mV | yes |
-| `set_core_offset` | Core P0 offset; restore the V/F curve afterwards | yes |
-| `set_memory_offset` | Memory P0 offset; restore the V/F curve afterwards | yes |
+| `set_core_offset` | Core P0 offset with verified effective curve shift | yes |
+| `set_memory_offset` | Memory P0 offset with verified effective curve preservation | yes |
 | `adjust_xbar` | Independent XBAR clock offset and voltage demand | yes |
 | `adjust_clock_domain` | Available domain offsets/demands; core demand only | yes |
 | `set_clock_ratio` | Driver-exposed propagation ratio | yes |
@@ -31,7 +31,7 @@ There are no stock clock, voltage, power, fan or offset values to copy from a bu
 
 ## Curves and offsets
 Point count, offset budget, regulator step and available voltage points come from the current driver layout.
-Core and memory P0 writes can reset V/F point offsets; the curve is restored in the same trial.
+Core and memory P0 writes can change V/F point controls. The broker preserves the curve shape through a core shift and preserves effective frequencies through a memory change. It repairs mismatches and verifies the effective readback. A daily core offset without an explicit curve requests a uniform effective shift.
 `flatten_curve` only lowers by definition. `shift_curve` changes clocks for a requested voltage shift, rather than programming a universal undervolt recipe.
 A memory offset's units are those of the driver interface; preserve units when comparing it with telemetry.
 

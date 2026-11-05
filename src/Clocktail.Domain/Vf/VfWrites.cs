@@ -543,7 +543,45 @@ public sealed class VfWrites(NvClient hw, OwnershipJournal journal, ApplySentine
             foreach (var p in s0.Points)
                 if (BitConverter.ToUInt32(raw, VfLayout.Control(p.Index)) != 0) return null;
             return VfOffsets.Encode(VfParser.Offsets(raw, s0.EditableCount));
-        });
+        }, CoupledKinds: [ClockOffsets.Kind]);
+
+    /// <summary>Ownership/readback of point controls only, for capturing implicit P0 side effects. Writing a V/F
+    /// curve still requires Prepare/Cell with the full curve, firmware bounds and post-write structural proof;
+    /// only rollback to a captured pre-operation control snapshot uses RestoreControls instead.</summary>
+    public static OwnedCell ControlCell(VfControlSnapshot s) => new(
+        Kind, CoreKey, "kHz", $"Core V/F point offsets, kHz, points 0..{s.Points.Count - 1} ({s.Layout})", Spec(s.Mask),
+        raw =>
+        {
+            var points = VfParser.CoreOffsets(s.Info, raw);
+            return points.Count == s.Points.Count && points.Select(p => p.Index).SequenceEqual(s.Points.Select(p => p.Index))
+                ? VfOffsets.Encode(points.Select(p => p.OffsetKhz).ToArray()) : null;
+        }, CoupledKinds: [ClockOffsets.Kind]);
+
+    /// <summary>Rollback only: restore captured Core control offsets without interpreting effective Status.
+    /// The caller verifies P0 and the Info/Control topology before and after this transaction.</summary>
+    internal static Mutation RestoreControls(VfControlSnapshot original, ReadOnlyMemory<byte> raw)
+    {
+        var current = raw.ToArray();
+        if (ControlCell(original).StateIn(current) == null)
+            return new Mutation.Abort("the V/F control snapshot no longer matches the captured topology");
+        var changed = original.Points.Where(p => BitConverter.ToInt32(current, VfLayout.OffsetField(p.Index)) != p.OffsetKhz).ToArray();
+        if (changed.Length == 0) return new Mutation.Apply([]);
+
+        byte[] Request(bool restore)
+        {
+            var request = (byte[])current.Clone();
+            request.AsSpan(VfLayout.MaskOffset, VfLayout.MaskBytes).Clear();
+            foreach (var point in changed)
+            {
+                request[VfLayout.MaskOffset + (point.Index >> 3)] |= (byte)(1 << (point.Index & 7));
+                BitConverter.TryWriteBytes(request.AsSpan(VfLayout.OffsetField(point.Index)),
+                    restore ? BitConverter.ToInt32(current, VfLayout.OffsetField(point.Index)) : point.OffsetKhz);
+            }
+            return request;
+        }
+        return new Mutation.Request(Request(false),
+            changed.Select(p => Edit.Int32(VfLayout.OffsetField(p.Index), p.OffsetKhz)).ToArray(), Request(true));
+    }
 
     public static Func<ReadOnlyMemory<byte>, Mutation> Plan(VfCurveSnapshot s0, VfLimits limits, IReadOnlyList<int> target, bool enforceRange = true) =>
         raw => VfRules.Plan(s0, limits, target, raw.ToArray(), enforceRange);

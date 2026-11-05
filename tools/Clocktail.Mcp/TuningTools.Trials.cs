@@ -73,7 +73,7 @@ public sealed partial class TuningTools
     });
 
     [McpServerTool(Name = "set_memory_offset", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Set this GPU's memory P0 offset as a trial, in MHz as the driver defines it. Use the reported range. A P0 write can reset V/F point offsets, so the curve is restored in the same trial. Judge correctness, sustained performance and real workloads rather than copying a memory offset.")]
+        "Set this GPU's memory P0 offset as a trial, in MHz as the driver defines it. Use the reported range. The broker preserves and verifies the effective V/F curve across the memory write. Judge correctness, sustained performance and real workloads rather than copying a memory offset.")]
     public string SetMemoryOffset(
         [Description("The memory offset to try, MHz (absolute, not a delta).")] double mhz,
         [Description("Why this step.")] string? reason = null) => Guard(() =>
@@ -84,11 +84,11 @@ public sealed partial class TuningTools
         if (khz < p0.MinKhz || khz > p0.MaxKhz)
             throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000.0}..{p0.MaxKhz / 1000.0} MHz");
         return Trial(string.Create(CultureInfo.InvariantCulture, $"memory offset {now / 1000.0:+0.#;-0.#;0} → {khz / 1000.0:+0.#;-0.#;0} MHz"),
-            reason, new() { ["memory_khz"] = khz });
+            reason, new() { ["memory_khz"] = khz }, coreDeltaKhz: 0);
     });
 
     [McpServerTool(Name = "set_core_offset", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Set this GPU's core P0 offset as a trial. It shares the reported offset budget with per-point V/F offsets; restore the curve after the P0 write. No model-specific target or stable offset is assumed.")]
+        "Set this GPU's core P0 offset as a trial. It shares the reported offset budget with per-point V/F offsets; the broker preserves its shape and verifies the effective frequency change. No model-specific target or stable offset is assumed.")]
     public string SetCoreOffset(
         [Description("The core P0 offset to try, MHz (absolute, not a delta).")] double mhz,
         [Description("Why this step.")] string? reason = null) => Guard(() =>
@@ -99,7 +99,7 @@ public sealed partial class TuningTools
         if (khz < p0.MinKhz || khz > p0.MaxKhz)
             throw new ArgumentException($"the driver's range is {p0.MinKhz / 1000.0}..{p0.MaxKhz / 1000.0} MHz");
         return Trial(string.Create(CultureInfo.InvariantCulture, $"core offset {now / 1000.0:+0.#;-0.#;0} → {khz / 1000.0:+0.#;-0.#;0} MHz"),
-            reason, new() { ["writes"] = new[] { TrialWrite(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Core), khz) } });
+            reason, new() { ["writes"] = new[] { TrialWrite(ClockOffsets.Kind, ClockOffsets.Key(ClockDomain.Core), khz) } }, coreDeltaKhz: (long)khz - now);
     });
 
     /// <summary>One item of a trial's "writes": any registry write, through its own path and rules.</summary>
@@ -395,7 +395,7 @@ public sealed partial class TuningTools
 
     /// <summary>One trial with the V/F curve left as it is: the broker writes <paramref name="items"/> beside the curve
     /// on the card (written again when the memory offset is among them) and records the trial.</summary>
-    private string Trial(string change, string? reason, Dictionary<string, object?> items)
+    private string Trial(string change, string? reason, Dictionary<string, object?> items, long? coreDeltaKhz = null)
     {
         var look = card.Read();
         var t = look.Telemetry;
@@ -410,14 +410,20 @@ public sealed partial class TuningTools
         foreach (var (k, v) in items) args[k] = v;
         var r = card.Broker(BrokerRequest.OpExperiment, "try", JsonSerializer.Serialize(args));
         if (!r.Ok) return Reply(r);
-        bool? intact = ReadAfter(out var unread)?.Curve.Offsets().SequenceEqual(before);
+        var after = ReadAfter(out var unread);
+        bool? intact = after == null ? null : after.Curve.Offsets().SequenceEqual(before);
+        if (after != null && coreDeltaKhz is { } delta)
+        {
+            try { intact = VfEffectiveCurve.Mismatch(look.Curve, after.Curve, delta) == null; }
+            catch (InvalidDataException e) { intact = false; unread = e.Message; }
+        }
         return Out(new
         {
-            success = true,
+            success = coreDeltaKhz == null || intact == true,
             change,
             written = r.Written,
             curve_intact = intact,
-            warning = unread ?? (intact == false ? "the V/F curve is not what it was before this write: call back_to_daily before going on" : null),
+            warning = unread ?? (intact == false ? "the effective V/F curve did not verify after this write: call back_to_daily before going on" : null),
         });
     }
 }

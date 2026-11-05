@@ -51,10 +51,16 @@ public sealed record BrokerRequest(
     /// (0.3.8).</summary>
     DateTimeOffset? HungAt = null,
     DateTimeOffset? AnsweredAt = null,
+    /// <summary>For a P0 write: preserve the effective curve, shifting it by the change in the core target.</summary>
+    bool PreserveEffectiveCurve = false,
     /// <summary>The complete profile snapshot approved by the person. keep/adopt/preset check it under the operation
     /// lock before changing the card or saved profile; a changed snapshot requires a new preview and confirmation.</summary>
     string? ExpectedProfileFingerprint = null)
 {
+    // Broker-only intent for a saved daily with a core target but no point curve. It restores a uniform effective
+    // displacement, rather than retaining a trial's point shape. This is not accepted from the wire contract.
+    internal int? EffectiveCoreTargetKhz { get; init; }
+
     public const string OpPing = "ping";
     /// <summary>Guarded game-test session: info, begin, check, lever, finish and interrupted-run recovery.</summary>
     public const string OpGame = "game";

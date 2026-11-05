@@ -134,7 +134,7 @@ public sealed class Recovery(NvClient hw, OwnershipJournal journal, ApplySentine
         var current = writer.Look(gpu, cell);
         if (current == null)
             return (Item(null, RecoveryAction.Refused, $"{cell.Id} could not be read; nothing written", null, false), false);
-        if (current == item.Original)
+        if (current == item.Original && !(cell.CoupledKinds?.Any(k => journal.Inspect().Items.Any(i => i.Kind == k)) ?? false))
         {
             journal.Release(item.Kind, item.Key);
             return (Item(current, RecoveryAction.Released, "already at the original value; nothing written", null, true), false);
