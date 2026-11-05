@@ -5,6 +5,7 @@ Use four main workflows. Workload profiles select tests and time budgets; they s
 | Goal | Entry | What it establishes |
 |---|---|---|
 | Validate a V/F change | `lab_test`, profile `core` | Correctness under full load, a held high point and heavy/light transitions |
+| Check a core V/F boundary | `c01_test` | Sustained FP32 FMA with intermediate hashes and an exact CPU comparison |
 | Find a useful memory offset | `tune_memory` | A screened range and a paired, confirmed performance recommendation |
 | Compare XBAR/ratio/boost changes | `tune_uncore` | L2 gains with DRAM/core cost checks, using A B B A and final confirmation |
 | Confirm graphics behavior and actual benefit | `game_test`, or the person's game with `watch` / `live_*` | Graphics-path behavior and repeatable application performance |
@@ -14,6 +15,10 @@ There is no need to run every backend at every offset. A synthetic pass covers t
 comparison is still needed to establish a useful application gain.
 
 ## Test profiles
+
+`c01_test` runs on the currently selected GPU. It uses 16 accumulators per thread and folds the intermediate states into a hash every eight steps. The CPU independently computes the expected bits and hashes. Use `seconds` (10–600, default 180), `intensity` (0.01–1, default 1), `seed` (hex), and `maxTempC` (default 85). Intensity scales the CUDA thread-block grid. Compare measured voltage, frequency and power when choosing an intensity. A clean run records the observed workload and duration.
+
+The Windows lab executable also exposes `clocktail-lab c01 --seconds 180 --intensity 0.2 --gpu-pci 0000:01:00.0`. C01 requires CUDA compute capability 12.0 or later. Its result includes the number of clock-reason samples and how many report a software power cap.
 
 `lab_test` accepts `profile` or custom `phases`. Omit both for `core`.
 

@@ -63,4 +63,6 @@ public sealed class NvmlSampler : ISampler
     }
 
     public void Dispose() => _nvml.Dispose();
+
+    internal ulong ClockEventReasons() => _nvml.ThrottleReasons(_h);
 }

@@ -22,6 +22,7 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
         clocktail-lab game-plan --seconds N [--seed S] [--patterns LIST] [--levers LIST] [--max-scale P] [--json]
                                                   (the game test's script, offline: no game, no GPU)
         clocktail-lab probe [--gpu-pci ID]
+        clocktail-lab c01 [--seconds N] [--intensity F] [--seed HEX] [--max-temp-c C] [--json FILE] [--gpu-pci ID]
         """);
     return 64;
 }
@@ -37,6 +38,9 @@ try
 {
     switch (args[0])
     {
+        case "c01":
+            return C01Command.Run(D("seconds", 180), D("intensity", 1), O("seed") ?? "5eed5eed5eed5eed",
+                D("max-temp-c", 85), O("gpu-pci"), O("json"));
         case "run":
         {
             // A profile takes whole seconds; a schedule with no --seconds runs for the sum of its durations.

@@ -111,9 +111,32 @@ public sealed partial class TuningTools
         [Description("What this run is meant to show, for the log.")] string? note = null,
         [Description("Also stop the run if the GPU reaches this temperature, °C. Omitted: it stops only within 2 °C of NVIDIA's slowdown point.")] int? maxTempC = null,
         [Description("Test goal: core (default), memory, uncore or all. Use tune_memory / tune_uncore to search, and game_test or the user's game to validate graphics. Omit when giving custom phases.")] string? profile = null) => Guard(() =>
+        RunLabTest(LabTestPlan.Create(profile, phases, seconds), targetW, lightDiv, note, maxTempC));
+
+    [McpServerTool(Name = "c01_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
+        "Check current GPU settings with C01, a sustained FP32 FMA workload with 16 accumulators and an exact CPU oracle. Use intensity to shrink the CUDA grid while looking for higher measured clocks under a power constraint. Check measured voltage and frequency before using the result as evidence for a curve point.")]
+    public string C01Test(
+        [Description("Run budget in seconds, 10–600. Default 180; short runs can miss intermittent errors.")] int seconds = 180,
+        [Description("Fraction of the full thread-block grid, 0.01–1. Default 1. Try 0.16–0.20 if the full grid is power limited, then compare measured clocks.")] double intensity = 1,
+        [Description("Optional hexadecimal 64-bit input seed for a repeatable test.")] string seed = "5eed5eed5eed5eed",
+        [Description("GPU temperature stop in °C. Default 85. The driver's slowdown margin also applies.")] int maxTempC = 85,
+        [Description("Purpose of the test for the tuning log.")] string? note = null) => Guard(() =>
+    {
+        if (intensity is < 0.01 or > 1 || !double.IsFinite(intensity))
+            throw new ArgumentException("intensity must be in 0.01..1");
+        if (maxTempC is < 40 or > 100)
+            throw new ArgumentException("maxTempC must be in 40..100");
+        if (seed.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) seed = seed[2..];
+        if (!ulong.TryParse(seed, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out _))
+            throw new ArgumentException("seed must be an unsigned 64-bit hexadecimal number");
+        return RunLabTest(new LabTestPlan("c01", seconds, [new LabStage("c01", seconds)]),
+            null, 64, note, maxTempC, intensity, seed);
+    });
+
+    private string RunLabTest(LabTestPlan plan, double? targetW, int lightDiv, string? note, int? maxTempC,
+        double? c01Intensity = null, string? seed = null)
     {
         string exe = LabExe() ?? throw new InvalidOperationException("clocktail-lab.exe is not beside this server: run npx -y clocktail@latest setup");
-        var plan = LabTestPlan.Create(profile, phases, seconds);
         int duration = plan.Seconds;
         var list = plan.Stages.Select(s => s.Phase).ToList();
         if (duration < 10 || duration > MaxLabSeconds) throw new ArgumentException($"seconds is 10..{MaxLabSeconds}");
@@ -125,9 +148,13 @@ public sealed partial class TuningTools
         Directory.CreateDirectory(dir);
         string jsonPath = Path.Combine(dir, $"run-{Guid.NewGuid():n}.json");
         var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
-        foreach (var a in new[] { "run", "--phases", plan.PhaseArgument, "--seconds", duration.ToString(CultureInfo.InvariantCulture), "--json", jsonPath,
-                                  "--gpu-pci", card.PciBusId, "--light-div", lightDiv.ToString(CultureInfo.InvariantCulture) })
+        foreach (var a in new[] { c01Intensity.HasValue ? "c01" : "run", "--seconds", duration.ToString(CultureInfo.InvariantCulture),
+                                  "--json", jsonPath, "--gpu-pci", card.PciBusId })
             psi.ArgumentList.Add(a);
+        string[] workloadArgs = c01Intensity is { } intensity
+            ? ["--intensity", intensity.ToString(CultureInfo.InvariantCulture), "--seed", seed!]
+            : ["--phases", plan.PhaseArgument, "--light-div", lightDiv.ToString(CultureInfo.InvariantCulture)];
+        foreach (string a in workloadArgs) psi.ArgumentList.Add(a);
         if (targetW is { } w) { psi.ArgumentList.Add("--target-w"); psi.ArgumentList.Add(w.ToString(CultureInfo.InvariantCulture)); }
         // The person's limit goes to the lab too, which stops on it by itself; the margin stop is watched from here.
         if (maxC is { } mc) { psi.ArgumentList.Add("--max-temp-c"); psi.ArgumentList.Add(mc.ToString(CultureInfo.InvariantCulture)); }
@@ -144,7 +171,7 @@ public sealed partial class TuningTools
 
         // The measurement holds the card: while it runs no write lands under it (another agent's, the service's own), it
         // starts once no write is landing, and the card is read for it from then on.
-        var hold = HoldCard("lab_test", olderToo: true);
+        var hold = HoldCard(c01Intensity.HasValue ? "c01_test" : "lab_test", olderToo: true);
         Card.Look before;
         var started = DateTime.UtcNow;
         try
@@ -270,7 +297,7 @@ public sealed partial class TuningTools
                     ? "the clock did not leap, so the leap's pass is no evidence: the whole chip did not hold the clock under the curve's top (a flat curve from the wall's voltage, or a high wall); run it at the daily wall with nothing else on the GPU"
                 : null,
         });
-    });
+    }
 
     private static JsonElement? Phase(JsonElement lab, string kind) =>
         lab.TryGetProperty("phases", out var ps) ? ps.EnumerateArray().FirstOrDefault(p => p.TryGetProperty("kind", out var k) && k.GetString() == kind) is { ValueKind: JsonValueKind.Object } x ? x : null : null;

@@ -37,7 +37,9 @@ Choose a testing goal: `lab_test` for V/F validation (default core profile, 150 
 | Core curve and clocks | `adjust_curve`, `flatten_curve`, `set_curve`, `shift_curve`, `set_core_offset`, `set_clock_lock`, `curve_editor` |
 | Memory and clock domains | `set_memory_offset`, `adjust_xbar`, `adjust_clock_domain`, `set_clock_ratio`, `set_voltage_boost` |
 | Power and cooling | `set_power_limit`, `set_daily_power_limit`, `set_power_cap`, `set_current_limit`, `set_fan_curve`, `set_fan_start`, `set_fan_speed` |
-| Measurements | `stress_test`, `lab_test`, `watch`, `live_start`, `live_read`, `live_stop`, `tune_memory`, `tune_uncore`, `game_test`, `lab_status`, `lab_stop` |
+| Measurements | `stress_test`, `lab_test`, `c01_test`, `watch`, `live_start`, `live_read`, `live_stop`, `tune_memory`, `tune_uncore`, `game_test`, `lab_status`, `lab_stop` |
+
+`c01_test` checks current GPU settings with sustained FP32 FMA and exact CPU comparison. Use the 180 s default near a suspected core V/F boundary. Compare the measured voltage, frequency and board power when changing `intensity`, which scales the thread-block grid.
 | User-owned profiles | `preview_daily`, `keep_as_daily`, `back_to_daily`, `stock`, `load_daily`, `list_presets`, `save_profile`, `load_preset`, `delete_profile` |
 | Setup and help | `install_service`, `manual` |
 

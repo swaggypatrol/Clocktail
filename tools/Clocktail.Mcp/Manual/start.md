@@ -29,7 +29,9 @@ Choose the goal first: `lab_test` for V/F verification (default core profile, 15
 | Core curve and clocks | `adjust_curve`, `flatten_curve`, `set_curve`, `shift_curve`, `set_core_offset`, `set_clock_lock`, `curve_editor` |
 | Memory and clock domains | `set_memory_offset`, `adjust_xbar`, `adjust_clock_domain`, `set_clock_ratio`, `set_voltage_boost` |
 | Power and cooling | `set_power_limit`, `set_daily_power_limit`, `set_power_cap`, `set_current_limit`, `set_fan_curve`, `set_fan_start`, `set_fan_speed` |
-| Measurements | `stress_test`, `lab_test`, `watch`, `live_start`, `live_read`, `live_stop`, `tune_memory`, `tune_uncore`, `game_test`, `lab_status`, `lab_stop` |
+| Measurements | `stress_test`, `lab_test`, `c01_test`, `watch`, `live_start`, `live_read`, `live_stop`, `tune_memory`, `tune_uncore`, `game_test`, `lab_status`, `lab_stop` |
+
+Use `c01_test` for a dedicated FP32 correctness check at the current core V/F point. It defaults to 180 seconds with the full thread-block grid. Reduce `intensity` to explore the effect of load on actual clocks.
 | User-owned profiles | `preview_daily`, `keep_as_daily`, `back_to_daily`, `stock`, `load_daily`, `list_presets`, `save_profile`, `load_preset`, `delete_profile` |
 | Setup and help | `install_service`, `manual` |
 

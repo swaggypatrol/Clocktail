@@ -1,0 +1,40 @@
+{
+  "nvrtc_version": "13.5",
+  "nvrtc_dll": "nvrtc64_130_0.dll",
+  "source": "kernels/compute/c01_fp32_fma.cu",
+  "source_sha256": "f97b207c28c50844deed9ed154f6542f3abdf500c0458715d5f95ec7b1e1280f",
+  "hash_interval": 8,
+  "renorm_interval": 32,
+  "outputs": {
+    "c01_fp32_fma_checkpoint8.ptx": {
+      "sha256": "6fbae987c0183a8802835d729e6efb6daf761addbddc0a2f8ca1d8cc91bacbc8",
+      "options": [
+        "-arch=compute_120",
+        "-std=c++17",
+        "-default-device",
+        "--fmad=true",
+        "-ftz=false",
+        "-prec-div=true",
+        "-prec-sqrt=true",
+        "--ptxas-options=-v",
+        "-DC01_CHECKPOINT8_ONLY=1"
+      ],
+      "compiler_log": ""
+    },
+    "c01_fp32_fma_checkpoint8.sm_120.cubin": {
+      "sha256": "80946eb34d04603c81354454501ff86a569008ea705c35cc03a0cdb05677c929",
+      "options": [
+        "-arch=sm_120",
+        "-std=c++17",
+        "-default-device",
+        "--fmad=true",
+        "-ftz=false",
+        "-prec-div=true",
+        "-prec-sqrt=true",
+        "--ptxas-options=-v",
+        "-DC01_CHECKPOINT8_ONLY=1"
+      ],
+      "compiler_log": "ptxas info    : 0 bytes gmem\nptxas info    : Compiling entry function 'c01_fma_a32_h8' for 'sm_120'\nptxas info    : Function properties for c01_fma_a32_h8\nptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 128 registers, used 1 barriers\nptxas info    : Compile time = 0.000 ms\nptxas info    : Compiling entry function 'c01_fma_a16_h8' for 'sm_120'\nptxas info    : Function properties for c01_fma_a16_h8\nptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 64 registers, used 1 barriers\nptxas info    : Compile time = 0.000 ms\nptxas info    : Compiling entry function 'c01_fma_a8_h8' for 'sm_120'\nptxas info    : Function properties for c01_fma_a8_h8\nptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads\nptxas info    : Used 40 registers, used 1 barriers\nptxas info    : Compile time = 0.000 ms\n"
+    }
+  }
+}

@@ -11,6 +11,8 @@
   <!-- The soloist (Kernels/solo.cu, from Etude): its PTX is built by Kernels/build_solo.py and embedded as it is. -->
   <ItemGroup>
     <EmbeddedResource Include="Kernels\solo.ptx" LogicalName="solo.ptx" />
+    <EmbeddedResource Include="..\Blackwell\kernels\images\compute\c01_fp32_fma_checkpoint8.ptx;..\Blackwell\kernels\images\compute\c01_fp32_fma_checkpoint8.sm_120.cubin"
+                      LogicalName="%(Filename)%(Extension)" />
   </ItemGroup>
 
   <PropertyGroup>
