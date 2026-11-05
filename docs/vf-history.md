@@ -4,6 +4,11 @@ The broker keeps a lightweight record of where the GPU actually runs: whenever t
 client or MCP server is connected. This record feeds the curve editor's "Observed V/F" dots and `data_points`'
 `by_point`, alongside the residency samples the MCP server already records.
 
+The MCP server's separate residency sampler runs once a second, in both full and lite mode. It queries only the current
+graphics clock, GPU utilization and board power through NVML, plus the existing NVVDD voltage read. It does not request
+the full telemetry snapshot's fan, VRAM, temperature, limit or maximum-clock fields. Residency keeps its existing
+timestamps, voltage, clock, utilization and power fields and load filter; the broker's 250 ms sampling is unchanged.
+
 ## What is recorded
 
 - **Source:** the broker's flight recorder (`FlightSampler`). It reads every GPU every 250 ms. The history uses the same

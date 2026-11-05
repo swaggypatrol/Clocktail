@@ -11,8 +11,14 @@ namespace Clocktail.Tests.Hw;
 internal static unsafe class FakeNvml
 {
     public static int Answer, Calls, Shutdowns, FieldAnswer;
+    public static int ClockAnswer, UtilAnswer, PowerAnswer;
+    public static readonly List<string> PointQueries = [];
 
-    public static void Reset() { Answer = 0; Calls = 0; Shutdowns = 0; FieldAnswer = 0; }
+    public static void Reset()
+    {
+        Answer = 0; Calls = 0; Shutdowns = 0; FieldAnswer = 0;
+        ClockAnswer = 0; UtilAnswer = 0; PowerAnswer = 0; PointQueries.Clear();
+    }
 
     public static NvmlApi Open() => NvmlApi.FromExports(name => name switch
     {
@@ -22,12 +28,15 @@ internal static unsafe class FakeNvml
         "nvmlDeviceGetHandleByIndex_v2" => (nint)(delegate* unmanaged[Cdecl]<uint, nint*, int>)&ByIndex,
         "nvmlDeviceGetName" or "nvmlDeviceGetVbiosVersion" => (nint)(delegate* unmanaged[Cdecl]<nint, byte*, uint, int>)&Text,
         "nvmlDeviceGetPciInfo_v3" => (nint)(delegate* unmanaged[Cdecl]<nint, byte*, int>)&Pci,
-        "nvmlDeviceGetTemperature" or "nvmlDeviceGetClockInfo" or "nvmlDeviceGetMaxClockInfo" or "nvmlDeviceGetFanSpeed_v2"
+        "nvmlDeviceGetClockInfo" => (nint)(delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)&Clock,
+        "nvmlDeviceGetUtilizationRates" => (nint)(delegate* unmanaged[Cdecl]<nint, uint*, int>)&Util,
+        "nvmlDeviceGetPowerUsage" => (nint)(delegate* unmanaged[Cdecl]<nint, uint*, int>)&Power,
+        "nvmlDeviceGetTemperature" or "nvmlDeviceGetMaxClockInfo" or "nvmlDeviceGetFanSpeed_v2"
             => (nint)(delegate* unmanaged[Cdecl]<nint, uint, uint*, int>)&IndexedValue,
-        "nvmlDeviceGetPowerUsage" or "nvmlDeviceGetPowerManagementLimit" or "nvmlDeviceGetPowerManagementDefaultLimit"
+        "nvmlDeviceGetPowerManagementLimit" or "nvmlDeviceGetPowerManagementDefaultLimit"
             or "nvmlDeviceGetEnforcedPowerLimit" or "nvmlDeviceGetNumFans"
             => (nint)(delegate* unmanaged[Cdecl]<nint, uint*, int>)&Value,
-        "nvmlDeviceGetUtilizationRates" or "nvmlDeviceGetMemoryInfo" => (nint)(delegate* unmanaged[Cdecl]<nint, uint*, int>)&Pair,
+        "nvmlDeviceGetMemoryInfo" => (nint)(delegate* unmanaged[Cdecl]<nint, uint*, int>)&Memory,
         "nvmlDeviceGetPowerManagementLimitConstraints" => (nint)(delegate* unmanaged[Cdecl]<nint, uint*, uint*, int>)&TwoValues,
         "nvmlDeviceGetFieldValues" => (nint)(delegate* unmanaged[Cdecl]<nint, int, byte*, int>)&Fields,
         "nvmlDeviceGetMarginTemperature" => (nint)(delegate* unmanaged[Cdecl]<nint, uint*, int>)&Margin,
@@ -42,8 +51,15 @@ internal static unsafe class FakeNvml
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Text(nint h, byte* b, uint n) { Calls++; b[0] = (byte)'G'; b[1] = 0; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Pci(nint h, byte* b) { Calls++; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int IndexedValue(nint h, uint i, uint* v) { Calls++; *v = 2880; return Answer; }
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Clock(nint h, uint i, uint* v)
+    { Calls++; PointQueries.Add($"clock:{i}"); *v = 2880; return Answer != 0 ? Answer : ClockAnswer; }
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Util(nint h, uint* v)
+    { Calls++; PointQueries.Add("util"); v[0] = 100; v[1] = 50; return Answer != 0 ? Answer : UtilAnswer; }
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Power(nint h, uint* v)
+    { Calls++; PointQueries.Add("power"); *v = 148_500; return Answer != 0 ? Answer : PowerAnswer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Value(nint h, uint* v) { Calls++; *v = 1; return Answer; }
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Pair(nint h, uint* v) { Calls++; v[0] = 100; v[1] = 50; return Answer; }
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Memory(nint h, uint* v)
+    { Calls++; var m = (ulong*)v; m[0] = 8UL << 30; m[1] = 6UL << 30; m[2] = 2UL << 30; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int TwoValues(nint h, uint* a, uint* b) { Calls++; *a = 400_000; *b = 600_000; return Answer; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static int Margin(nint h, uint* m) { Calls++; m[1] = 39; return Answer; }
 

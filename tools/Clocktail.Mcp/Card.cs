@@ -240,12 +240,12 @@ public sealed class Card : IDisposable
     {
         using (_lane.Enter("the once-a-second read"))
         {
-            TelemetrySnapshot? t = null;
+            (uint? Mhz, uint? Util, double? W) point = default;
             if (_mgr.Nvml != null && _gpu.HasNvml)
-                try { t = Telemetry.Read(_gpu, _mgr.Nvml); } catch (Exception e) when (e is NvmlException or InvalidOperationException) { }
+                try { point = Telemetry.ReadPoint(_gpu, _mgr.Nvml); } catch (Exception e) when (e is NvmlException or InvalidOperationException) { }
             _railMask ??= RailsReader.Mask(_hw, _session);
             uint? uv = _railMask is { } mask ? RailsReader.PresentUv(_hw, _session, mask, Rail.Nvvdd) : null;
-            return (uv, t?.GraphicsClockMhz, t?.GpuUtilPercent, t?.PowerWatts);
+            return (uv, point.Mhz, point.Util, point.W);
         }
     }
 

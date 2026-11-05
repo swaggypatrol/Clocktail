@@ -43,6 +43,18 @@ public static class Telemetry
         try { return f(); } catch (NvmlException) { return null; }
     }
 
+    /// <summary>The NVML fields used by residency: three queries, without the full snapshot's unrelated reads and lists.
+    /// A missing field stays null. Driver loss invalidates the whole point, including fields read before it was seen.</summary>
+    public static (uint? Mhz, uint? Util, double? W) ReadPoint(GpuDevice gpu, NvmlApi nvml)
+    {
+        if (!gpu.HasNvml) throw new InvalidOperationException("This GPU has no matching NVML device.");
+        var h = gpu.NvmlHandle;
+        var mhz = Try(() => nvml.ClockMhz(h, NvmlClock.Graphics));
+        var util = Try(() => nvml.Utilization(h).Gpu);
+        var mw = Try(() => nvml.PowerUsageMw(h));
+        return nvml.Lost ? (null, null, null) : (mhz, util, mw / 1000.0);
+    }
+
     public static TelemetrySnapshot Read(GpuDevice gpu, NvmlApi nvml)
     {
         if (!gpu.HasNvml) throw new InvalidOperationException("This GPU has no matching NVML device.");
