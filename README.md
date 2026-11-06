@@ -115,7 +115,7 @@ Measure these trials, then show me what would be saved before making anything pe
 
 Rather do the curve by hand? Ask your agent **"Open the V/F curve editor."** A window opens on your desktop with this card's curve, and everything Clocktail has learned about it drawn on top:
 
-![The V/F editor with switchable evidence layers, a selected-point inspector and precise offset input](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/curve-editor-v0.8.5.png)
+![The V/F editor with a live operating-point crosshair, evidence layers and precise offset input](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/curve-editor-live-vf.png)
 
 *Actual Windows rendering with synthetic preview data; no GPU is connected in this preview.*
 
