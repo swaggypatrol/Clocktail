@@ -11,11 +11,13 @@ public interface ISampler : IDisposable
     LabSample Read(double t, int phase);
 }
 
+public interface ITemperatureSensor : IDisposable { uint? ReadTemperature(); }
+
 /// <summary>
 /// NVML on the GPU the CUDA engine runs on, matched by PCI address (the two number cards differently; NVML writes an
 /// 8-digit domain, CUDA a 4-digit one). Reads only.
 /// </summary>
-public sealed class NvmlSampler : ISampler
+public sealed class NvmlSampler : ISampler, ITemperatureSensor
 {
     private readonly NvmlApi _nvml;
     private readonly nint _h;
@@ -48,6 +50,11 @@ public sealed class NvmlSampler : ISampler
         return new(t, phase, Try(() => _nvml.PowerUsageMw(_h) / 1000.0), Try(() => _nvml.TemperatureC(_h)),
             Try(() => _nvml.ClockMhz(_h, NvmlClock.Graphics)), Try(() => _nvml.ClockMhz(_h, NvmlClock.Memory)), Try(() => _nvml.Utilization(_h).Gpu),
             _nvml.PerformanceState(_h), Try(() => _nvml.PowerEnforcedMw(_h) / 1000.0));
+    }
+
+    public uint? ReadTemperature()
+    {
+        try { return _nvml.TemperatureC(_h); } catch (NvmlException) { return null; }
     }
 
     /// <summary>Video memory in use and in all, bytes (NVML's _v2 count: the driver's reservation left out); null when unread.</summary>

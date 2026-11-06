@@ -177,9 +177,11 @@ public sealed unsafe class CudaApi : IDisposable
         return _getErrorString(rc, &p) == 0 && p != null ? Marshal.PtrToStringAnsi((nint)p)! : "";
     }
 
+    internal Action<int>? ErrorObserved { get; set; }
+
     public void Check(string fn, int rc)
     {
-        if (rc != 0) throw new CudaException(fn, rc, ErrorName(rc));
+        if (rc != 0) { ErrorObserved?.Invoke(rc); throw new CudaException(fn, rc, ErrorName(rc)); }
     }
 
     public int DriverVersion() { int v; Check("cuDriverGetVersion", _driverGetVersion(&v)); return v; }

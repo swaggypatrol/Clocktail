@@ -46,7 +46,10 @@ public sealed class GpuContext : IDisposable
     private readonly List<KernelModule> _modules = [];
 
     private GpuContext(CudaApi cuda, int device, nint ctx, nint stream, DeviceInfo info)
-    { Cuda = cuda; Device = device; Context = ctx; Stream = stream; Info = info; }
+    {
+        Cuda = cuda; Device = device; Context = ctx; Stream = stream; Info = info;
+        cuda.ErrorObserved = rc => { if (CudaApi.IsContextFatal(rc)) Poisoned = true; };
+    }
 
     /// <summary>
     /// Opens the target GPU. With several CUDA devices one of <paramref name="uuid"/> / <paramref name="pciBusId"/> must
@@ -123,7 +126,7 @@ public sealed class GpuContext : IDisposable
         if (cubin != null)
         {
             try { mod = Cuda.ModuleLoad(cubin); image = cubin; format = $"cubin:{arch}"; }
-            catch (CudaException) { mod = 0; image = []; format = ""; }
+            catch (CudaException e) when (e.Code is 200 or 209 or 218 or 222) { mod = 0; image = []; format = ""; }
         }
         else { mod = 0; image = []; format = ""; }
         if (mod == 0)
@@ -166,9 +169,10 @@ public sealed class GpuContext : IDisposable
         {
             foreach (var m in _modules) Cuda.ModuleUnload(m.Handle);
             Cuda.StreamDestroy(Stream);
+            Cuda.PrimaryCtxRelease(Device);
+            Cuda.Dispose();
         }
-        Cuda.PrimaryCtxRelease(Device);
-        Cuda.Dispose();
+        // A poisoned CUDA context belongs to this short-lived worker. Do not call into it or unload its library.
     }
 }
 

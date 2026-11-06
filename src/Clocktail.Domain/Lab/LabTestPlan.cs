@@ -22,16 +22,32 @@ public sealed record LabTestPlan(string Profile, int Seconds, IReadOnlyList<LabS
             return new("custom", duration, Parse(phases, duration));
         }
         string goal = (profile ?? "core").Trim().ToLowerInvariant();
+        // Aria is the C01 solo: a separately executed, independently checked FP32 movement.
+        if (goal is "aria" or "c01")
+        {
+            int ariaSeconds = seconds ?? 180;
+            if (ariaSeconds is < 10 or > 600) throw new ArgumentException("aria needs 10..600 seconds");
+            return new("aria", ariaSeconds, [new("c01", ariaSeconds)]);
+        }
         LabStage[] stages = goal switch
         {
             "core" => [new("burn", 30), new("solo", 60), new("leap", 60)],
             "memory" => [new("memory", 60), new("latency", 30)],
             "uncore" => [new("l2", 30), new("memory", 30)],
             "all" => [new("burn", 30), new("solo", 60), new("leap", 60), new("memory", 60), new("latency", 30), new("l2", 30)],
-            _ => throw new ArgumentException("profile is core, memory, uncore or all"),
+            "symphony" => [new("c01", 180), new("burn", 30), new("solo", 60), new("leap", 60)],
+            _ => throw new ArgumentException("profile is core, memory, uncore, all, aria or symphony"),
         };
         int minimum = (int)stages.Sum(s => s.Seconds), total = seconds ?? minimum;
         if (total < minimum) throw new ArgumentException($"the {goal} profile needs at least {minimum} s; omit seconds for that budget, or give custom phases for a shorter screening run");
+        if (goal == "symphony")
+        {
+            // Aria's child accepts whole seconds; the remainder keeps the existing core proportions.
+            int ariaSeconds = (int)Math.Round(180.0 * total / minimum);
+            int coreSeconds = total - ariaSeconds;
+            return new(goal, total, [new("c01", ariaSeconds), new("burn", coreSeconds * 30.0 / 150),
+                new("solo", coreSeconds * 60.0 / 150), new("leap", coreSeconds * 60.0 / 150)]);
+        }
         return new(goal, total, stages.Select(s => s with { Seconds = s.Seconds * total / minimum }).ToArray());
     }
 

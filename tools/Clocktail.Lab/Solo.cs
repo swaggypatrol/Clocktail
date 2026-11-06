@@ -37,9 +37,9 @@ public sealed record SoloJudgement(IReadOnlyList<(int Block, int Sm, int Lane)> 
     double? EffMhz, double Fill, double BusyMsMax);
 
 /// <summary>One soloist chunk. Error != null: the context is dead or the launch failed, and the run stops.</summary>
-public sealed record SoloOutcome(double ElapsedMs, SoloJudgement? Judgement, string? Error = null)
+public sealed record SoloOutcome(double ElapsedMs, SoloJudgement? Judgement, string? Error = null, int? ErrorCode = null)
 {
-    public static SoloOutcome Failed(string error) => new(0, null, error);
+    public static SoloOutcome Failed(string error, int? code = null) => new(0, null, error, code);
 }
 
 /// <summary>The soloist's rules, pure: the judge, the rotating window, the fit to the wall and the hold.</summary>

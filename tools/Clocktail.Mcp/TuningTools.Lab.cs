@@ -102,16 +102,26 @@ public sealed partial class TuningTools
     }
 
     [McpServerTool(Name = "lab_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
-        "Validate current settings by goal: core (default: burn, high-point solo and heavy/light leap), memory, uncore or all. Each profile gives its key phases their own time. Advanced callers can choose custom phases instead. Verify the intended operating point actually ran; interrupted/shared or inconclusive measurements do not establish stability. It stops within 2 °C of NVIDIA's slowdown point, and at maxTempC when one is given.")]
+        "Validate current settings by goal: core (default: burn, high-point solo and heavy/light leap), memory, uncore, all, aria or symphony. Each profile gives its key phases their own time. Advanced callers can choose custom phases instead. Verify the intended operating point actually ran; interrupted/shared or inconclusive measurements do not establish stability. It stops within 2 °C of NVIDIA's slowdown point, and at maxTempC when one is given.")]
     public string LabTest(
         [Description("Advanced custom phases instead of a profile: burn, light, pulse, solo, leap, memory, latency, l2. Bare lists split seconds evenly (default 60 s); phase:seconds lists give individual durations. Omit for the core profile.")] string? phases = null,
-        [Description("Total run budget, up to 600 s. Omit for the profile's budget: core 150, memory 90, uncore 60, all 270 s; for a phase:seconds schedule, its sum. Profiles can be lengthened; custom phases allow shorter screening runs, 10 s or more, at least 1 s per phase.")] int? seconds = null,
+        [Description("Total run budget, up to 600 s. Omit for the profile's budget: core 150, memory 90, uncore 60, all 270, aria 180, symphony 330 s; for a phase:seconds schedule, its sum. Profiles can be lengthened; custom phases allow shorter screening runs, 10 s or more, at least 1 s per phase.")] int? seconds = null,
         [Description("Steer burn to this board power, W (default: no steering, every thread).")] double? targetW = null,
         [Description("Light: one thread in this many (default 64: 64 SMs busy).")] int lightDiv = 64,
         [Description("What this run is meant to show, for the log.")] string? note = null,
         [Description("Also stop the run if the GPU reaches this temperature, °C. Omitted: it stops only within 2 °C of NVIDIA's slowdown point.")] int? maxTempC = null,
-        [Description("Test goal: core (default), memory, uncore or all. Use tune_memory / tune_uncore to search, and game_test or the user's game to validate graphics. Omit when giving custom phases.")] string? profile = null) => Guard(() =>
-        RunLabTest(LabTestPlan.Create(profile, phases, seconds), targetW, lightDiv, note, maxTempC));
+        [Description("Test goal: core (default), memory, uncore, all, aria (C01) or symphony (Aria followed by core). Omit when giving custom phases.")] string? profile = null,
+        [Description("Aria only: fraction of CUDA grid, 0.01..1 (default 1).")] double? intensity = null,
+        [Description("Aria only: unsigned 64-bit hexadecimal input seed.")] string? seed = null) => Guard(() =>
+    {
+        var plan = LabTestPlan.Create(profile, phases, seconds);
+        bool containsAria = plan.Stages.Any(s => s.Phase == "c01");
+        if (!containsAria && (intensity != null || seed != null)) throw new ArgumentException("intensity and seed are for aria only");
+        if (containsAria && targetW != null) throw new ArgumentException("targetW is not supported with aria");
+        bool ariaOnly = containsAria && plan.Stages.Count == 1;
+        return RunLabTest(plan, targetW, lightDiv, note, ariaOnly ? maxTempC ?? 85 : maxTempC,
+            containsAria ? intensity ?? 1 : null, containsAria ? seed ?? "5eed5eed5eed5eed" : null);
+    });
 
     [McpServerTool(Name = "c01_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Check current GPU settings with C01, a sustained FP32 FMA workload with 16 accumulators and an exact CPU oracle. Use intensity to shrink the CUDA grid while looking for higher measured clocks under a power constraint. Check measured voltage and frequency before using the result as evidence for a curve point.")]
@@ -122,6 +132,12 @@ public sealed partial class TuningTools
         [Description("GPU temperature stop in °C. Default 85. The driver's slowdown margin also applies.")] int maxTempC = 85,
         [Description("Purpose of the test for the tuning log.")] string? note = null) => Guard(() =>
     {
+        return RunLabTest(LabTestPlan.Create("aria", seconds: seconds) with { Profile = "c01" },
+            null, 64, note, maxTempC, intensity, seed);
+    });
+
+    private static void ValidateAria(double intensity, string seed, int maxTempC)
+    {
         if (intensity is < 0.01 or > 1 || !double.IsFinite(intensity))
             throw new ArgumentException("intensity must be in 0.01..1");
         if (maxTempC is < 40 or > 100)
@@ -129,9 +145,7 @@ public sealed partial class TuningTools
         if (seed.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) seed = seed[2..];
         if (!ulong.TryParse(seed, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out _))
             throw new ArgumentException("seed must be an unsigned 64-bit hexadecimal number");
-        return RunLabTest(new LabTestPlan("c01", seconds, [new LabStage("c01", seconds)]),
-            null, 64, note, maxTempC, intensity, seed);
-    });
+    }
 
     private string RunLabTest(LabTestPlan plan, double? targetW, int lightDiv, string? note, int? maxTempC,
         double? c01Intensity = null, string? seed = null)
@@ -143,22 +157,13 @@ public sealed partial class TuningTools
         if (lightDiv is < 2 or > 4096) throw new ArgumentException("lightDiv is 2..4096");
         if (targetW is { } tw && (!double.IsFinite(tw) || tw <= 0)) throw new ArgumentException("targetW must be positive and finite");
         int? maxC = MaxTemp(maxTempC);
+        bool hasAria = plan.Stages.Any(s => s.Phase == "c01");
+        bool aria = hasAria && plan.Stages.Count == 1;
+        bool symphony = hasAria && !aria;
+        if (hasAria) ValidateAria(c01Intensity ?? 1, seed ?? "5eed5eed5eed5eed", maxC ?? 85);
 
         string dir = Path.Combine(Path.GetTempPath(), "clocktail-lab");
         Directory.CreateDirectory(dir);
-        string jsonPath = Path.Combine(dir, $"run-{Guid.NewGuid():n}.json");
-        var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
-        foreach (var a in new[] { c01Intensity.HasValue ? "c01" : "run", "--seconds", duration.ToString(CultureInfo.InvariantCulture),
-                                  "--json", jsonPath, "--gpu-pci", card.PciBusId })
-            psi.ArgumentList.Add(a);
-        string[] workloadArgs = c01Intensity is { } intensity
-            ? ["--intensity", intensity.ToString(CultureInfo.InvariantCulture), "--seed", seed!]
-            : ["--phases", plan.PhaseArgument, "--light-div", lightDiv.ToString(CultureInfo.InvariantCulture)];
-        foreach (string a in workloadArgs) psi.ArgumentList.Add(a);
-        if (targetW is { } w) { psi.ArgumentList.Add("--target-w"); psi.ArgumentList.Add(w.ToString(CultureInfo.InvariantCulture)); }
-        // The person's limit goes to the lab too, which stops on it by itself; the margin stop is watched from here.
-        if (maxC is { } mc) { psi.ArgumentList.Add("--max-temp-c"); psi.ArgumentList.Add(mc.ToString(CultureInfo.InvariantCulture)); }
-
         var samples = new List<Card.Sample>();
         int hotRun = 0;
         double? stopC = null;
@@ -168,52 +173,88 @@ public sealed partial class TuningTools
         bool hot = false, hung = false;
         using var children = OperatingSystem.IsWindows() ? new KillOnCloseJob() : null;
         Process? p = null;
-
-        // The measurement holds the card: while it runs no write lands under it (another agent's, the service's own), it
-        // starts once no write is landing, and the card is read for it from then on.
-        var hold = HoldCard(c01Intensity.HasValue ? "c01_test" : "lab_test", olderToo: true);
+        JsonElement? lab = null;
+        var hold = HoldCard(aria ? "c01_test" : "lab_test", olderToo: true);
         Card.Look before;
         var started = DateTime.UtcNow;
         try
         {
             before = card.Read();
             started = DateTime.UtcNow;
-            residency.StressUntil(DateTimeOffset.Now.AddSeconds(duration + 60));
-            p = Process.Start(psi) ?? throw new InvalidOperationException("the lab did not start");
-            if (OperatingSystem.IsWindows()) children?.Add(p);   // it never outlives this server
-            var stderr = p.StandardError.ReadToEndAsync();
-            var deadline = started.AddSeconds(duration + grace + 30);
-            while (!p.WaitForExit(500))
+            residency.StressUntil(DateTimeOffset.Now.AddSeconds(duration + grace + (symphony ? 240 : aria ? 120 : 30)));
+
+            SymphonyScore.MovementResult RunMovement(string command, int seconds, string? phases)
             {
+                string path = Path.Combine(dir, $"run-{Guid.NewGuid():n}.json");
+                var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+                foreach (var a in new[] { command, "--seconds", seconds.ToString(CultureInfo.InvariantCulture), "--json", path, "--gpu-pci", card.PciBusId })
+                    psi.ArgumentList.Add(a);
+                string[] args = command == "c01"
+                    ? ["--intensity", (c01Intensity ?? 1).ToString(CultureInfo.InvariantCulture), "--seed", seed ?? "5eed5eed5eed5eed"]
+                    : ["--phases", phases!, "--light-div", lightDiv.ToString(CultureInfo.InvariantCulture)];
+                foreach (string arg in args) psi.ArgumentList.Add(arg);
+                if (targetW is { } w) { psi.ArgumentList.Add("--target-w"); psi.ArgumentList.Add(w.ToString(CultureInfo.InvariantCulture)); }
+                if (maxC is { } mc) { psi.ArgumentList.Add("--max-temp-c"); psi.ArgumentList.Add(mc.ToString(CultureInfo.InvariantCulture)); }
                 try
                 {
-                    var s = card.ReadSample();
-                    samples.Add(s);
-                    hotRun = Nvgwls.TooHot(s.Telemetry?.TemperatureC, s.Telemetry?.TempMarginC, maxC) ? hotRun + 1 : 0;
+                    p = Process.Start(psi) ?? throw new InvalidOperationException("the lab did not start");
+                    if (OperatingSystem.IsWindows() && children?.Add(p) != true)
+                        throw new InvalidOperationException("could not contain the lab worker");
+                    _ = p.StandardError.ReadToEndAsync();
+                    var deadline = DateTime.UtcNow.AddSeconds(seconds + grace + (command == "c01" ? 120 : 30));
+                    while (!p.WaitForExit(500))
+                    {
+                        try
+                        {
+                            var sample = card.ReadSample();
+                            samples.Add(sample);
+                            hotRun = Nvgwls.TooHot(sample.Telemetry?.TemperatureC, sample.Telemetry?.TempMarginC, maxC) ? hotRun + 1 : 0;
+                        }
+                        catch (DriverBusyException) { }
+                        if (hotRun >= 2) { hot = true; stopC = samples[^1].Telemetry?.TemperatureC; hotWhy = Nvgwls.HotWhy(stopC, maxC); }
+                        if (DateTime.UtcNow > deadline) hung = true;
+                        if (hot || hung) break;
+                    }
+                    int? exit = !hot && !hung ? p.ExitCode : null;
+                    // Never start another movement or give back the card until the worker is actually gone.
+                    if (!ChildProcess.Stop(p)) p.WaitForExit();
+                    p.Dispose();
+                    p = null;
+                    JsonElement? report = null;
+                    try { if (File.Exists(path)) report = JsonDocument.Parse(File.ReadAllText(path)).RootElement.Clone(); }
+                    catch (JsonException) { }
+                    return new(exit, report, hot ? "temperature stop" : hung ? "movement timed out" : null);
                 }
-                catch (DriverBusyException) { }
-                if (hotRun >= 2) { hot = true; stopC = samples[^1].Telemetry?.TemperatureC; hotWhy = Nvgwls.HotWhy(stopC, maxC); }
-                if (DateTime.UtcNow > deadline) hung = true;
-                if (hot || hung) break;
+                finally { try { File.Delete(path); } catch (IOException) { } }
             }
-            if (!hot && !hung) code = p.ExitCode;
-            // Read while the card is still held, so the memory history files the run under the offset it measured.
+
+            if (symphony)
+            {
+                var score = SymphonyScore.Perform(SymphonyScore.Movements(plan), m =>
+                    RunMovement(m.Name == "aria" ? "c01" : "run", m.Seconds, m.Phases));
+                code = score.Verdict switch { "pass" => 0, "fail" => 4, _ => 5 };
+                lab = ScoreReport(score);
+            }
+            else
+            {
+                var result = RunMovement(aria ? "c01" : "run", duration, plan.PhaseArgument);
+                code = result.ExitCode;
+                lab = result.Report;
+            }
             if (code != null && list.Contains("memory")) memoryOffset = MemoryOffsetMhz();
         }
         finally
         {
-            // Stopped and waited for on every way out (a sampling error too): nothing after this, a crash record or the daily
-            // profile going back, runs under its load.
-            if (p != null) { ChildProcess.Stop(p); p.Dispose(); }
+            if (p != null)
+            {
+                if (!ChildProcess.Stop(p)) p.WaitForExit();
+                p.Dispose();
+            }
             hold.Dispose();
             residency.StressUntil(DateTimeOffset.MinValue);
         }
 
         int? resets = Nvgwls.DriverResets(started, code is 0 or 4 or 5 ? 0 : 2);
-        JsonElement? lab = null;
-        try { if (File.Exists(jsonPath)) lab = JsonDocument.Parse(File.ReadAllText(jsonPath)).RootElement.Clone(); }
-        catch (JsonException) { }
-        finally { try { File.Delete(jsonPath); } catch (IOException) { } }
         string labVerdict = lab is { } l && l.TryGetProperty("verdict", out var v) ? v.GetString() ?? "?" : "none";
         var reasons = lab is { } l2 && l2.TryGetProperty("reasons", out var rs) ? rs.EnumerateArray().Select(x => x.GetString() ?? "").ToList() : [];
         double? busy = lab is { } l3 && l3.TryGetProperty("busy_before_pct", out var bb) && bb.ValueKind == JsonValueKind.Number ? bb.GetDouble() : null;
@@ -234,7 +275,7 @@ public sealed partial class TuningTools
         bool failed = resets > 0 || labVerdict == "fail";
         bool runner = !failed && !hot && (hung || code is not (0 or 4 or 5) || labVerdict == "none");
         string verdict = resets > 0 ? $"driver reset ({resets}) during the run"
-            : hung ? $"the lab did not finish within {duration + grace + 30} s and no driver reset followed: the run's fault, not the card's"
+            : hung ? $"the lab did not finish within {duration + grace + (symphony ? 240 : aria ? 120 : 30)} s and no driver reset followed: the run's fault, not the card's"
             : hot ? string.Create(CultureInfo.InvariantCulture, $"thermal stop at {stopC:0} °C ({hotWhy}): stopped by lab_test, not a pass or a crash")
             : labVerdict == "none" ? $"the lab ended without a result (exit code {code})"
             : labVerdict;
@@ -247,7 +288,8 @@ public sealed partial class TuningTools
             return o.Count == 0 ? null : Math.Round(o[o.Count / 2], 1);
         }
         double? mv = P50(held.Select(s => s.NvvddUv / 1000.0)), mhz = P50(held.Select(s => (double?)s.Telemetry?.GraphicsClockMhz));
-        int? pointIndex = mv is { } m && Nearest(before.Curve, (uint)(m * 1000)) is { } pt ? pt.Index : null;
+        // A composite's medians span movements and preparation; they cannot name an individual curve point.
+        int? pointIndex = !symphony && mv is { } m && Nearest(before.Curve, (uint)(m * 1000)) is { } pt ? pt.Index : null;
         double? xbarMhz = P50(held.Select(s => s.Mhz(Clocktail.Domain.Power.AllClocksLayout.Xbar)));
 
         // ST02: each memory run that passed clean is kept by its setup (SameMemorySetup), and compared with the last one like it.
@@ -265,7 +307,7 @@ public sealed partial class TuningTools
         bool crashRecorded = failed && RecordCrash(hold, resets, $"lab {string.Join(",", list)} {duration} s: {verdict}");
         return Out(new
         {
-            passed = !failed && !hot && labVerdict == "pass",
+            passed = LabPassed(failed, hot, hung, runner, code, labVerdict),
             verdict,
             profile = plan.Profile,
             planned_seconds = duration,
@@ -275,9 +317,13 @@ public sealed partial class TuningTools
             driver_resets = resets,
             shared = shared ? $"other programs held {others:0} MiB of video memory and kept the GPU {busy:0} % busy before the run and {busyAfter:0} % after (a local AI model, a game, a screen saver drawing): speeds are not the card's alone; bits are judged all the same" : null,
             phases = lab is { } l4 && l4.TryGetProperty("phases", out var ph) ? ph : (JsonElement?)null,
+            movements = lab is { } lm && lm.TryGetProperty("movements", out var mov) ? mov : (JsonElement?)null,
+            phase_observations = PhaseObservations(lab, samples),
+            target_vf_qualified = (bool?)null,
             buffer_mib = lab is { } l5 && l5.TryGetProperty("buffer_mib", out var bmb) ? bmb.GetInt64() : (long?)null,
             card = new
             {
+                scope = symphony ? "whole score, including preparation; not a single curve point" : "whole run, including preparation",
                 clock_mhz = mhz, nvvdd_mv = mv, curve_point = pointIndex,
                 msvdd_mv = P50(held.Select(s => s.MsvddUv / 1000.0)),
                 board_w = P50(held.Select(s => s.Telemetry?.PowerWatts)),
@@ -295,12 +341,63 @@ public sealed partial class TuningTools
                     ? "the soloist did not hold the point, so its pass is no evidence: close other GPU work, or lower the power the share draws (a lower point, or set_clock_lock lockMv on the point to test), and run it again"
                 : lab is { } l10 && Phase(l10, "leap") is { } lp && lp.TryGetProperty("held", out var lh) && lh.ValueKind == JsonValueKind.False
                     ? "the clock did not leap, so the leap's pass is no evidence: the whole chip did not hold the clock under the curve's top (a flat curve from the wall's voltage, or a high wall); run it at the daily wall with nothing else on the GPU"
+                : hasAria && labVerdict == "pass" ? "correctness passed; check observed voltage and frequency for each movement before using it as V/F evidence"
                 : null,
         });
     }
 
+    public static JsonElement ScoreReport(SymphonyScore.ScoreResult score)
+    {
+        var phases = new JsonArray();
+        foreach (var report in score.Reports)
+            if (report.TryGetProperty("phases", out var p) && p.ValueKind == JsonValueKind.Array)
+                foreach (var phase in p.EnumerateArray()) phases.Add(JsonNode.Parse(phase.GetRawText()));
+        double? Max(string field) => score.Reports
+            .Select(r => r.TryGetProperty(field, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : (double?)null).DefaultIfEmpty().Max();
+        var json = new JsonObject
+        {
+            ["verdict"] = score.Verdict, ["reasons"] = JsonSerializer.SerializeToNode(score.Reasons),
+            ["phases"] = phases, ["busy_before_pct"] = Max("busy_before_pct"),
+            ["busy_after_pct"] = Max("busy_after_pct"), ["others_vram_mib"] = Max("others_vram_mib"),
+            ["movements"] = JsonSerializer.SerializeToNode(score.Reports),
+        };
+        if (score.Reports.Any(r => r.TryGetProperty("shared", out var shared) && shared.ValueKind == JsonValueKind.True)) json["shared"] = true;
+        string? interrupted = score.Reports.Select(r => r.TryGetProperty("interrupted", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null).FirstOrDefault(v => v != null);
+        if (interrupted != null) json["interrupted"] = interrupted;
+        return JsonSerializer.SerializeToElement(json);
+    }
+
+    /// <summary>Observations within each worker-reported phase window, including its CPU checks and pauses.
+    /// These medians describe sampled values; they do not establish continuous residency at a curve point.</summary>
+    public static object[] PhaseObservations(JsonElement? report, IReadOnlyList<Card.Sample> samples)
+    {
+        if (report is not { ValueKind: JsonValueKind.Object } r || !r.TryGetProperty("phases", out var phases)
+            || phases.ValueKind != JsonValueKind.Array) return [];
+        var result = new List<object>();
+        foreach (var phase in phases.EnumerateArray())
+        {
+            if (!phase.TryGetProperty("started_utc", out var start) || start.ValueKind != JsonValueKind.String || !start.TryGetDateTimeOffset(out var from)
+                || !phase.TryGetProperty("finished_utc", out var finish) || finish.ValueKind != JsonValueKind.String || !finish.TryGetDateTimeOffset(out var to) || to < from) continue;
+            var window = samples.Where(s => s.At >= from && s.At <= to).ToArray();
+            static double? Median(IEnumerable<double?> values)
+            {
+                var ordered = values.Where(v => v.HasValue).Select(v => v!.Value).Order().ToArray();
+                return ordered.Length == 0 ? null : Math.Round(ordered[ordered.Length / 2], 1);
+            }
+            result.Add(new { phase = phase.TryGetProperty("kind", out var kind) ? kind.GetString() : null,
+                started_utc = from, finished_utc = to, samples = window.Length,
+                clock_mhz = Median(window.Select(s => (double?)s.Telemetry?.GraphicsClockMhz)),
+                nvvdd_mv = Median(window.Select(s => s.NvvddUv / 1000.0)),
+                scope = "sampled phase window including CPU checks and pauses; not proof of a held V/F point" });
+        }
+        return result.ToArray();
+    }
+
     private static JsonElement? Phase(JsonElement lab, string kind) =>
         lab.TryGetProperty("phases", out var ps) ? ps.EnumerateArray().FirstOrDefault(p => p.TryGetProperty("kind", out var k) && k.GetString() == kind) is { ValueKind: JsonValueKind.Object } x ? x : null : null;
+
+    public static bool LabPassed(bool failed, bool hot, bool hung, bool runner, int? exitCode, string verdict) =>
+        !failed && !hot && !hung && !runner && exitCode == 0 && verdict == "pass";
 
     private static double? Num(JsonElement? e, string name) =>
         e is { } o && o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : null;

@@ -241,13 +241,16 @@ internal static class Evidence
 
     /// <summary>One untimed batch at the end of Prepare (epoch 0, its own nonce): JIT-compiles and warms the oracle path.
     /// A failed end-to-end self-check rejects preparation rather than letting a later run hide the failure.</summary>
-    public static string WarmUp(IWorkload w)
+    public static string WarmUp(IWorkload w, CancellationToken cancel = default)
     {
-        var r = w.RunBatch(new BatchRequest(0, 0, 0x5EED5EED5EED5EEDUL, 50, FaultKind.None, CancellationToken.None));
-        if (!r.Clean)
+        cancel.ThrowIfCancellationRequested();
+        var r = w.RunBatch(new BatchRequest(0, 0, 0x5EED5EED5EED5EEDUL, 50, FaultKind.None, cancel));
+        if (!r.Clean && (r.Status == BatchStatus.DeviceLost || r.Mismatches + r.NonFinite + r.StaleOrMissing > 0))
             throw new WorkloadPreparationException($"prepare_warmup_not_clean: status={r.Status} checked={r.CheckedElements} " +
                 $"mismatches={r.Mismatches} non_finite={r.NonFinite} stale_or_missing={r.StaleOrMissing} " +
                 $"first_failure={r.FirstFailure ?? "(none)"} detail={r.Detail ?? "(none)"}", r);
+        cancel.ThrowIfCancellationRequested();
+        if (!r.Clean) throw new WorkloadPreparationException($"prepare_warmup_not_clean: {r.Status}: {r.Detail}", r);
         return $"clean (checked {r.CheckedElements})";
     }
 

@@ -48,6 +48,11 @@ try
                     O("seconds") is { } duration ? int.TryParse(duration, NumberStyles.Integer, CultureInfo.InvariantCulture, out int whole) ? whole
                         : throw new ArgumentException("--seconds is a whole number of seconds with --profile") : null)
                 : O("seconds") == null && O("phases") is { } custom ? Clocktail.Domain.Lab.LabTestPlan.Create(phases: custom) : null;
+            if (plan?.Profile == "aria")
+                return C01Command.Run(plan.Seconds, D("intensity", 1), O("seed") ?? "5eed5eed5eed5eed",
+                    D("max-temp-c", 85), O("gpu-pci"), O("json"));
+            if (plan?.Profile == "symphony")
+                throw new ArgumentException("the symphony score is run through lab_test so its workers share one card lease");
             var phases = plan == null ? LabConfig.Parse(O("phases") ?? "burn", D("seconds", 60))
                 : LabConfig.Parse(plan.PhaseArgument, plan.Seconds);
             var cfg = new LabConfig(phases, TargetW: D("target-w", 0), LightDiv: (int)D("light-div", 64), MaxTempC: D("max-temp-c", double.PositiveInfinity));
@@ -73,7 +78,8 @@ try
                 ulong fits = vramTotal > vramUsed + (1UL << 30) ? vramTotal - vramUsed - (1UL << 30) : 256UL << 20;
                 cap = cap == 0 ? fits : Math.Min(cap, fits);
             }
-            using var engine = new CudaEngine(cu, ordinal, D("mem-fraction", 0.7), cap) { InjectAtComputeLaunch = (int)D("inject-at", 0) };
+            bool memoryNeeded = phases.Any(p => p.Item1 is LabPhase.Memory or LabPhase.Latency or LabPhase.L2);
+            using var engine = new CudaEngine(cu, ordinal, D("mem-fraction", 0.7), cap, allocateMemory: memoryNeeded) { InjectAtComputeLaunch = (int)D("inject-at", 0) };
             var started = DateTime.UtcNow;
             using var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };

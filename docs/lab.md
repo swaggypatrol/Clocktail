@@ -20,11 +20,15 @@ comparison is still needed to establish a useful application gain.
 
 The Windows lab executable also exposes `clocktail-lab c01 --seconds 180 --intensity 0.2 --gpu-pci 0000:01:00.0`. C01 requires CUDA compute capability 12.0 or later. Its result includes the number of clock-reason samples and how many report a software power cap.
 
-`lab_test` accepts `profile` or custom `phases`. Omit both for `core`.
+`lab_test` accepts `profile` or custom `phases`. Omit both for `core`. Aria is the musical name for C01; `c01_test` remains available with its existing defaults. Aria independently monitors temperature during calibration and execution, and stops when temperature readings are unavailable for ten seconds.
+
+`lab_test(profile: "symphony")` runs Aria and core sequentially in separate GPU worker processes under one measurement lock. A failed or incomplete movement stops the score; Leap retains its repeated heavy/light transitions within the core worker. Preparation and process cleanup add time beyond the planned workload budget. The score-level clock and voltage medians include preparation and multiple movements: they do not establish that a particular V/F point was held. The `phase_observations` entries give sampled phase-window medians, including CPU checks and pauses; use them with further observation to establish whether the intended V/F point actually held.
 
 | Profile | Phase budgets | Total |
 |---|---|---|
 | `core` | burn 30 s, solo 60 s, leap 60 s | 150 s |
+| `aria` | C01 FP32 FMA with exact CPU verification | 180 s |
+| `symphony` | Aria 180 s, burn 30 s, solo 60 s, leap 60 s | 330 s |
 | `memory` | memory 60 s, latency 30 s | 90 s |
 | `uncore` | l2 30 s, memory 30 s | 60 s |
 | `all` | burn 30 s, solo 60 s, leap 60 s, memory 60 s, latency 30 s, l2 30 s | 270 s |
@@ -39,7 +43,7 @@ accepted: `phases: "burn:30,solo:60,leap:60"`, with `seconds` omitted (the run i
 Every item must have a positive duration and the durations must sum to a stated total. No phase may be shorter than
 1 s, in a schedule or an equal split. Giving both a profile and custom phases is an error.
 
-The isolated CLI supports the same profile budgets with `clocktail-lab run --profile core`. Existing direct CLI phase
+The isolated CLI supports the individual profiles with `clocktail-lab run --profile core` or `--profile aria`; the combined Symphony score is available through `lab_test`. Existing direct CLI phase
 lists still work; schedules also travel through `--phases` without losing individual phase durations.
 
 ## Why retain the phases?

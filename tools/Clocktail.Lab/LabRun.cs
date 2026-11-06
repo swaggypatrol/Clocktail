@@ -32,6 +32,8 @@ public sealed record PatternResult(string Pattern, double Gbps, double CvPct, in
 public sealed class PhaseResult
 {
     public LabPhase Kind { get; init; }
+    public DateTime? StartedUtc { get; set; }
+    public DateTime? FinishedUtc { get; set; }
     public double PlannedSeconds { get; init; }
     public double Seconds { get; set; }
     public long Launches { get; set; }
@@ -56,6 +58,7 @@ public sealed class PhaseResult
     /// <summary>The P-state most samples saw ("P0"): the memory offset is a P0 offset, and CUDA work alone ran in P1 on the reference card.</summary>
     public string? PState { get; set; }
     public string? Error { get; set; }
+    public int? ErrorCode { get; set; }
     public bool Completed { get; set; }
 
     // The soloist (Solo only): the share of SMs that played in the hold and how many, units per chunk, the SMs' own clock
@@ -179,7 +182,10 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         {
             for (int i = 0; i < cfg.Phases.Count && !halt.IsCancellationRequested; i++)
             {
+                var phaseStarted = DateTime.UtcNow;
                 var pr = RunPhase(i, cfg.Phases[i].Kind, cfg.Phases[i].Seconds, halt.Token);
+                pr.StartedUtc = phaseStarted;
+                pr.FinishedUtc = DateTime.UtcNow;
                 phases.Add(pr);
                 if (pr.Error != null) { log?.Invoke($"{pr.Kind} stopped: {pr.Error}"); break; }
             }
@@ -223,7 +229,7 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
             lastThreads = threads;
             var o = kind == LabPhase.Latency ? engine.RunLatency(iters) : engine.RunCompute(iters, reference, threads);
             pr.Launches++;
-            if (o.Error != null) { pr.Error = o.Error; return false; }
+            if (o.Error != null) { pr.Error = o.Error; pr.ErrorCode = o.ErrorCode; return false; }
             if (kind == LabPhase.Latency) pr.ChainErrors += o.Mismatches; else pr.ComputeMismatches += o.Mismatches;
             if (o.ElapsedMs > 0 && ctrl.Frozen) { frozenMs.Add(o.ElapsedMs); workSum += o.WorkUnits; msSum += o.ElapsedMs; threadSum += threads; }
             ctrl.Observe(o.ElapsedMs);
@@ -263,7 +269,7 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
                     {
                         var m = engine.RunL2(seed++);
                         pr.Launches++;
-                        if (m.Error != null) { pr.Error = m.Error; alive = false; break; }
+                        if (m.Error != null) { pr.Error = m.Error; pr.ErrorCode = m.ErrorCode; alive = false; break; }
                         pr.MemoryErrors += m.Mismatches;
                         if (m.FirstBadWord is { } fb && (pr.FirstBadWord == null || fb < pr.FirstBadWord)) pr.FirstBadWord = fb;
                         l2Spent += m.ElapsedMs;
@@ -282,7 +288,7 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
                     {
                         var m = engine.RunMemory(seed++, pattern);
                         pr.Launches++;
-                        if (m.Error != null) { pr.Error = m.Error; alive = false; break; }
+                        if (m.Error != null) { pr.Error = m.Error; pr.ErrorCode = m.ErrorCode; alive = false; break; }
                         pr.MemoryErrors += m.Mismatches;
                         if (m.FirstBadWord is { } fb && (pr.FirstBadWord == null || fb < pr.FirstBadWord)) pr.FirstBadWord = fb;
                         spent += m.ElapsedMs;
@@ -486,7 +492,7 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
             var playing = SoloRules.Window(engine.SmCount, players, _chunk++);
             var o = engine.RunSolo(_units, _seed++, SoloRules.Mask(playing), playing);
             pr.Launches++;
-            if (o.Error != null) { pr.Error = o.Error; Alive = false; return o; }
+            if (o.Error != null) { pr.Error = o.Error; pr.ErrorCode = o.ErrorCode; Alive = false; return o; }
             var j = o.Judgement!;
             foreach (var (_, sm, lane) in j.Mismatches) _wrong[(sm, lane)] = _wrong.GetValueOrDefault((sm, lane)) + 1;
             pr.ComputeMismatches += j.Mismatches.Count;
@@ -556,9 +562,12 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
             else if (p.ComputeMismatches > 0) reasons.Add($"{p.Kind}: {p.ComputeMismatches} wrong floats (compute error)");
             if (p.MemoryErrors > 0) reasons.Add($"{p.Kind}: {p.MemoryErrors} bad words, first at word {p.FirstBadWord} (memory error)");
             if (p.ChainErrors > 0) reasons.Add($"{p.Kind}: {p.ChainErrors} chains ended on the wrong slot (memory error)");
-            if (p.Error != null) reasons.Add($"{p.Kind}: {p.Error} (GPU fault)");
+            if (p.Error != null && (p.ErrorCode == null || Bwt.Gpu.CudaApi.IsContextFatal(p.ErrorCode.Value)))
+                reasons.Add($"{p.Kind}: {p.Error} (GPU fault)");
         }
         if (reasons.Count > 0) return (LabResult.Fail, reasons);
+        var infrastructure = phases.FirstOrDefault(p => p.Error != null);
+        if (infrastructure != null) return (LabResult.Inconclusive, [$"{infrastructure.Kind}: {infrastructure.Error} (runner error, CUDA {infrastructure.ErrorCode})"]);
         if (interrupted != null) return (LabResult.Inconclusive, [interrupted]);
         if (phases.Count < planned || phases.Any(p => !p.Completed)) return (LabResult.Inconclusive, ["the run stopped before every phase finished"]);
         // a soloist whose clock never held its point passed nothing: the point did not run; a leap whose clock never leapt

@@ -319,8 +319,11 @@ public sealed unsafe class C01Fp32Fma : IWorkload
 
     public WorkloadSupport Probe(GpuContext gpu) => new(Info.Id, gpu.Info.CcMajor >= 12, gpu.Info.CcMajor >= 12 ? null : "needs CUDA compute capability 12.0 or later");
 
-    public PrepareResult Prepare(GpuContext gpu, WorkloadParams p)
+    public PrepareResult Prepare(GpuContext gpu, WorkloadParams p) => Prepare(gpu, p, CancellationToken.None);
+
+    public PrepareResult Prepare(GpuContext gpu, WorkloadParams p, CancellationToken cancel)
     {
+        cancel.ThrowIfCancellationRequested();
         _gpu = gpu;
         long hashInterval = Evidence.ParamL(p, "hash_interval", 32);
         if (hashInterval is not (32 or 8)) throw new ArgumentException("C01 hash_interval must be 32 or 8");
@@ -343,7 +346,8 @@ public sealed unsafe class C01Fp32Fma : IWorkload
         _clock = new LaunchClock(gpu);
         double targetMs = Evidence.Param(p, "target_ms", 20);
         double maxMs = Math.Min(50, Evidence.Param(p, "max_ms", 50));
-        _segs = (uint)LaunchCalibrator.Calibrate(s => TimedOnce((uint)s), 4, 10_000_000, targetMs, maxMs);
+        _segs = (uint)LaunchCalibrator.Calibrate(s => { cancel.ThrowIfCancellationRequested(); return TimedOnce((uint)s); }, 4, 10_000_000, targetMs, maxMs);
+        cancel.ThrowIfCancellationRequested();
         double launchMs = TimedOnce(_segs);
         var res = _k.Module.Resources(_k.Entry);
         var d = Evidence.Module(_k.Module, res);
@@ -356,7 +360,7 @@ public sealed unsafe class C01Fp32Fma : IWorkload
         d["calibrated_launch_ms"] = Evidence.F(launchMs);
         d["cpu_fma3"] = Fma.IsSupported.ToString();
         d["readback_page_locked"] = _outPinned.Registered.ToString();
-        d["prepare_warmup_batch"] = Evidence.WarmUp(this);
+        d["prepare_warmup_batch"] = Evidence.WarmUp(this, cancel);
         return new PrepareResult(true, Info.Id, null, Info.Backend, null, d);
     }
 

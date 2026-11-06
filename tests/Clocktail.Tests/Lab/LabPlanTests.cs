@@ -72,4 +72,24 @@ public class LabPlanTests
     [Fact]
     public void A_profile_and_custom_phases_cannot_silently_override_each_other() =>
         Assert.Throws<ArgumentException>(() => LabTestPlan.Create("memory", "burn", 90));
+
+    [Fact]
+    public void Aria_is_an_explicit_c01_movement_and_the_existing_core_budget_is_unchanged()
+    {
+        var aria = LabTestPlan.Create("aria");
+        Assert.Equal(180, aria.Seconds);
+        Assert.Equal("c01", Assert.Single(aria.Stages).Phase);
+        Assert.Equal(60, LabTestPlan.Create("aria", seconds: 60).Seconds);
+        Assert.Equal("aria", LabTestPlan.Create("c01").Profile);
+        Assert.Throws<ArgumentException>(() => LabTestPlan.Create("aria", seconds: 9));
+        Assert.Equal(150, LabTestPlan.Create("core").Seconds);
+        var score = LabTestPlan.Create("symphony");
+        Assert.Equal(330, score.Seconds);
+        Assert.Equal(["c01", "burn", "solo", "leap"], score.Stages.Select(s => s.Phase));
+        Assert.Equal([180.0, 30, 60, 60], score.Stages.Select(s => s.Seconds));
+        var scaled = LabTestPlan.Create("symphony", seconds: 331);
+        Assert.Equal(331, scaled.Stages.Sum(s => s.Seconds), 8);
+        Assert.Equal(Math.Truncate(scaled.Stages[0].Seconds), scaled.Stages[0].Seconds);
+        Assert.Throws<ArgumentException>(() => LabTestPlan.Create("symphony", seconds: 329));
+    }
 }
