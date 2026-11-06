@@ -44,7 +44,7 @@ public sealed record EvidenceMark(int Index, double Mv, double? StableMhz, doubl
     public double? HeldBelowMhz => StableMhz is { } set && StableRanMhz is { } ran && set - ran >= HeldBelowMinMhz ? set - ran : null;
 }
 
-/// <summary>Everything the window shows, read once when it opens; the window itself reads nothing from the card.</summary>
+/// <summary>The curve and historical layers, read once when the window opens. Live telemetry is supplied separately.</summary>
 public sealed record EditorData(
     string Gpu,
     double[] Mv,

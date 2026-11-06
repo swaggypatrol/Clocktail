@@ -196,8 +196,10 @@ public sealed partial class CurveEditorForm
         TextLine(g, badge, _small, _done ? Good : Accent, badgeRect, StringAlignment.Center);
         TextLine(g, _status, _body, _statusColor, new(24 * s, 52 * s, w - 48 * s, 24 * s));
         TextLine(g, "LAYERS", _small, Dim, new(24 * s, 136 * s, 54 * s, 28 * s));
-        if (w / s >= 1050)
-            TextLine(g, "Drag a point · Shift: move tail · Scroll: zoom", _small, Dim, new(540 * s, 88 * s, w - 564 * s, 33 * s), StringAlignment.Far);
+        string live = _livePoint is { } p ? $"LIVE  {Fmt(p.Mhz)} MHz · {Fmt(p.Mv)} mV"
+            + (p.Mv < _vx0 || p.Mv > _vx1 || p.Mhz < _vy0 || p.Mhz > _vy1 ? " · outside view" : "")
+            : "LIVE  — MHz · — mV · unavailable";
+        TextLine(g, live, _small, _livePoint != null ? LiveC : Dim, new(532 * s, 88 * s, w - 556 * s, 33 * s), StringAlignment.Far);
         if (w / s >= 970)
             TextLine(g, "History snapshot · not live", _small, Dim, new(660 * s, 136 * s, w - 684 * s, 28 * s), StringAlignment.Far);
         using var pen = new Pen(C(0x34312d), s);

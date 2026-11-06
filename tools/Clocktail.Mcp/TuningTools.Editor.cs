@@ -29,7 +29,7 @@ public sealed partial class TuningTools
 
     [McpServerTool(Name = "curve_editor", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Open the V/F curve editor window on the person's desktop, when they ask for it. It shows this GPU's curve (dark, " +
-        "points dragged by hand), every crash pinned to the curve point it happened at, the highest setting each point was " +
+        "points dragged by hand), a live dashed crosshair at measured NVVDD voltage and core frequency, every crash pinned to the curve point it happened at, the highest setting each point was " +
         "marked stable or survived at, and where the card actually ran over the last 60 days, weighted by observed time (the " +
         "broker's always-on V/F history of every look above 825 mV NVVDD, light loads included, plus the residency samples at " +
         "50% load or more; observed operation, not a stability result). Under the top of " +
@@ -65,7 +65,7 @@ public sealed partial class TuningTools
         {
             EditorState.Closed(outcome);
             try { card.Broker(BrokerRequest.OpExperiment, "note", $"Curve editor window closed: {outcome}"); } catch (Exception e) when (e is IOException or InvalidOperationException) { }
-        });
+        }, () => residency.LatestPoint);
         return Out(new
         {
             success = true, opened = true,
