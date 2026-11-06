@@ -35,13 +35,36 @@ internal static class Program
             Directory.CreateDirectory(output);
             var data = Fixture();
             SaveRequest? saved = null;
+            LiveVfPoint? live = new(DateTimeOffset.Now, 950000, 2850);
             using (var form = new CurveEditorForm(data, (request, progress) =>
-                { saved = request; progress("Checking readback…"); return new(true, null, null); }, _ => new([], [], [])))
+                { saved = request; progress("Checking readback…"); return new(true, null, null); }, _ => new([], [], []), () => live))
             {
                 Console.WriteLine("Opening synthetic editor");
                 form.Show(); Application.DoEvents();
                 Check(Field<int[]>(form, "_off").SequenceEqual(data.Offsets), "Opening must preserve every imported offset.");
                 Render(form, output, "opened", new(1320, 862));
+                var layer = Field<Bitmap>(form, "_layer");
+                live = new(DateTimeOffset.Now, 973125, 2880);
+                Call(form, "RefreshLivePoint");
+                Check(Field<LiveVfPoint>(form, "_livePoint") == live, "Live telemetry must retain the actual coordinates without snapping to a curve point.");
+                Render(form, output, "live-crosshair", new(1320, 862));
+                Check(ReferenceEquals(layer, Field<Bitmap>(form, "_layer")), "A live update must reuse the expensive static history layer.");
+                Render(form, output, "live-compact", new(900, 660));
+                var view = (Field<double>(form, "_vx0"), Field<double>(form, "_vy0"));
+                live = new(DateTimeOffset.Now, 712345, 210);
+                Call(form, "RefreshLivePoint");
+                Render(form, output, "live-idle-outside-view", new(900, 660));
+                Check(view == (Field<double>(form, "_vx0"), Field<double>(form, "_vy0")), "An off-screen live point must not move the editing view.");
+                live = new(DateTimeOffset.Now - LiveVfPoint.MaxAge - TimeSpan.FromSeconds(1), 950000, 2850);
+                Call(form, "RefreshLivePoint");
+                Check(Field<LiveVfPoint?>(form, "_livePoint") == null, "Stale telemetry must hide the crosshair.");
+                Render(form, output, "live-unavailable", new(900, 660));
+                live = null;
+                Call(form, "RefreshLivePoint");
+                Check(Field<LiveVfPoint?>(form, "_livePoint") == null, "Missing voltage or clock must not reuse the preceding point.");
+                Check(Field<int[]>(form, "_off").SequenceEqual(data.Offsets) && saved == null, "Live updates must not change or save the draft.");
+                live = new(DateTimeOffset.Now, 950000, 2850);
+                Call(form, "RefreshLivePoint");
                 Set(form, "_sel", 66); Call(form, "RefreshChrome");
                 var input = Control<NumericUpDown>(form, "PointOffset");
                 input.Value += 30;
@@ -86,6 +109,8 @@ internal static class Program
                 Render(form, output, "curve-only", new(900, 660));
                 history.Checked = true;
                 // Scale the same layout to exercise explicit per-monitor drawing and control bounds.
+                live = new(DateTimeOffset.Now, 973125, 2880);
+                Call(form, "RefreshLivePoint");
                 Set(form, "_s", 1.5f); Call(form, "Fonts");
                 Render(form, output, "layout-150pct", new(1980, 1293));
                 Set(form, "_s", 1f); Call(form, "Fonts");
@@ -133,7 +158,7 @@ internal static class Program
             }
             Console.WriteLine("Windows editor smoke checks passed; synthetic previews: " + output);
             if (args.Contains("--emit-previews"))
-                foreach (string name in new[] { "edited", "compact", "layout-150pct", "save-error", "save-details" })
+                foreach (string name in new[] { "live-crosshair", "live-compact", "live-idle-outside-view", "live-unavailable", "edited", "compact", "layout-150pct", "save-error", "save-details" })
                 {
                     // Optional review transport when the consumer can read logs but cannot download binary artifacts.
                     // Short lines avoid log-line truncation. Only deterministic synthetic fixtures are rendered here.

@@ -26,13 +26,16 @@ public sealed partial class CurveEditorForm : Form
         AxisText = C(0xaba69c), TextC = C(0xf0eee6), Dim = C(0x8f8a80), CurveC = C(0xfaf9f5), ChangedC = C(0xe08a6a),
         Accent = C(0xd97757), Ghost = C(0xb0a596), StockC = C(0x635e56), CrashC = C(0xf2557a), RunC = C(0x7fb3a3),
         Good = C(0xa3c47e), PanelC = C(0x2a2825), PanelBorder = C(0x48443d), Primary = C(0xc96442), Err = C(0xf07a6a),
-        Unverified = C(0xe9c46a);
+        Unverified = C(0xe9c46a), LiveC = C(0x87cbd5);
 
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
     private EditorData _d;
     private readonly Func<SaveRequest, Action<string>, SaveResult> _save;
     private readonly Func<DataPoint, HistoryData> _delete;
+    private readonly Func<LiveVfPoint?>? _readLive;
+    private readonly System.Windows.Forms.Timer _liveTimer = new() { Interval = 250 };
+    private LiveVfPoint? _livePoint;
     private ContextMenuStrip? _historyMenu;
     private readonly int[] _opened;
     private int[] _off;
@@ -72,11 +75,14 @@ public sealed partial class CurveEditorForm : Form
     /// <summary>How the window ended, for the tool's next answer.</summary>
     public string Outcome { get; private set; } = "closed without saving";
 
-    public CurveEditorForm(EditorData data, Func<SaveRequest, Action<string>, SaveResult> save, Func<DataPoint, HistoryData> delete)
+    public CurveEditorForm(EditorData data, Func<SaveRequest, Action<string>, SaveResult> save, Func<DataPoint, HistoryData> delete,
+        Func<LiveVfPoint?>? readLive = null)
     {
         _d = data;
         _save = save;
         _delete = delete;
+        _readLive = readLive;
+        _liveTimer.Tick += (_, _) => RefreshLivePoint();
         _opened = [.. data.Offsets];
         Detect();
         _off = (int[])_opened.Clone();
@@ -160,7 +166,19 @@ public sealed partial class CurveEditorForm : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        RefreshLivePoint();
+        if (_readLive != null) _liveTimer.Start();
         BringToFront2();
+    }
+
+    private void RefreshLivePoint()
+    {
+        // This delegate reads an immutable cache; no driver or file calls run on the UI thread.
+        var point = _readLive?.Invoke();
+        if (point?.IsFresh(DateTimeOffset.Now) != true) point = null;
+        if (_livePoint == point) return;
+        _livePoint = point;
+        Invalidate(); // The expensive static history layer remains cached.
     }
 
     /// <summary>On top of the agent's terminal: the server is a background process, which Windows does not let take the
@@ -822,8 +840,11 @@ public sealed partial class CurveEditorForm : Form
         if (_bottom < _top) BandLine(xb, _hoverLine == 1 || _dragLine == 1);
         BandLine(xt, _hoverLine == 2 || _dragLine == 2);
 
+        DrawLiveCrosshair(g);
+
         g.ResetClip();
         using (var bp = new Pen(GridMajor, 1 * s)) g.DrawRectangle(bp, _plot.X, _plot.Y, _plot.Width, _plot.Height);
+        DrawLiveAxisTags(g);
 
         // the lines' tabs, outside the clip so they sit on the plot's top edge: the top's to the right, the foot's to the left
         _topTab = Tab(g, xt, $"Band top {Fmt(_d.Mv[_top])} mV ▸", right: true, hot: _hoverLine == 2 || _dragLine == 2);
@@ -1063,7 +1084,7 @@ public sealed partial class CurveEditorForm : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _controlTips.Dispose(); _historyMenu?.Dispose(); }
+        if (disposing) { _liveTimer.Stop(); _liveTimer.Dispose(); _controlTips.Dispose(); _historyMenu?.Dispose(); }
         base.Dispose(disposing);
         if (disposing) { _body?.Dispose(); _small?.Dispose(); _title?.Dispose(); _bold?.Dispose(); _layer?.Dispose(); }
     }
@@ -1074,7 +1095,8 @@ public sealed partial class CurveEditorForm : Form
     private static readonly IntPtr PerMonitorV2 = new(-4);
 
     /// <summary>Shows the window on its own STA thread and returns at once; <paramref name="closed"/> gets its outcome.</summary>
-    public static void Show(EditorData data, Func<SaveRequest, Action<string>, SaveResult> save, Func<DataPoint, HistoryData> delete, Action<string> closed)
+    public static void Show(EditorData data, Func<SaveRequest, Action<string>, SaveResult> save, Func<DataPoint, HistoryData> delete, Action<string> closed,
+        Func<LiveVfPoint?>? readLive = null)
     {
         var thread = new Thread(() =>
         {
@@ -1088,7 +1110,7 @@ public sealed partial class CurveEditorForm : Form
                 try { Application.SetCompatibleTextRenderingDefault(false); } catch (InvalidOperationException) { }
                 // An exception in a handler ends the window with its reason (the catch below), not with WinForms' Continue/Quit dialog.
                 try { Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException, true); } catch (InvalidOperationException) { }
-                using var form = new CurveEditorForm(data, save, delete);
+                using var form = new CurveEditorForm(data, save, delete, readLive);
                 EditorState.Opened(() => form.BeginInvoke(form.BringToFront2));
                 Application.Run(form);
                 outcome = form.Outcome;

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using Clocktail.Domain.Broker;
+using Clocktail.Mcp.CurveEditor;
 using Microsoft.Extensions.Hosting;
 
 namespace Clocktail.Mcp;
@@ -43,6 +44,10 @@ public sealed class Residency(Card card) : BackgroundService
     private readonly object _gate = new();
     private readonly Queue<Tick> _recent = new();
     private readonly ResidencyLog _log = new(() => BrokerDir(card));
+    private LiveVfPoint? _latestPoint;
+
+    /// <summary>The latest unfiltered read, for the editor's live overlay. In-memory only; history still keeps load only.</summary>
+    public LiveVfPoint? LatestPoint => Volatile.Read(ref _latestPoint);
 
     protected override async Task ExecuteAsync(CancellationToken stop)
     {
@@ -54,7 +59,7 @@ public sealed class Residency(Card card) : BackgroundService
             {
                 // A sampler must never take the server down: an unreadable second is just a missing sample. Nor wait on a
                 // tool's read of the day files: the batch goes out on a later round.
-                try { Take(); } catch (Exception) { }
+                try { Take(); } catch (Exception) { Volatile.Write(ref _latestPoint, null); }
                 if (++n % 5 == 0) try { _log.Flush(wait: false); } catch (Exception) { }
             }
         }
@@ -66,6 +71,7 @@ public sealed class Residency(Card card) : BackgroundService
     {
         var (uv, mhz, util, w) = card.ReadPoint();
         var now = DateTimeOffset.Now;
+        Volatile.Write(ref _latestPoint, LiveVfPoint.From(now, uv, mhz));
         DateTimeOffset stress;
         lock (_gate) stress = _stressUntil;
         if (uv is not { } u || mhz is not { } m || util is not { } p || !Counts(p, now, stress)) return;
