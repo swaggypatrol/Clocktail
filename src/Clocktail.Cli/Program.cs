@@ -363,11 +363,7 @@ internal static class Program
             return CliContext.Print(ctx.Perform(new BrokerRequest(BrokerRequest.OpOwnership, ctx.StableId)));
 
         if (profileVerb != null)
-        {
-            // "preset:NAME" loads the profile saved under NAME as the daily profile (the op's old name; nothing ships).
-            var (verb, value) = profileVerb.StartsWith("preset:", StringComparison.OrdinalIgnoreCase) ? ("preset", profileVerb[7..]) : (profileVerb, (string?)null);
-            return CliContext.Print(ctx.Perform(new BrokerRequest(BrokerRequest.OpProfile, ctx.StableId, Kind: verb, Value: value)));
-        }
+            return CliContext.Print(RunProfileCommand(ctx.Perform, ctx.StableId, profileVerb));
 
         if (cmd.Contains("--recover"))
             return CliContext.Print(ctx.Perform(new BrokerRequest(BrokerRequest.OpRecover, ctx.StableId)));
@@ -457,5 +453,31 @@ internal static class Program
             voltage_rails = volt,
         }, Json));
         return 0;
+    }
+
+    internal static BrokerResponse RunProfileCommand(Func<BrokerRequest, BrokerResponse> perform, string stableId, string profileVerb)
+    {
+        // "preset:NAME" loads the profile saved under NAME as the daily profile (the op's old name; nothing ships).
+        var (verb, value) = profileVerb.StartsWith("preset:", StringComparison.OrdinalIgnoreCase)
+            ? ("preset", profileVerb[7..])
+            : (profileVerb, (string?)null);
+        if (verb is "keep" or "adopt" or "preset")
+        {
+            string previewKind = verb == "adopt" ? "preview-adopt" : "preview";
+            var preview = perform(new BrokerRequest(BrokerRequest.OpProfile, stableId, Kind: previewKind, Value: value));
+            if (!preview.Ok) return preview;
+            if (preview.Result is not { } res
+                || !res.TryGetProperty("values_fingerprint", out var fpEl)
+                || fpEl.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(fpEl.GetString()))
+            {
+                return new BrokerResponse(false,
+                    $"profile {previewKind} did not return a values_fingerprint; aborting '{verb}' without changing anything",
+                    Code: BrokerCode.CannotWrite);
+            }
+            return perform(new BrokerRequest(BrokerRequest.OpProfile, stableId, Kind: verb, Value: value,
+                ExpectedProfileFingerprint: fpEl.GetString()));
+        }
+        return perform(new BrokerRequest(BrokerRequest.OpProfile, stableId, Kind: verb, Value: value));
     }
 }

@@ -11,6 +11,7 @@ Only two tuning guardrails apply:
 No extra software tuning envelope, mandatory clock/voltage pairing or model-specific preset is imposed. Encoding, GPU identity, concurrency and readback checks are execution requirements, not substitute tuning policy.
 A confirmation code is not consent: present the returned question, wait for the person's yes, then use that one-time code. Legacy `CLOCKTAIL_CONFIRM=off` does not bypass consent.
 Ask the person before stock, load_preset, keep_as_daily, set_daily_power_limit, set_power_cap, delete_profile and install_service. begin_session and load_daily ask too: like all of these but install_service, through their own confirmation code.
+For client-requested daily-profile changes, the elevated broker service also presents an authoritative Windows confirmation dialog after MCP confirmation (`CLOCKTAIL_CONFIRM`) and revalidates the previewed state/fingerprint before committing; expect both prompts in interactive sessions.
 
 ## Baseline and daily
 "Stock" means this GPU's NVIDIA/board firmware settings, not a bundled set of numbers. Existing settings from another utility are not stock: report them and ask whether to tune from them, adopt them, or explicitly clear them.

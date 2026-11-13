@@ -200,25 +200,105 @@ public sealed record Experiment(string Game, string? Note, DateTimeOffset Starte
     /// Safety/recovery callers can include deleted records; ordinary readers see the same history as the editor.</summary>
     public static IReadOnlyList<DataPoint> ReadLast(string dataPath, int count, bool includeDeleted = false)
     {
-        if (!File.Exists(dataPath)) return [];
+        if (count <= 0 || !File.Exists(dataPath)) return [];
         string dir = DeletedDirectory(dataPath);
         var deleted = !includeDeleted && Directory.Exists(dir)
             ? Directory.EnumerateFiles(dir, "*.json").Select(p => Path.GetFileNameWithoutExtension(p)).ToHashSet(StringComparer.Ordinal)
             : [];
-        var points = new List<DataPoint>();
         // The broker may append while an editor reads or deletes history. Never lock it out of its journal.
         using var stream = new FileStream(dataPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        using var reader = new StreamReader(stream);
-        while (reader.ReadLine() is { } line)
+        long pos = stream.Length;
+        if (pos == 0) return [];
+
+        const int ChunkSize = 64 * 1024;
+        var points = new List<DataPoint>(Math.Min(count, 1024));
+        byte[] buffer = new byte[(int)Math.Min(ChunkSize, pos)];
+        byte[] carry = [];
+
+        while (pos > 0 && points.Count < count)
         {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            try
+            int toRead = (int)Math.Min(ChunkSize, pos);
+            pos -= toRead;
+            stream.Position = pos;
+            int read = ReadChunk(stream, buffer, toRead);
+            if (read == 0) break;
+
+            byte[] block;
+            int blockLen;
+            if (carry.Length == 0)
             {
-                if (JsonSerializer.Deserialize<DataPoint>(line, Line) is { } p && (deleted.Count == 0 || !deleted.Contains(PointId(p))))
-                    points.Add(p);
+                block = buffer;
+                blockLen = read;
             }
-            catch (JsonException) { }
+            else
+            {
+                blockLen = read + carry.Length;
+                block = new byte[blockLen];
+                Buffer.BlockCopy(buffer, 0, block, 0, read);
+                Buffer.BlockCopy(carry, 0, block, read, carry.Length);
+                carry = [];
+            }
+
+            int startOffset = 0;
+            if (pos == 0 && blockLen >= 3 && block[0] == 0xEF && block[1] == 0xBB && block[2] == 0xBF)
+                startOffset = 3;
+
+            int end = blockLen;
+            while (end > startOffset && points.Count < count)
+            {
+                int nl = Array.LastIndexOf(block, (byte)'\n', end - 1, end - startOffset);
+                if (nl < 0)
+                {
+                    if (pos == 0)
+                    {
+                        TryAddLine(block.AsSpan(startOffset, end - startOffset), deleted, points);
+                    }
+                    else
+                    {
+                        int len = end - startOffset;
+                        carry = new byte[len];
+                        Buffer.BlockCopy(block, startOffset, carry, 0, len);
+                    }
+                    break;
+                }
+
+                TryAddLine(block.AsSpan(nl + 1, end - (nl + 1)), deleted, points);
+                end = nl;
+            }
         }
-        return points.Count <= count ? points : points.GetRange(points.Count - count, count);
+
+        points.Reverse();
+        return points;
+    }
+
+    private static int ReadChunk(FileStream stream, byte[] buffer, int count)
+    {
+        int total = 0;
+        while (total < count)
+        {
+            int n = stream.Read(buffer, total, count - total);
+            if (n == 0) break;
+            total += n;
+        }
+        return total;
+    }
+
+    private static void TryAddLine(ReadOnlySpan<byte> line, HashSet<string> deleted, List<DataPoint> points)
+    {
+        if (line.Length > 0 && line[^1] == (byte)'\r') line = line[..^1];
+        if (IsBlankAscii(line)) return;
+        try
+        {
+            if (JsonSerializer.Deserialize<DataPoint>(line, Line) is { } p && (deleted.Count == 0 || !deleted.Contains(PointId(p))))
+                points.Add(p);
+        }
+        catch (JsonException) { }
+    }
+
+    private static bool IsBlankAscii(ReadOnlySpan<byte> line)
+    {
+        foreach (byte b in line)
+            if (b is not (0x20 or 0x09 or 0x0D)) return false;
+        return true;
     }
 }

@@ -46,9 +46,19 @@ public sealed record DailyProfile(
     {
         var bytes = AtomicFile.Read(path, 1024 * 1024);
         if (bytes == null) return null;
-        try { return JsonSerializer.Deserialize<DailyProfile>(bytes, Json); }
+        try
+        {
+            var profile = JsonSerializer.Deserialize<DailyProfile>(bytes, Json);
+            // Missing required members deserialize to null despite the non-nullable record contract.
+            // Treat structural corruption like malformed JSON, before callers enumerate the writes.
+            return profile?.Writes == null || profile.Writes.Any(InvalidWrite)
+                || profile.Adopted?.Any(InvalidWrite) == true ? null : profile;
+        }
         catch (JsonException) { return null; }
     }
+
+    private static bool InvalidWrite(ProfileWrite? write) =>
+        write == null || string.IsNullOrWhiteSpace(write.Kind) || string.IsNullOrWhiteSpace(write.Key) || write.Value == null;
 
     public void Save(string path) => AtomicFile.Write(path, JsonSerializer.SerializeToUtf8Bytes(this, Json));
 

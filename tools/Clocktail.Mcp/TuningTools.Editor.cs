@@ -496,7 +496,10 @@ public sealed partial class TuningTools
             return wrote ? Undo(why) : Refused(why);
         }
         progress("Saving as Daily…");
-        var k = card.Broker(BrokerRequest.OpProfile, "keep", "drawn in the curve editor window; the person clicked Save as Daily");
+        var k = KeepEditorDaily(
+            () => card.Broker(BrokerRequest.OpProfile, "preview"),
+            fingerprint => card.Broker(BrokerRequest.OpProfile, "keep",
+                "drawn in the curve editor window; the person clicked Save as Daily", expectedProfileFingerprint: fingerprint));
         // The broker saves the profile and then switches the card to it; a wall or limit that did not go back is reported
         // as a failure with saved=true: the daily profile is this curve all the same.
         bool saved = k.Ok || (k.Result is { } kr && kr.TryGetProperty("saved", out var sv) && sv.ValueKind == JsonValueKind.True);
@@ -504,5 +507,16 @@ public sealed partial class TuningTools
         WriteBand(data.Dir, target, request.Foot, request.Top);
         if (began) card.Broker(BrokerRequest.OpExperiment, "end");   // no trial is left after a keep: the daily, this curve, stays on
         return new SaveResult(true, k.Ok ? null : $"GPU has not fully switched to the new Daily ({k.Error}): ask your agent to retry with back_to_daily or load_daily", null);
+    }
+
+    /// <summary>The editor uses the same fresh preview contract as MCP/CLI; the broker still asks the person.</summary>
+    public static BrokerAnswer KeepEditorDaily(Func<BrokerAnswer> preview, Func<string, BrokerAnswer> keep)
+    {
+        var shown = preview();
+        if (!shown.Ok) return shown;
+        var fingerprint = FullFingerprint(shown);
+        return fingerprint == null
+            ? new BrokerAnswer(false, null, "Daily preview has no valid fingerprint; nothing kept", BrokerCode.BadRequest)
+            : keep(fingerprint);
     }
 }

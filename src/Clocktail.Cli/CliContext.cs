@@ -82,7 +82,7 @@ internal sealed class CliContext
         return 0;
     }
 
-    private BrokerDispatcher Local()
+    internal BrokerDispatcher Local()
     {
         if (_local != null) return _local;
         var host = new SystemHost();
@@ -94,6 +94,8 @@ internal sealed class CliContext
             ? run with { Waits = false } : null);
         var journal = new OwnershipJournal(Path.Combine(dir, "ownership.json"), host, StableId);
         var sentinel = new ApplySentinel(Path.Combine(dir, "apply.lock"), judge);   // asked again once the sentinel is on disk
+        // AuthorizeProfileChange is intentionally left null here: when the broker pipe does not answer, local CLI
+        // fallback (even if elevated) must fail closed on client profile mutations instead of bypassing confirmation.
         return _local = new BrokerDispatcher(Hw, new OneGpu(this, journal, sentinel), host, canWrite: !Elevation.NeedsElevationHere(), judge);
     }
 

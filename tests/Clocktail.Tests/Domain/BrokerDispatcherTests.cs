@@ -1361,6 +1361,7 @@ public class BrokerDispatcherTests : IDisposable
     public void A_client_s_recovery_takes_the_trial_off_the_record_and_the_service_s_own_do_not()
     {
         var d = TrialAt450(() => null);
+        d.AuthorizeProfileChange = _ => true;
         Assert.True(d.FromClient(new BrokerRequest(BrokerRequest.OpProfile, Kind: "off")).Ok);
         Assert.NotNull(TrialNow());
         Assert.True(d.FromClient(new BrokerRequest(BrokerRequest.OpRecover)).Ok);
@@ -1503,6 +1504,7 @@ public class BrokerDispatcherTests : IDisposable
     public void A_reset_s_crash_goes_to_the_trial_on_the_card_when_the_GPU_stopped_answering(string between)
     {
         var d = Power();
+        d.AuthorizeProfileChange = _ => true;
         CurrentLimitsFixture.Install();
         Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
         var written = _host.Now;
@@ -2546,6 +2548,7 @@ public class BrokerDispatcherTests : IDisposable
     public void An_old_jobs_cleanup_leaves_the_new_trial_and_hardware_unchanged()
     {
         var d = Power();
+        d.AuthorizeProfileChange = _ => true;
         CurrentLimitsFixture.Install();
         Assert.True(d.Dispatch(Exp("begin", """{"game":"lab"}""")).Ok);
         var args = JsonSerializer.Serialize(new { curve = "0*127", change = "job trial", power_mw = 450_000u, keep_curve = true });
@@ -2569,6 +2572,7 @@ public class BrokerDispatcherTests : IDisposable
     public void A_jobs_write_can_be_cleaned_up_even_when_its_response_was_lost()
     {
         var d = Power();
+        d.AuthorizeProfileChange = _ => true;
         CurrentLimitsFixture.Install();
         Assert.True(d.Dispatch(Exp("begin", """{"game":"lab"}""")).Ok);
         // The job never needs to receive this response or query the new trial's Id to restore its own write.

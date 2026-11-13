@@ -36,7 +36,8 @@ internal sealed class WindowsGameAccess(GpuManager manager, GpuDevice device, IG
             || manager.NvApi.GpuBusId(device.NvapiHandle) != address.Bus || manager.NvApi.GpuBusSlotId(device.NvapiHandle) != address.Device
             || apiId.DeviceId != identity.DeviceId || apiId.SubSystemId != identity.SubSystemId)
             throw new NotSupportedException("the selected PnP/NVML/NVAPI identity no longer agrees");
-        string exe = Environment.GetEnvironmentVariable("CLOCKTAIL_LAB_EXE") ?? Path.Combine(AppContext.BaseDirectory, "clocktail-lab.exe");
+        // The elevated broker must never launch a client/user-selected executable.
+        string exe = Path.Combine(AppContext.BaseDirectory, BrokerInstallBundle.LabName);
         if (!File.Exists(exe)) throw new NotSupportedException("the broker requires the guarded clocktail-lab.exe beside it");
         var psi = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (string arg in new[] { "game-info", "--gpu-pci", identity.Pci, "--device-id", identity.DeviceId.ToString("x8"), "--subsystem-id", identity.SubSystemId.ToString("x8") }) psi.ArgumentList.Add(arg);

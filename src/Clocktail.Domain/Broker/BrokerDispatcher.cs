@@ -57,6 +57,14 @@ public interface IGpuTargets
 /// The operation set is the whitelist, and the write verb reaches only the <see cref="WriteRegistry"/>: there is
 /// no raw-slot or register verb to call.
 /// </summary>
+public sealed record ProfileConsentRequest(
+    string Kind,
+    string GpuId,
+    string GpuName,
+    string Summary,
+    IReadOnlyList<ProfileWrite>? Writes = null,
+    string? Value = null);
+
 public sealed partial class BrokerDispatcher
 {
     private readonly NvClient _hw;
@@ -99,6 +107,46 @@ public sealed partial class BrokerDispatcher
 
     private readonly Fps.IFrameCapture? _frames;
     public Func<string, bool> GameLeaseHeld { get; set; } = _ => false;
+
+    /// <summary>Authorization hook for client-requested profile mutations (<c>keep</c>, <c>adopt</c>, <c>stock</c>,
+    /// <c>factory</c>, <c>wall</c>, <c>preset</c>, <c>off</c>, <c>load</c>,
+    /// <c>save</c>, <c>forget</c>). Invoked only while <see cref="FromClient"/> is active; internal recovery, startup,
+    /// wake, and reset calls never invoke it. Client profile mutations fail closed when unset.</summary>
+    public Func<ProfileConsentRequest, bool>? AuthorizeProfileChange { get; set; }
+
+    private BrokerResponse? AuthorizeClientProfileChange(IGpuTarget target, string kind, string summary, IReadOnlyList<ProfileWrite>? writes = null, string? value = null)
+    {
+        if (!ClientAsks.Value) return null;
+        if (AuthorizeProfileChange == null)
+            return Fail($"profile mutation '{kind}' requires a host authorization handler; nothing was changed", BrokerCode.CannotWrite);
+        bool approved;
+        try { approved = AuthorizeProfileChange(new ProfileConsentRequest(kind, target.StableId, target.Name, summary, writes, value)); }
+        catch (Exception e) when (e is not OutOfMemoryException and not StackOverflowException) { approved = false; }
+        return approved ? null : Fail($"the user declined or did not confirm '{kind}' at the broker", BrokerCode.CannotWrite);
+    }
+
+    private static string DailyStateToken(DailyProfile? profile) => profile == null
+        ? "none"
+        : $"{profile.Suspended}:{profile.Vbios ?? ""}:{ProfileSnapshot.Fingerprint("daily", profile.Writes)}";
+
+    private static bool SameCell(ProfileWrite a, ProfileWrite b) =>
+        string.Equals(a.Kind, b.Kind, StringComparison.OrdinalIgnoreCase) && string.Equals(a.Key, b.Key, StringComparison.OrdinalIgnoreCase);
+
+    private static IReadOnlyList<ProfileWrite>? RelevantAdopted(IReadOnlyList<ProfileWrite>? adopted, IReadOnlyList<ProfileWrite> writes)
+    {
+        if (adopted is not { Count: > 0 } || writes.Count == 0) return null;
+        var kept = adopted.Where(a => writes.Any(w => SameCell(w, a))).ToList();
+        return kept.Count > 0 ? kept : null;
+    }
+
+    private static IReadOnlyList<ProfileWrite>? MergeAdopted(IReadOnlyList<ProfileWrite> writes, IReadOnlyList<ProfileWrite>? primary, IReadOnlyList<ProfileWrite>? fallback)
+    {
+        var merged = new List<ProfileWrite>();
+        if (RelevantAdopted(primary, writes) is { } first) merged.AddRange(first);
+        if (RelevantAdopted(fallback, writes) is { } second)
+            merged.AddRange(second.Where(a => !merged.Any(existing => SameCell(existing, a))));
+        return merged.Count > 0 ? merged : null;
+    }
 
     /// <summary>Why a GPU looks hung right now (the broker's flight recorder; <see cref="FlightRecorder.HungNow"/>), or null.</summary>
     public Func<string, string?> HungReason { get; set; } = _ => null;
@@ -169,8 +217,8 @@ public sealed partial class BrokerDispatcher
     public BrokerResponse FromClient(BrokerRequest req)
     {
         if (req.Op == BrokerRequest.OpRecover && req.Kind is BrokerRequest.RecoverAfterDriverReset or BrokerRequest.RecoverAfterDriverResetAgain
-            || req.Op == BrokerRequest.OpProfile && req.Kind is "crashed" or "crashed-held")
-            return Fail("that request is the service's own (its answer to a driver reset); a client cannot send it", BrokerCode.BadRequest);
+            || req.Op == BrokerRequest.OpProfile && req.Kind is "crashed" or "crashed-held" or "start" or "resume" or "apply-power" or "after-reset")
+            return Fail("that request is the service's own (its answer to a driver reset or service lifecycle); a client cannot send it", BrokerCode.BadRequest);
         bool prior = ClientAsks.Value;
         ClientAsks.Value = true;
         try { return Dispatch(req); }
@@ -386,6 +434,8 @@ public sealed partial class BrokerDispatcher
 
     private BrokerResponse Profile(IGpuTarget target, BrokerRequest req)
     {
+        if (ClientAsks.Value && req.Kind is "crashed" or "crashed-held" or "start" or "resume" or "apply-power" or "after-reset")
+            return Fail("that request is the service's own (its answer to a driver reset or service lifecycle); a client cannot send it", BrokerCode.BadRequest);
         Settle(target);   // a record from before the boot is settled before anything here reads or puts back its cells
         var path = DailyProfile.PathBeside(target.Journal.Path);
         var profile = DailyProfile.Load(path);
@@ -425,8 +475,15 @@ public sealed partial class BrokerDispatcher
                 // offsets, the voltage demands, the boost), so the service puts it back after every boot and the other tool
                 // can be closed.
                 bool adopt = req.Kind == "adopt";
+                if (ClientAsks.Value && AuthorizeProfileChange == null)
+                    return Fail($"profile mutation '{req.Kind}' requires a host authorization handler; nothing was changed", BrokerCode.CannotWrite);
+                if (ClientAsks.Value && string.IsNullOrWhiteSpace(req.ExpectedProfileFingerprint))
+                    return Fail($"keeping a daily profile requires the preview's expected profile fingerprint ({BrokerRequest.OpProfile} preview{(adopt ? "-adopt" : "")}); preview and confirm again", BrokerCode.BadRequest);
+                string fpSource = adopt ? "keep_as_daily (adopt)" : "keep_as_daily";
+                string preToken = DailyStateToken(profile);
                 var (writes, _, adopted) = KeepWrites(target, profile, adopt);
-                if (req.ExpectedProfileFingerprint is { } expected && expected != ProfileSnapshot.Fingerprint(adopt ? "keep_as_daily (adopt)" : "keep_as_daily", writes))
+                string preFp = ProfileSnapshot.Fingerprint(fpSource, writes);
+                if (req.ExpectedProfileFingerprint is { } expected && expected != preFp)
                     return Fail("the profile values changed after the preview: nothing kept; preview and confirm again", BrokerCode.CannotWrite);
                 var inForce = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial;
                 bool trialWall = inForce?.PowerMw != null;
@@ -435,8 +492,20 @@ public sealed partial class BrokerDispatcher
                     return Fail($"the trial on the card crashed ({inForce.Change}) and waits for the card to be free to go back: a crash is not kept; back_to_daily", BrokerCode.CannotWrite);
                 if (writes.Count == 0)
                     return Fail(adopt ? "nothing on the card differs from stock or from the daily profile; nothing to keep" : "nothing this broker holds differs from stock; nothing to keep", BrokerCode.CannotWrite);
-                var trialKept = CloseTrial(target, Experiment.Stable, out _, "kept as the daily profile");
+                if (AuthorizeClientProfileChange(target, req.Kind!, $"Keep {writes.Count} setting(s) as daily profile", writes, req.Value) is { } denied)
+                    return denied;
+                profile = DailyProfile.Load(path);
+                inForce = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial;
+                if (inForce?.Ending == Experiment.Crash)
+                    return Fail($"the trial on the card crashed ({inForce.Change}) while waiting for confirmation: nothing kept; back_to_daily", BrokerCode.CannotWrite);
+                (writes, _, adopted) = KeepWrites(target, profile, adopt);
+                if (writes.Count == 0
+                    || DailyStateToken(profile) != preToken
+                    || ProfileSnapshot.Fingerprint(fpSource, writes) != preFp)
+                    return Fail("the card or profile changed while waiting for confirmation: nothing kept; preview and confirm again", BrokerCode.CannotWrite);
+                trialWall = inForce?.PowerMw != null;
                 string listed = string.Join("; ", writes.Select(w => $"{w.Kind}/{w.Key}={w.Value}"));
+                var trialKept = CloseTrial(target, Experiment.Stable, out _, "kept as the daily profile");
                 // What was adopted before stays adopted (a trial over it records it as its original); this keep's own adds to it.
                 IReadOnlyList<ProfileWrite> adoptedAll = [.. (profile?.Adopted ?? []).Where(a => !adopted.Any(n => n.Kind == a.Kind && n.Key == a.Key)), .. adopted];
                 var kept = new DailyProfile(DailyProfile.InWriteOrder(writes), _host.Now, History: profile?.History, Adopted: adoptedAll.Count > 0 ? adoptedAll : null)
@@ -467,19 +536,35 @@ public sealed partial class BrokerDispatcher
                 return Ok(new { success = true, saved = true, switched = true, path, profile = kept });
             }
             case "off":
+            {
                 // Suspends the daily profile and writes nothing (the person's CLI: stock at the next start or reset). The card
                 // is as it was, so a trial in force stays in force; until 0.3.7 "off" closed it while the card still ran it.
+                string preToken = DailyStateToken(profile);
+                if (AuthorizeClientProfileChange(target, "off",
+                    profile == null ? "Suspend daily profile (none currently kept)" : "Suspend the daily profile (card goes to stock on next start or reset)",
+                    profile?.Writes, req.Value) is { } denied)
+                    return denied;
+                profile = DailyProfile.Load(path);
+                if (ClientAsks.Value && DailyStateToken(profile) != preToken)
+                    return Fail("the daily profile changed while waiting for confirmation: nothing suspended; try again", BrokerCode.CannotWrite);
                 if (profile == null) return Ok(new { success = true, path, profile });
                 profile = profile.Noted(_host.Now, "suspended by request") with { Suspended = true };
                 profile.Save(path);
                 Log(target, "Daily profile suspended", ["The card is at stock from the next start or driver reset, until the daily profile is loaded or kept again"]);
                 return Ok(new { success = true, path, profile });
+            }
             case "stock":
             {
                 // The card to stock now (the agent's stock, an uninstall): the daily profile suspended so nothing puts it back,
                 // and what this broker holds back to its original in the same operation, so the trial in force leaves the
                 // record once that landed (Leave). Until 0.3.7 stock was "off", which closed the trial, then a recovery of
                 // its own: a recovery a stability run held off left the trial on the card and off the record.
+                string preToken = DailyStateToken(profile);
+                if (AuthorizeClientProfileChange(target, "stock", "Suspend the daily profile and restore Clocktail-owned GPU settings to stock", profile?.Writes, req.Value) is { } denied)
+                    return denied;
+                profile = DailyProfile.Load(path);
+                if (ClientAsks.Value && DailyStateToken(profile) != preToken)
+                    return Fail("the daily profile changed while waiting for confirmation: nothing changed; try again", BrokerCode.CannotWrite);
                 if (profile != null)
                 {
                     profile = profile.Noted(_host.Now, "suspended by request") with { Suspended = true };
@@ -498,6 +583,12 @@ public sealed partial class BrokerDispatcher
                 // The card to NVIDIA's own settings (the agent's stock since 0.4.0): what "stock" does, then every setting
                 // another tool left (FactoryStock) written to its default and let go of (ToFactory). "stock" alone, the
                 // uninstall's, still gives back only what Clocktail changed: the card as Clocktail found it.
+                string preToken = DailyStateToken(profile);
+                if (AuthorizeClientProfileChange(target, "factory", "Suspend the daily profile and clear GPU settings (including other tools') to factory defaults", profile?.Writes, req.Value) is { } denied)
+                    return denied;
+                profile = DailyProfile.Load(path);
+                if (ClientAsks.Value && DailyStateToken(profile) != preToken)
+                    return Fail("the daily profile changed while waiting for confirmation: nothing changed; try again", BrokerCode.CannotWrite);
                 if (profile != null && !profile.Suspended)
                 {
                     profile = profile.Noted(_host.Now, "suspended by request") with { Suspended = true };
@@ -545,26 +636,23 @@ public sealed partial class BrokerDispatcher
                     Log(target, "At start: a trial written since the service started is in force, nothing written", [req.Value is { } w ? $"Reason: {w}" : null, $"Trial: {since.Change}"]);
                     return Ok(new { success = true, skipped = "a trial began after the service started: the agent running it decides", profile });
                 }
-                goto case "apply";
+                return ApplyDailyCase(target, profile, path, req.Value);
             }
             case "finish-job":
             {
+                // Cleanup restores the already-approved daily profile; it must not wait for a person
+                // while trial-only settings are still on the card. It never replaces/suspends the daily profile.
                 if (string.IsNullOrWhiteSpace(req.Lease)) return Fail("job cleanup needs the job's identity", BrokerCode.BadRequest);
                 var trial = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial;
                 if (trial != null && trial.JobId != req.Lease)
                     return Ok(new { success = true, skipped = "another trial is in force: left unchanged", trial_id = trial.Id });
-                goto case "apply";
+                return ApplyDailyCase(target, profile, path, req.Value);
             }
             case "apply":
             {
                 // Value: why, for the log ("the broker started", an agent's back_to_daily).
-                var r = Leave(target, Experiment.Survived, "the daily profile went back on", _ =>
-                {
-                    var a = ApplyProfile(target, profile, path);
-                    return (a, a);
-                }).Answer;
-                Log(target, "Daily profile applied",[req.Value is { } why ? $"Reason: {why}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
-                return r;
+                // back_to_daily and editor undo restore existing consent, not grant new consent.
+                return ApplyDailyCase(target, profile, path, req.Value);
             }
             case "resume":
             {
@@ -582,7 +670,15 @@ public sealed partial class BrokerDispatcher
             case "load":
             {
                 // The tray's "Load": the person puts the profile back on, so a suspension ends here, not at the next keep.
+                if (ClientAsks.Value && AuthorizeProfileChange == null)
+                    return Fail("profile mutation 'load' requires a host authorization handler; nothing was changed", BrokerCode.CannotWrite);
                 if (profile == null) return Fail("no daily profile is kept; nothing to load", BrokerCode.CannotWrite);
+                string preToken = DailyStateToken(profile);
+                if (AuthorizeClientProfileChange(target, "load", $"Load daily profile ({profile.Writes.Count} setting(s))", profile.Writes, req.Value) is { } denied)
+                    return denied;
+                profile = DailyProfile.Load(path);
+                if (profile == null || (ClientAsks.Value && DailyStateToken(profile) != preToken))
+                    return Fail("the daily profile changed while waiting for confirmation: nothing loaded; try again", BrokerCode.CannotWrite);
                 profile = profile.Noted(_host.Now, "loaded by request").On(target.Vbios, target.Driver) with { Suspended = false };
                 profile.Save(path);
                 var r = Leave(target, Experiment.Survived, "the daily profile went back on", _ =>
@@ -601,11 +697,20 @@ public sealed partial class BrokerDispatcher
             {
                 // Value: the name, any name. The daily profile as it is kept now, saved under it; one already saved under
                 // the name (whatever its case) is replaced.
+                if (ClientAsks.Value && AuthorizeProfileChange == null)
+                    return Fail("profile mutation 'save' requires a host authorization handler; nothing was changed", BrokerCode.CannotWrite);
                 var (name, bad) = SavedProfiles.Normalize(req.Value);
                 if (name == null) return Fail(bad!, BrokerCode.BadRequest);
                 if (profile == null) return Fail("no daily profile is kept yet: approve and keep this GPU's settings with keep_as_daily first, then save them", BrokerCode.CannotWrite);
+                string preToken = DailyStateToken(profile);
+                if (AuthorizeClientProfileChange(target, "save", $"Save current daily profile as '{name}'", profile.Writes, name) is { } denied)
+                    return denied;
+                profile = DailyProfile.Load(path);
+                if (profile == null || (ClientAsks.Value && DailyStateToken(profile) != preToken))
+                    return Fail("the daily profile changed while waiting for confirmation: nothing saved; try again", BrokerCode.CannotWrite);
                 var file = SavedProfiles.PathBeside(target.Journal.Path);
-                var saved = new DailyProfile(profile.Writes, _host.Now).Noted(_host.Now, $"saved as '{name}' from the daily profile kept {profile.KeptAt:yyyy-MM-dd HH:mm}");
+                var saved = new DailyProfile(profile.Writes, _host.Now, Adopted: RelevantAdopted(profile.Adopted, profile.Writes))
+                    .Noted(_host.Now, $"saved as '{name}' from the daily profile kept {profile.KeptAt:yyyy-MM-dd HH:mm}");
                 bool replaced = SavedProfiles.Save(file, name, saved);
                 Log(target, $"Profile saved · {name}", [replaced ? "Replaced the profile saved under this name" : null, .. profile.Writes.Select(w => $"{w.Kind}/{w.Key} = {w.Value}")]);
                 return Ok(new { success = true, name, path = file, replaced, profile = saved });
@@ -619,7 +724,18 @@ public sealed partial class BrokerDispatcher
             case "forget":
             {
                 // Value: a saved profile's name. The daily profile is never deleted here.
-                var gone = SavedProfiles.Delete(SavedProfiles.PathBeside(target.Journal.Path), req.Value);
+                if (ClientAsks.Value && AuthorizeProfileChange == null)
+                    return Fail("profile mutation 'forget' requires a host authorization handler; nothing was changed", BrokerCode.CannotWrite);
+                var file = SavedProfiles.PathBeside(target.Journal.Path);
+                if (SavedProfiles.Find(file, req.Value) is not var (savedName, savedProfile))
+                    return Fail($"no profile is saved as '{req.Value}'", BrokerCode.CannotWrite);
+                string preSavedFp = ProfileSnapshot.Fingerprint($"'{savedName}'", savedProfile.Writes);
+                if (AuthorizeClientProfileChange(target, "forget", $"Delete saved profile '{savedName}'", savedProfile.Writes, savedName) is { } denied)
+                    return denied;
+                if (SavedProfiles.Find(file, req.Value) is not var (_, currentSaved)
+                    || ProfileSnapshot.Fingerprint($"'{savedName}'", currentSaved.Writes) != preSavedFp)
+                    return Fail("the saved profile changed while waiting for confirmation: nothing deleted; try again", BrokerCode.CannotWrite);
+                var gone = SavedProfiles.Delete(file, req.Value);
                 if (gone == null) return Fail($"no profile is saved as '{req.Value}'", BrokerCode.CannotWrite);
                 Log(target, $"Saved profile deleted · {gone.Value.Name}", [.. gone.Value.Profile.Writes.Select(w => $"Was: {w.Kind}/{w.Key} = {w.Value}")]);
                 return Ok(new { success = true, name = gone.Value.Name, deleted = gone.Value.Profile });
@@ -629,10 +745,19 @@ public sealed partial class BrokerDispatcher
                 // The daily power limit, set on its own (a trial's wall is never kept): it replaces the profile's, or starts
                 // one. It goes on now, unless the card is at stock (suspended) or a trial runs under its own wall, which
                 // stays until the trial ends.
+                if (ClientAsks.Value && AuthorizeProfileChange == null)
+                    return Fail("profile mutation 'wall' requires a host authorization handler; nothing was changed", BrokerCode.CannotWrite);
                 if (!uint.TryParse(req.Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var mw) || mw == 0)
                     return Fail("wall needs the daily power limit in mW", BrokerCode.BadRequest);
                 string key = PowerCap.Key(PowerRequestKind.Ordinary), value = mw.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                string preToken = DailyStateToken(profile);
+                bool preTrialWall = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial?.PowerMw != null;
+                if (AuthorizeClientProfileChange(target, "wall", $"Set daily power limit to {mw / 1000.0:0.#} W", [new ProfileWrite(PowerCap.Kind, key, value)], $"{mw} mW") is { } denied)
+                    return denied;
+                profile = DailyProfile.Load(path);
                 bool trialWall = Experiment.Load(Experiment.PathBeside(target.Journal.Path))?.Trial?.PowerMw != null;
+                if (ClientAsks.Value && (DailyStateToken(profile) != preToken || trialWall != preTrialWall))
+                    return Fail("the daily profile or trial state changed while waiting for confirmation: daily power limit was not changed; try again", BrokerCode.CannotWrite);
                 BrokerResponse? now = null;
                 if (profile is not { Suspended: true } && !trialWall)
                 {
@@ -640,7 +765,8 @@ public sealed partial class BrokerDispatcher
                     if (!now.Ok) return now;   // refused (out of the board's range): the profile stays as it was
                 }
                 var walled = new DailyProfile(DailyProfile.InWriteOrder([.. (profile?.Writes ?? []).Where(w => w.Kind != PowerCap.Kind || w.Key != key), new ProfileWrite(PowerCap.Kind, key, value)]),
-                    _host.Now, profile?.Suspended ?? false, profile?.History, profile != null ? profile.Vbios : target.Vbios, profile != null ? profile.Driver : target.Driver).Noted(_host.Now, $"daily power limit {mw / 1000.0:0.#} W");
+                    _host.Now, profile?.Suspended ?? false, profile?.History, profile != null ? profile.Vbios : target.Vbios, profile != null ? profile.Driver : target.Driver, Adopted: profile?.Adopted)
+                    .Noted(_host.Now, $"daily power limit {mw / 1000.0:0.#} W");
                 walled.Save(path);
                 Log(target, $"Daily power limit · {mw / 1000.0:0.#} W", [
                     .. (profile?.Writes ?? []).Where(w => w.Kind == PowerCap.Kind && w.Key == key).Select(w => $"Old: {w.Kind}/{w.Key} = {w.Value}"),
@@ -824,14 +950,16 @@ public sealed partial class BrokerDispatcher
                 if (a.ValueKind == JsonValueKind.Object && a.TryGetProperty("writes", out var ws) && ws.ValueKind == JsonValueKind.Array)
                     foreach (var w in ws.EnumerateArray())
                     {
-                        string kind = Text(w, "kind") ?? throw new ArgumentException("a trial write names its kind");
-                        string key = Text(w, "key") ?? throw new ArgumentException("a trial write names its key");
-                        if (WriteRegistry.Find(kind) == null) throw new ArgumentException($"'{kind}' is not a write path (one of: {string.Join(", ", WriteRegistry.Kinds)})");
+                        string rawKind = Text(w, "kind") ?? throw new ArgumentException("a trial write names its kind");
+                        string rawKey = Text(w, "key") ?? throw new ArgumentException("a trial write names its key");
+                        var wp = WriteRegistry.Find(rawKind) ?? throw new ArgumentException($"'{rawKind}' is not a write path (one of: {string.Join(", ", WriteRegistry.Kinds)})");
+                        string kind = wp.Kind;
+                        string key = WriteKeys.Canonicalize(kind, rawKey);
                         if (kind == VfWrites.Kind) throw new ArgumentException("the curve goes in 'curve', not in writes");
-                        if (kind == PowerCap.Kind && key.Equals(PowerCap.Key(PowerRequestKind.Ordinary), StringComparison.OrdinalIgnoreCase))
+                        if (kind == PowerCap.Kind && key == PowerCap.Key(PowerRequestKind.Ordinary))
                             throw new ArgumentException("the board wall goes in 'power_mw', not in writes");
                         // create: the F8 request may be created (the driver cannot delete one; set_power_cap asks the person first).
-                        if (w.TryGetProperty("create", out var cr) && cr.ValueKind == JsonValueKind.True) creates.Add($"{kind}/{key.ToLowerInvariant()}");
+                        if (w.TryGetProperty("create", out var cr) && cr.ValueKind == JsonValueKind.True) creates.Add($"{kind}/{key}");
                         extra.Add(new ProfileWrite(kind, key, Text(w, "value") ?? throw new ArgumentException("a trial write names its value")));
                     }
                 bool keepCurve = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("keep_curve", out var kc) && kc.ValueKind == JsonValueKind.True
@@ -890,7 +1018,7 @@ public sealed partial class BrokerDispatcher
                     if (xbarKhz is { } xk)
                         queue.Add((DailyProfile.Rank(ClockDomainOffsets.Kind), WriteOf(target, ClockDomainOffsets.Kind, ClockDomainOffsets.Key(ClockDomainId.Xbar), Num(xk))));
                     foreach (var w in extra)
-                        queue.Add((DailyProfile.Rank(w.Kind), WriteOf(target, w.Kind, w.Key, w.Value) with { AllowCreate = creates.Contains($"{w.Kind}/{w.Key.ToLowerInvariant()}") }));
+                        queue.Add((DailyProfile.Rank(w.Kind), WriteOf(target, w.Kind, w.Key, w.Value) with { AllowCreate = creates.Contains($"{w.Kind}/{w.Key}") }));
                     foreach (var (_, request) in queue.OrderBy(q => q.Rank))
                     {
                         if (!written.All(x => x.Ok)) break;
@@ -1237,18 +1365,45 @@ public sealed partial class BrokerDispatcher
         return values;
     }
 
+    private BrokerResponse ApplyDailyCase(IGpuTarget target, DailyProfile? profile, string path, string? reason)
+    {
+        var r = Leave(target, Experiment.Survived, "the daily profile went back on", _ =>
+        {
+            var a = ApplyProfile(target, profile, path);
+            return (a, a);
+        }).Answer;
+        Log(target, "Daily profile applied", [reason != null ? $"Reason: {reason}" : null, profile is { Suspended: true } ? "Daily profile suspended: nothing written" : null, .. Writes(r)]);
+        return r;
+    }
+
     /// <summary>"preset" with a saved profile's name: it becomes the daily profile and goes on.</summary>
     private BrokerResponse LoadSaved(IGpuTarget target, string? value, DailyProfile? profile, string path, string? expectedFingerprint)
     {
+        if (ClientAsks.Value && AuthorizeProfileChange == null)
+            return Fail("profile mutation 'preset' requires a host authorization handler; nothing was changed", BrokerCode.CannotWrite);
+        if (ClientAsks.Value && string.IsNullOrWhiteSpace(expectedFingerprint))
+            return Fail("loading a saved profile requires the preview's expected profile fingerprint (profile preview); preview and confirm again", BrokerCode.BadRequest);
         var file = SavedProfiles.PathBeside(target.Journal.Path);
         if (SavedProfiles.Find(file, value) is not var (name, saved))
         {
             var known = SavedProfiles.All(file).Select(p => $"'{p.Name}'").ToList();
             return Fail($"no saved profile named '{value}' ({(known.Count > 0 ? $"saved: {string.Join(", ", known)}" : "none is saved yet: save_profile keeps the daily profile under a name")})", BrokerCode.CannotWrite);
         }
-        if (expectedFingerprint != null && expectedFingerprint != ProfileSnapshot.Fingerprint($"'{value}'", saved.Writes))
+        string preSavedFp = ProfileSnapshot.Fingerprint($"'{value}'", saved.Writes);
+        string preToken = DailyStateToken(profile);
+        if (expectedFingerprint != null && expectedFingerprint != preSavedFp)
             return Fail("the saved profile changed after the preview: nothing loaded; preview and confirm again", BrokerCode.CannotWrite);
-        var loaded = new DailyProfile(DailyProfile.InWriteOrder(saved.Writes), _host.Now, History: profile?.History).On(target.Vbios, target.Driver)
+        if (AuthorizeClientProfileChange(target, "preset", $"Load saved profile '{name}' as the daily profile", saved.Writes, name) is { } denied)
+            return denied;
+        profile = DailyProfile.Load(path);
+        if (SavedProfiles.Find(file, value) is not var (nameNow, savedNow)
+            || ProfileSnapshot.Fingerprint($"'{value}'", savedNow.Writes) != preSavedFp
+            || (ClientAsks.Value && DailyStateToken(profile) != preToken))
+            return Fail("the saved or daily profile changed while waiting for confirmation: nothing loaded; preview and confirm again", BrokerCode.CannotWrite);
+        name = nameNow;
+        saved = savedNow;
+        var loaded = new DailyProfile(DailyProfile.InWriteOrder(saved.Writes), _host.Now, History: profile?.History, Adopted: MergeAdopted(saved.Writes, saved.Adopted, profile?.Adopted))
+            .On(target.Vbios, target.Driver)
             .Noted(_host.Now, $"saved profile '{name}' loaded");
         var r = Leave(target, Experiment.Survived, $"saved profile '{name}' went on", _ => Loading(target, $"saved profile '{name}'", loaded, profile, path)).Answer;
         if (!r.Ok) return r;
@@ -1812,14 +1967,15 @@ public sealed partial class BrokerDispatcher
         var path = WriteRegistry.Find(req.Kind);
         if (path == null) return Fail($"'{req.Kind}' is not a write path (one of: {string.Join(", ", WriteRegistry.Kinds)})", BrokerCode.NotAPath);
         if (req.Key == null || req.Value == null) return Fail("a write names a kind, a key and a value", BrokerCode.BadRequest);
+        string key = WriteKeys.Canonicalize(path.Kind, req.Key);
         var hw = Client(req.EnableSlots);
         var writer = new OwnedWriter(hw, target.Journal, target.Sentinel, _host);
 
         // The origin a path may judge the request against is the journal's, never the request's: what the hardware
         // held before this program first touched the cell (a lowered stock value may be put back, even above the
         // ceiling). Asked before planning, with the same adoption rule the write itself applies.
-        var original = writer.AdoptedOriginal(path.Kind, req.Key);
-        var p = path.Prepare(hw, target.Session, req.Key, req.Value, new WriteOptions(req.AllowCreate, Original: original));
+        var original = writer.AdoptedOriginal(path.Kind, key);
+        var p = path.Prepare(hw, target.Session, key, req.Value, new WriteOptions(req.AllowCreate, Original: original));
         if (p.Plan == null) return Fail(p.CannotWrite ?? $"{p.Cell.Id} cannot be written from '{req.Value}'", BrokerCode.CannotWrite);
 
         var r = writer.Apply(target.Session, p.Cell, p.Plan, req.TakeOver, req.Value);

@@ -21,7 +21,8 @@ public sealed record OwnershipState(
     string Identity,
     int Pid,
     string BootId,
-    IReadOnlyList<OwnedItem> Items)
+    IReadOnlyList<OwnedItem> Items,
+    DateTimeOffset? AdoptedAt = null)
 {
     public const int CurrentVersion = 1;
 }
@@ -80,12 +81,16 @@ public sealed class OwnershipJournal
     {
         var current = Load();
         var items = new List<OwnedItem>();
+        DateTimeOffset? adoptedAt = null;
         if (current != null && current.Pid == _host.Pid && BootIdentity.SameBoot(current.BootId, _host.BootId) && current.Identity == _identity)
+        {
             items.AddRange(current.Items.Where(i => i.Id != item.Id));
+            adoptedAt = current.AdoptedAt;
+        }
         else if (current != null && current.Items.Count > 0 && !(current.Pid == _host.Pid))
             throw new InvalidOperationException($"an ownership record from pid {current.Pid} still exists; run recovery before claiming hardware");
         items.Add(item);
-        Save(items);
+        Save(items, adoptedAt);
     }
 
     /// <summary>Forget an item after its state was given back and verified.</summary>
@@ -95,7 +100,7 @@ public sealed class OwnershipJournal
         if (current == null) return;
         var rest = current.Items.Where(i => i.Id != $"{kind}/{key}").ToList();
         if (rest.Count == 0) Clear();
-        else Save(rest);
+        else Save(rest, current.AdoptedAt);
     }
 
     public void Clear()
@@ -115,7 +120,9 @@ public sealed class OwnershipJournal
         if (s.Identity != _identity) return new RecoveryPlan(RecoveryReason.Foreign, s.Items, $"record belongs to GPU '{s.Identity}', not '{_identity}'");
         if (!BootIdentity.SameBoot(s.BootId, _host.BootId)) return new RecoveryPlan(RecoveryReason.Rebooted, s.Items, "record predates the current boot; hardware was reset by the reboot");
         if (s.Pid == _host.Pid) return new RecoveryPlan(RecoveryReason.OwnedByThisProcess, s.Items, "owned by this process");
-        if (_host.IsProcessAlive(s.Pid, s.Items.Min(i => i.ClaimedAt))) return new RecoveryPlan(RecoveryReason.OwnedByLiveProcess, s.Items, $"pid {s.Pid} is still running");
+        // An adopted record carries the dead predecessor's ClaimedAt on its items; check pid reuse against when this owner took over.
+        DateTimeOffset ownerSince = s.AdoptedAt ?? s.Items.Min(i => i.ClaimedAt);
+        if (_host.IsProcessAlive(s.Pid, ownerSince)) return new RecoveryPlan(RecoveryReason.OwnedByLiveProcess, s.Items, $"pid {s.Pid} is still running");
         return new RecoveryPlan(RecoveryReason.OwnerDied, s.Items, $"pid {s.Pid} is gone (or now a later process); {s.Items.Count} item(s) must be given back");
     }
 
@@ -132,7 +139,7 @@ public sealed class OwnershipJournal
         switch (plan.Reason)
         {
             case RecoveryReason.OwnerDied:
-                Save(plan.Items);
+                Save(plan.Items, _host.Now);
                 return new RecoveryPlan(RecoveryReason.OwnedByThisProcess, plan.Items, $"adopted {plan.Items.Count} item(s) left by a process that is gone");
             case RecoveryReason.Rebooted:
                 Clear();
@@ -142,9 +149,9 @@ public sealed class OwnershipJournal
         }
     }
 
-    private void Save(IReadOnlyList<OwnedItem> items)
+    private void Save(IReadOnlyList<OwnedItem> items, DateTimeOffset? adoptedAt = null)
     {
-        var state = new OwnershipState(OwnershipState.CurrentVersion, _identity, _host.Pid, _host.BootId, items);
+        var state = new OwnershipState(OwnershipState.CurrentVersion, _identity, _host.Pid, _host.BootId, items, adoptedAt);
         AtomicFile.Write(_path, JsonSerializer.SerializeToUtf8Bytes(state, Json));
     }
 }

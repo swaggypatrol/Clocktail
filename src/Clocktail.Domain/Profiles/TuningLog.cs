@@ -41,11 +41,65 @@ public static class TuningLog
     /// <summary>The last <paramref name="entries"/> entries, oldest first; empty when there is no log yet.</summary>
     public static string Tail(string path, int entries)
     {
-        if (!File.Exists(path)) return "";
-        string text;
-        using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-        using (var r = new StreamReader(fs)) text = r.ReadToEnd();
-        var parts = text.Split(Heading);
-        return parts.Length <= entries + 1 ? text.TrimStart() : "## " + string.Join(Heading, parts[^entries..]);
+        if (entries <= 0 || !File.Exists(path)) return "";
+        ReadOnlySpan<byte> headingBytes = "\n## "u8;
+        const int ChunkSize = 64 * 1024;
+        int overlap = headingBytes.Length - 1;
+
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        long length = fs.Length;
+        if (length == 0) return "";
+
+        byte[] buf = new byte[(int)Math.Min(ChunkSize + overlap, length)];
+        long searchEnd = length;
+        int found = 0;
+        long? targetOffset = null;
+
+        while (searchEnd > 0)
+        {
+            long chunkStart = Math.Max(0, searchEnd - ChunkSize);
+            int toRead = (int)(Math.Min(length, searchEnd + overlap) - chunkStart);
+            fs.Position = chunkStart;
+            int read = ReadChunk(fs, buf, toRead);
+            if (read < headingBytes.Length) break;
+
+            int maxStartInBuf = (int)(searchEnd - chunkStart) - 1;
+            int limit = Math.Min(maxStartInBuf, read - headingBytes.Length);
+            if (limit >= 0)
+            {
+                var searchSpan = buf.AsSpan(0, limit + headingBytes.Length);
+                while (searchSpan.Length >= headingBytes.Length)
+                {
+                    int idx = searchSpan.LastIndexOf(headingBytes);
+                    if (idx < 0) break;
+                    found++;
+                    if (found == entries) targetOffset = chunkStart + idx;
+                    else if (found > entries)
+                    {
+                        fs.Position = targetOffset!.Value + 1; // skip leading '\n' so result starts at "## "
+                        using var tailReader = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: false);
+                        return tailReader.ReadToEnd();
+                    }
+                    searchSpan = searchSpan[..idx];
+                }
+            }
+            searchEnd = chunkStart;
+        }
+
+        fs.Position = 0;
+        using var fullReader = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return fullReader.ReadToEnd().TrimStart();
+    }
+
+    private static int ReadChunk(FileStream stream, byte[] buffer, int count)
+    {
+        int total = 0;
+        while (total < count)
+        {
+            int n = stream.Read(buffer, total, count - total);
+            if (n == 0) break;
+            total += n;
+        }
+        return total;
     }
 }

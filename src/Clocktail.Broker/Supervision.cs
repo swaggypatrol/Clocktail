@@ -40,7 +40,9 @@ internal static partial class Supervision
         {
             if (DriverLoss.Why(mgr.Nvml, sessions) is { } why)
             {
+                if (ct.IsCancellationRequested) return;
                 bool quiet = dispatcher.Close(HandOverWait);
+                if (ct.IsCancellationRequested) return;
                 log($"the driver this broker opened is gone ({why}); {(quiet ? "" : "a write is still waiting on it; ")}handing over to a fresh broker (exit {Supervisor.DriverLost})");
                 EndNow(Supervisor.DriverLost);
             }

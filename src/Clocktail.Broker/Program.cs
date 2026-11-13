@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Text.Json;
 using Clocktail.Broker;
@@ -100,170 +100,254 @@ static int Run()
     WorkerProcess.WriteUtf8WhenRedirected();   // under the supervisor, this output is broker.log's
     WorkerProcess.KeepOutputFromChildren();    // and it stays the supervisor's: PresentMon does not inherit it
 
-    using var mgr = GpuManager.Open();
-    var host = new SystemHost();
-    var hw = new NvClient(mgr.NvApi);                       // the default write whitelist: exactly what the CLI would use
-    var judgePath = BrokerPaths.JudgeLockPath();
-    // The run holding judge.lock, if any; BrokerDispatcher.Judge lets through its own writes (its lease) and the rest of
-    // an operation the run waits for.
-    string trace = "";
-    var decide = BrokerDispatcher.Judge(() => JudgeLock.Live(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out trace));
-    Func<string?> judge = () =>
-    {
-        var busy = decide();
-        Console.WriteLine($"{DateTimeOffset.Now:u} judge: {trace} -> {busy ?? "go ahead"}");   // one line per look
-        return busy;
-    };
-    var targets = new WindowsGpuTargets(mgr, host, judge);  // each sentinel asks the judge again once it is on disk
-    var dispatcher = new BrokerDispatcher(hw, targets, host, canWrite: true, judge, new FrameCapture());
-    dispatcher.GameLeaseHeld = run => JudgeLock.Live(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out _)?.RunId == run;
-    var server = new BrokerServer(
-        () => OperatingSystem.IsWindows() ? PipeFactory.Create(BrokerTransport.PipeName) : throw new PlatformNotSupportedException("the broker's pipe ACL is Windows-only"),
-        dispatcher);
-
-    using var cts = new CancellationTokenSource();
-    Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
-    AppDomain.CurrentDomain.ProcessExit += (_, _) => cts.Cancel();
-
-    Console.WriteLine($"{DateTimeOffset.Now:u} broker up: pid {host.Pid}, boot {host.BootId}, pipe {BrokerTransport.PipeName}, gpus [{string.Join(", ", targets.Ids)}], state {BrokerPaths.StateRoot()}");
+    var mgr = GpuManager.Open();
     void Log(string line) => Console.WriteLine($"{DateTimeOffset.Now:u} {line}");
     // Nothing that fails in the background vanishes: an exception that ends the process is in broker.log before the
     // supervisor starts a new worker, a one-off task's is logged, and a loop's is logged and the loop started again.
     AppDomain.CurrentDomain.UnhandledException += (_, e) => Log($"unhandled exception, the worker ends: {e.ExceptionObject}");
     TaskScheduler.UnobservedTaskException += (_, e) => { Log($"a background task failed: {e.Exception.GetBaseException()}"); e.SetObserved(); };
-    void Once(string name, Action work) => _ = Task.Run(work).ContinueWith(t => Log($"{name} failed: {t.Exception!.GetBaseException()}"), TaskContinuationOptions.OnlyOnFaulted);
-    void KeepRunning(string name, Func<Task> loop) => _ = Task.Run(async () =>
-    {
-        while (!cts.IsCancellationRequested)
-        {
-            try { await loop().ConfigureAwait(false); return; }
-            catch (Exception e) { Log($"{name} failed, starting it again in 5 s: {e}"); }
-            try { await Task.Delay(TimeSpan.FromSeconds(5), cts.Token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { return; }
-        }
-    });
-    // A bugcheck or a power loss while the daily profile was held leaves no window open, only these events.
-    string? unclean = null;
-    try { unclean = UncleanShutdown.SinceBoot(); }
-    catch (Exception e) when (e is InvalidOperationException or DllNotFoundException or EntryPointNotFoundException) { Log($"unclean shutdowns will not be seen: {e.Message}"); }
-    if (unclean != null) Log($"the last boot ended uncleanly ({unclean})");
-    var crashed = dispatcher.SettleAll(unclean);            // a crash while holding cells: on record before any client asks
-    foreach (var (id, path) in crashed)
-        Log($"gpu {id}: the machine went down holding cells (a write window open, or an unclean shutdown); recorded in {path}");
 
-    // A driver reset keeps every offset on the card: give back what is held, through the same recovery op a client would send.
-    // A reset the worker before this one never answered (it died in the hang, or handed over) is answered at start.
-    int? ResetsSince(DateTime sinceUtc)
+    var lifetime = new BrokerLifetime(Log);
+    ConsoleCancelEventHandler cancelHandler = (_, e) => { e.Cancel = true; lifetime.BeginShutdown(); };
+    EventHandler exitHandler = (_, _) => lifetime.BeginShutdown();
+    Console.CancelKeyPress += cancelHandler;
+    AppDomain.CurrentDomain.ProcessExit += exitHandler;
+
+    BrokerDispatcher? dispatcher = null;
+    VfHistoryRecorder? vfHistory = null;
+    FlightSampler? sampler = null;
+    SystemLogWatch? watch = null, wakeWatch = null;
+
+    try
     {
-        if (!OperatingSystem.IsWindows()) return null;
-        try { var c = SystemLog.CountTarget(mgr.Gpus.Single().Target!, sinceUtc); return c.Target + c.Ambiguous; }
-        catch (InvalidOperationException) { return null; }
-    }
-    var responder = new DriverResetResponder(dispatcher.Dispatch, targets.Ids, Log, () => DateTimeOffset.Now, Thread.Sleep, id => Idle(mgr, targets, id), ResetsSince);
-    KeepRunning("the driver-reset responder", () => responder.RunAsync(cts.Token));
-    // The daily profile goes on at start once the GPU is idle, unchanged; a crash before it (a window open, an unclean
-    // shutdown) is recorded first.
-    KeepRunning("startup and interrupted game recovery", async () =>
-    {
-        var target = targets.Resolve(targets.Ids.Single())!;
-        string recovery = Clocktail.Domain.Game.GameSession.PathBeside(target.Journal.Path);
-        // The start runs once, whether or not a game recovery it ran inside then landed.
-        var start = new StartupRecovery(() => responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList()));
-        while (!cts.IsCancellationRequested)
+        var host = new SystemHost();
+        var hw = new NvClient(mgr.NvApi);                       // the default write whitelist: exactly what the CLI would use
+        var judgePath = BrokerPaths.JudgeLockPath();
+        // The run holding judge.lock, if any; BrokerDispatcher.Judge lets through its own writes (its lease) and the rest of
+        // an operation the run waits for.
+        string trace = "";
+        var decide = BrokerDispatcher.Judge(() => JudgeLock.Live(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out trace));
+        Func<string?> judge = () =>
         {
-            // A live job holds the card mutex, including while it waits for reset recovery. Never race it.
-            start.Pass(File.Exists(recovery) || File.Exists(AtomicFile.BackupPath(recovery)),
-                startup => RecoverGame(dispatcher, target.StableId, host, Log, startup));
-            try { await Task.Delay(TimeSpan.FromSeconds(5), cts.Token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { return; }
+            var busy = decide();
+            Console.WriteLine($"{DateTimeOffset.Now:u} judge: {trace} -> {busy ?? "go ahead"}");   // one line per look
+            return busy;
+        };
+        var targets = new WindowsGpuTargets(mgr, host, judge);  // each sentinel asks the judge again once it is on disk
+        dispatcher = new BrokerDispatcher(hw, targets, host, canWrite: true, judge, new FrameCapture());
+        dispatcher.AuthorizeProfileChange = request => ProfileConsentDialog.Confirm(request);
+        dispatcher.GameLeaseHeld = run => JudgeLock.Live(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out _)?.RunId == run;
+        var server = new BrokerServer(
+            () => OperatingSystem.IsWindows() ? PipeFactory.Create(BrokerTransport.PipeName) : throw new PlatformNotSupportedException("the broker's pipe ACL is Windows-only"),
+            dispatcher);
+
+        Console.WriteLine($"{DateTimeOffset.Now:u} broker up: pid {host.Pid}, boot {host.BootId}, pipe {BrokerTransport.PipeName}, gpus [{string.Join(", ", targets.Ids)}], state {BrokerPaths.StateRoot()}");
+        void Once(string name, Action work) => lifetime.TryStartOnce(name, work);
+        void KeepRunning(string name, Func<CancellationToken, Task> loop) => lifetime.TryKeepRunning(name, loop);
+        // A bugcheck or a power loss while the daily profile was held leaves no window open, only these events.
+        string? unclean = null;
+        try { unclean = UncleanShutdown.SinceBoot(); }
+        catch (Exception e) when (e is InvalidOperationException or DllNotFoundException or EntryPointNotFoundException) { Log($"unclean shutdowns will not be seen: {e.Message}"); }
+        if (unclean != null) Log($"the last boot ended uncleanly ({unclean})");
+        var crashed = dispatcher.SettleAll(unclean);            // a crash while holding cells: on record before any client asks
+        foreach (var (id, path) in crashed)
+            Log($"gpu {id}: the machine went down holding cells (a write window open, or an unclean shutdown); recorded in {path}");
+
+        // A driver reset keeps every offset on the card: give back what is held, through the same recovery op a client would send.
+        // A reset the worker before this one never answered (it died in the hang, or handed over) is answered at start.
+        int? ResetsSince(DateTime sinceUtc)
+        {
+            if (!OperatingSystem.IsWindows()) return null;
+            try { var c = SystemLog.CountTarget(mgr.Gpus.Single().Target!, sinceUtc); return c.Target + c.Ambiguous; }
+            catch (InvalidOperationException) { return null; }
         }
-    });
-    // The last 60 s of each GPU in memory; on a reset the window is saved and its crash point steps the curve there.
-    // The same looks above 825 mV NVVDD, as time, measured voltage and measured clock, to vf-history\ beside each journal:
-    // whether or not any client is connected (VfHistoryRecorder).
-    var vfHistory = new VfHistoryRecorder(
-        targets.Ids.ToDictionary(id => id, id => VfHistoryFile.DirBeside(targets.Resolve(id)!.Journal.Path), StringComparer.OrdinalIgnoreCase), Log);
-    var sampler = new FlightSampler(mgr, hw, targets.Ids.Select(id => (id, targets.Resolve(id)!.Session)).ToList(), vfHistory);
-    KeepRunning("the flight recorder", () => sampler.RunAsync(cts.Token));
-    KeepRunning("the V/F history writer", () => vfHistory.RunAsync(() => DateTimeOffset.Now, cts.Token));
-    dispatcher.HistoryStatus = () => vfHistory.Status.Wire();
-    dispatcher.HungReason = id => sampler.Recorders.TryGetValue(id, out var r) ? FlightRecorder.HungNow(r.Freeze(), DateTimeOffset.Now) : null;
-    // What only a watching agent may hold goes back when no agent has been heard from for 5 minutes.
-    var lease = new TrialLease(dispatcher.Dispatch, targets.Ids, () => dispatcher.LastAlive, Log);
-    KeepRunning("the trial lease", async () =>
-    {
-        while (!cts.IsCancellationRequested)
+        var responder = new DriverResetResponder(dispatcher.Dispatch, targets.Ids, Log, () => DateTimeOffset.Now, Thread.Sleep, id => Idle(mgr, targets, id), ResetsSince);
+        KeepRunning("the driver-reset responder", responder.RunAsync);
+        // The daily profile goes on at start once the GPU is idle, unchanged; a crash before it (a window open, an unclean
+        // shutdown) is recorded first.
+        KeepRunning("startup and interrupted game recovery", async ct =>
         {
-            lease.Look(DateTimeOffset.Now);
-            try { await Task.Delay(TimeSpan.FromSeconds(30), cts.Token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { return; }
-        }
-    });
-    // A fixed fan duty stays as the trial set it: the service does not watch the temperature and take it back. It goes
-    // back with the trial (back_to_daily, end_session, a crash) and when the agent goes quiet (the trial lease above).
-    // The driver this process opened can go away under it (a device restart, a driver update), and nothing it holds can be
-    // rebound safely after that: once a session or NVML says so, the broker hands over to a fresh worker, which puts the
-    // daily profile back on as at any start.
-    _ = Supervision.WatchDriver(mgr, targets.Ids.Select(id => targets.Resolve(id)!.Session).ToList(), dispatcher, Log, cts.Token);
-    string driver = $"{mgr.Driver.Version / 100}.{mgr.Driver.Version % 100:00} {mgr.Driver.Branch}";
-    // One reset can log many events (a device restart of a hung GPU, 2026-10-19 21:48Z: nine 153s in 100 ms, then four
-    // more over 18 s, each of which saved a trace: eight identical lines in one second, and two saves of one file that
-    // collided); the first of a burst saves the trace and signals the responder, which answers a burst once anyway.
-    var bursts = new ResetBursts(ResetBursts.DefaultQuiet);
-    void OnReset(string evidence)
-    {
-        var seen = DateTimeOffset.Now;
-        // Every event of a burst: the V/F history withholds the looks of the hang it ends (idempotent, no I/O).
-        foreach (var (id, r) in sampler.Recorders) vfHistory.Reset(id, r.Freeze(), seen);
-        if (!bursts.Starts(seen)) return;
-        var windows = sampler.Recorders.ToDictionary(r => r.Key, r => r.Value.Freeze());   // before the recovered driver adds its own looks
-        Once("the crash trace", () =>
-        {
-            var crashUv = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
-            var hung = new Dictionary<string, (DateTimeOffset Answered, DateTimeOffset Stopped)>(StringComparer.OrdinalIgnoreCase);
-            var details = new List<string>();
-            try
+            var target = targets.Resolve(targets.Ids.Single())!;
+            string recovery = Clocktail.Domain.Game.GameSession.PathBeside(target.Journal.Path);
+            // The start runs once, whether or not a game recovery it ran inside then landed.
+            var start = new StartupRecovery(() => responder.ApplyAtStart(crashed.Select(c => c.GpuId).ToList()));
+            while (!ct.IsCancellationRequested)
             {
-                foreach (var (id, window) in windows)
-                {
-                    // Whose crash it is: the trial on the card when the GPU stopped answering; with no hang in the window, 2 s
-                    // before the reset was seen (the driver logs one only after a hang at least that long). A later burst of
-                    // one reset is answered as a reset of its own: kept apart, a trial written between them can take a crash
-                    // it did not cause; merged, a new trial's own crash (at light load or idle, which leaves no hang to find)
-                    // would go unrecorded, the worse of the two.
-                    hung[id] = FlightRecorder.Hang(window, seen) ?? (seen - FlightRecorder.HangDetectAtLeast, seen - FlightRecorder.HangDetectAtLeast);
-                    var point = FlightRecorder.Pick(window, seen);
-                    try
-                    {
-                        var trace = FlightRecorder.Save(targets.Resolve(id)!.Journal.Path, seen, evidence, driver, point, window);
-                        Log($"gpu {id}: crash trace {trace}: {(point == null ? "no loaded sample before the hang" : $"{point.Describe()}, {point.Why}")}");
-                    }
-                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log($"gpu {id}: crash trace not saved: {e.Message}"); }
-                    if (point?.Sample.CoreMv is { } mv) { crashUv[id] = mv * 1000; details.Add(point.Describe()); }
-                }
-            }
-            finally   // the trace is for the record; the give-back must happen whatever became of it
-            {
-                responder.Signal(details.Count == 0 ? $"{evidence}, driver {driver}" : $"{evidence}, driver {driver}; {string.Join("; ", details)}", crashUv, hung);
+                // A live job holds the card mutex, including while it waits for reset recovery. Never race it.
+                start.Pass(File.Exists(recovery) || File.Exists(AtomicFile.BackupPath(recovery)),
+                    startup => RecoverGame(dispatcher, target.StableId, host, Log, startup));
+                try { await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
             }
         });
-    }
-    SystemLogWatch? watch = null, wakeWatch = null;
-    try { watch = new SystemLogWatch(SystemLog.DriverResetQuery, "nvlddmkm 153 / Display 4101 in the System log", OnReset, Log, xml => ResetAttribution.ShouldRecover(xml, mgr.Gpus.Single().Target!, DisplayInventory.Read())); Log("watching the System log for driver resets (another vendor's driver is ignored)"); }
-    catch (Exception e) when (e is InvalidOperationException or DllNotFoundException or EntryPointNotFoundException) { Log($"driver resets will not be answered: {e.Message}"); }
-    // Waking from sleep: whether the card keeps what the profile wrote is not measured (sleep is off on the reference
-    // machine), so the profile goes on again once the GPU is idle; only what differs is written, and a trial is left alone.
-    var wakes = new ResetBursts(TimeSpan.FromSeconds(30));
-    void OnWake(string evidence) { if (wakes.Starts(DateTimeOffset.Now)) Once("the daily profile after sleep", () => responder.AfterSleep(evidence)); }
-    try { wakeWatch = new SystemLogWatch(SystemLog.WakeQuery, "Kernel-Power 107 / 507 (the PC woke up)", OnWake, Log); Log("watching the System log for wake-ups"); }
-    catch (Exception e) when (e is InvalidOperationException or DllNotFoundException or EntryPointNotFoundException) { Log($"wake-ups will not be answered: {e.Message}"); }
+        // The last 60 s of each GPU in memory; on a reset the window is saved and its crash point steps the curve there.
+        // The same looks above 825 mV NVVDD, as time, measured voltage and measured clock, to vf-history\ beside each journal:
+        // whether or not any client is connected (VfHistoryRecorder).
+        vfHistory = new VfHistoryRecorder(
+            targets.Ids.ToDictionary(id => id, id => VfHistoryFile.DirBeside(targets.Resolve(id)!.Journal.Path), StringComparer.OrdinalIgnoreCase), Log);
+        sampler = new FlightSampler(mgr, hw, targets.Ids.Select(id => (id, targets.Resolve(id)!.Session)).ToList(), vfHistory);
+        KeepRunning("the flight recorder", sampler.RunAsync);
+        KeepRunning("the V/F history writer", ct => vfHistory.RunAsync(() => DateTimeOffset.Now, ct));
+        dispatcher.HistoryStatus = () => vfHistory.Status.Wire();
+        dispatcher.HungReason = id => sampler.Recorders.TryGetValue(id, out var r) ? FlightRecorder.HungNow(r.Freeze(), DateTimeOffset.Now) : null;
+        // What only a watching agent may hold goes back when no agent has been heard from for 5 minutes.
+        var lease = new TrialLease(dispatcher.Dispatch, targets.Ids, () => dispatcher.LastAlive, Log);
+        KeepRunning("the trial lease", async ct =>
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                lease.Look(DateTimeOffset.Now);
+                try { await Task.Delay(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+            }
+        });
+        // A fixed fan duty stays as the trial set it: the service does not watch the temperature and take it back. It goes
+        // back with the trial (back_to_daily, end_session, a crash) and when the agent goes quiet (the trial lease above).
+        // The driver this process opened can go away under it (a device restart, a driver update), and nothing it holds can be
+        // rebound safely after that: once a session or NVML says so, the broker hands over to a fresh worker, which puts the
+        // daily profile back on as at any start.
+        var sessions = targets.Ids.Select(id => targets.Resolve(id)!.Session).ToList();
+        lifetime.TryStartAsync("the driver watch", ct => OperatingSystem.IsWindows()
+            ? Supervision.WatchDriver(mgr, sessions, dispatcher, Log, ct)
+            : Task.CompletedTask);
+        string driver = $"{mgr.Driver.Version / 100}.{mgr.Driver.Version % 100:00} {mgr.Driver.Branch}";
+        // One reset can log many events (a device restart of a hung GPU, 2026-10-19 21:48Z: nine 153s in 100 ms, then four
+        // more over 18 s, each of which saved a trace: eight identical lines in one second, and two saves of one file that
+        // collided); the first of a burst saves the trace and signals the responder, which answers a burst once anyway.
+        var bursts = new ResetBursts(ResetBursts.DefaultQuiet);
+        void OnReset(string evidence)
+        {
+            if (!lifetime.TryEnterCallback()) return;
+            try
+            {
+                var seen = DateTimeOffset.Now;
+                // Every event of a burst: the V/F history withholds the looks of the hang it ends (idempotent, no I/O).
+                foreach (var (id, r) in sampler.Recorders) vfHistory.Reset(id, r.Freeze(), seen);
+                if (!bursts.Starts(seen)) return;
+                var windows = sampler.Recorders.ToDictionary(r => r.Key, r => r.Value.Freeze());   // before the recovered driver adds its own looks
+                Once("the crash trace", () =>
+                {
+                    var crashUv = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+                    var hung = new Dictionary<string, (DateTimeOffset Answered, DateTimeOffset Stopped)>(StringComparer.OrdinalIgnoreCase);
+                    var details = new List<string>();
+                    try
+                    {
+                        foreach (var (id, window) in windows)
+                        {
+                            // Whose crash it is: the trial on the card when the GPU stopped answering; with no hang in the window, 2 s
+                            // before the reset was seen (the driver logs one only after a hang at least that long). A later burst of
+                            // one reset is answered as a reset of its own: kept apart, a trial written between them can take a crash
+                            // it did not cause; merged, a new trial's own crash (at light load or idle, which leaves no hang to find)
+                            // would go unrecorded, the worse of the two.
+                            hung[id] = FlightRecorder.Hang(window, seen) ?? (seen - FlightRecorder.HangDetectAtLeast, seen - FlightRecorder.HangDetectAtLeast);
+                            var point = FlightRecorder.Pick(window, seen);
+                            try
+                            {
+                                var trace = FlightRecorder.Save(targets.Resolve(id)!.Journal.Path, seen, evidence, driver, point, window);
+                                Log($"gpu {id}: crash trace {trace}: {(point == null ? "no loaded sample before the hang" : $"{point.Describe()}, {point.Why}")}");
+                            }
+                            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log($"gpu {id}: crash trace not saved: {e.Message}"); }
+                            if (point?.Sample.CoreMv is { } mv) { crashUv[id] = mv * 1000; details.Add(point.Describe()); }
+                        }
+                    }
+                    finally   // the trace is for the record; the give-back must happen whatever became of it
+                    {
+                        responder.Signal(details.Count == 0 ? $"{evidence}, driver {driver}" : $"{evidence}, driver {driver}; {string.Join("; ", details)}", crashUv, hung);
+                    }
+                });
+            }
+            finally
+            {
+                lifetime.ExitCallback();
+            }
+        }
+        try
+        {
+            watch = new SystemLogWatch(
+                SystemLog.DriverResetQuery,
+                "nvlddmkm 153 / Display 4101 in the System log",
+                OnReset,
+                Log,
+                xml =>
+                {
+                    if (!lifetime.TryEnterCallback()) return false;
+                    try { return ResetAttribution.ShouldRecover(xml, mgr.Gpus.Single().Target!, DisplayInventory.Read()); }
+                    finally { lifetime.ExitCallback(); }
+                });
+            Log("watching the System log for driver resets (another vendor's driver is ignored)");
+        }
+        catch (Exception e) when (e is InvalidOperationException or DllNotFoundException or EntryPointNotFoundException) { Log($"driver resets will not be answered: {e.Message}"); }
+        // Waking from sleep: whether the card keeps what the profile wrote is not measured (sleep is off on the reference
+        // machine), so the profile goes on again once the GPU is idle; only what differs is written, and a trial is left alone.
+        var wakes = new ResetBursts(TimeSpan.FromSeconds(30));
+        void OnWake(string evidence)
+        {
+            if (!lifetime.TryEnterCallback()) return;
+            try
+            {
+                if (wakes.Starts(DateTimeOffset.Now)) Once("the daily profile after sleep", () => responder.AfterSleep(evidence));
+            }
+            finally
+            {
+                lifetime.ExitCallback();
+            }
+        }
+        try { wakeWatch = new SystemLogWatch(SystemLog.WakeQuery, "Kernel-Power 107 / 507 (the PC woke up)", OnWake, Log); Log("watching the System log for wake-ups"); }
+        catch (Exception e) when (e is InvalidOperationException or DllNotFoundException or EntryPointNotFoundException) { Log($"wake-ups will not be answered: {e.Message}"); }
 
-    server.RunAsync(cts.Token).GetAwaiter().GetResult();
-    watch?.Dispose();
-    wakeWatch?.Dispose();
-    // The V/F looks still held go out (up to any doubt the window raises), for at most 3 s: a stuck disk does not hold the exit.
-    try { Task.Run(() => vfHistory.Shutdown(DateTimeOffset.Now, id => sampler.Recorders.TryGetValue(id, out var r) ? r.Freeze() : null)).Wait(TimeSpan.FromSeconds(3)); }
-    catch (Exception e) { Log($"vf history: the last write did not finish: {e.GetBaseException().Message}"); }
+        // Track clients too: RunAsync drains its in-flight dispatches, which may be inside a driver call.
+        // Cancellation must reach our bounded shutdown even when that drain cannot finish.
+        var serverDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lifetime.TryStartAsync("the pipe server", async ct =>
+        {
+            try
+            {
+                await server.RunAsync(ct).ConfigureAwait(false);
+                serverDone.TrySetResult();
+            }
+            catch (Exception e) { serverDone.TrySetException(e); }
+        });
+        _ = serverDone.Task.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        try { serverDone.Task.WaitAsync(lifetime.Token).GetAwaiter().GetResult(); }
+        catch (OperationCanceledException) when (lifetime.Token.IsCancellationRequested) { }
+    }
+    finally
+    {
+        Console.CancelKeyPress -= cancelHandler;
+        AppDomain.CurrentDomain.ProcessExit -= exitHandler;
+        lifetime.ShutdownAndRelease(
+            BrokerLifetime.DefaultCloseWait,
+            BrokerLifetime.DefaultDrainWait,
+            stopWatchers: () =>
+            {
+                if (!OperatingSystem.IsWindows()) return;
+                try { watch?.Dispose(); }
+                catch (Exception e) { Log($"stopping driver reset watch failed: {e.Message}"); }
+                try { wakeWatch?.Dispose(); }
+                catch (Exception e) { Log($"stopping wake watch failed: {e.Message}"); }
+            },
+            closeDispatcher: dispatcher == null ? null : wait => dispatcher.Close(wait),
+            flushVfHistory: vfHistory == null ? null : () =>
+            {
+                // The V/F looks still held go out (up to any doubt the window raises), for at most 3 s: a stuck disk does not hold the exit.
+                var flushTask = Task.Run(() => vfHistory.Shutdown(DateTimeOffset.Now, id => sampler?.Recorders.TryGetValue(id, out var r) == true ? r.Freeze() : null));
+                try
+                {
+                    if (!flushTask.Wait(TimeSpan.FromSeconds(3)))
+                    {
+                        Log("vf history: the last write did not finish within 3 s");
+                        _ = flushTask.ContinueWith(
+                            t => Log($"vf history: the last write did not finish: {t.Exception!.GetBaseException().Message}"),
+                            CancellationToken.None,
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                            TaskScheduler.Default);
+                    }
+                }
+                catch (Exception e) { Log($"vf history: the last write did not finish: {e.GetBaseException().Message}"); }
+            },
+            disposeResources: () => mgr.Dispose());
+    }
     Console.WriteLine($"{DateTimeOffset.Now:u} broker down");
     return 0;
 }
@@ -370,8 +454,7 @@ static partial class NativeConsole
     public static void Detach(string logPath)
     {
         FreeConsole();
-        Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-        var w = new StreamWriter(new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) { AutoFlush = true };
+        var w = new RotatingLogWriter(logPath);
         Console.SetOut(w);
         Console.SetError(w);
     }

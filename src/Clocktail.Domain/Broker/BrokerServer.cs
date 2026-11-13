@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Text.Json;
 
 namespace Clocktail.Domain.Broker;
 
@@ -12,63 +13,165 @@ namespace Clocktail.Domain.Broker;
 /// connected and never sent its request (or a write waiting on the driver) left a read-only `ownership` query from
 /// the UI hanging with no answer. Concurrency is safe because the dispatcher already serializes what must be
 /// serialized (one write window); reads touch only files written atomically. A client gets
-/// <see cref="RequestTimeout"/> to send its request, after which the connection is dropped.
+/// <see cref="RequestTimeout"/> to send its request and <see cref="ResponseTimeout"/> to receive the answer,
+/// after which the connection is dropped.
 /// </summary>
-public sealed class BrokerServer(Func<NamedPipeServerStream> listen, BrokerDispatcher dispatcher)
+public sealed class BrokerServer
 {
     public static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
+    public static readonly TimeSpan ResponseTimeout = TimeSpan.FromSeconds(5);
+    public static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(100);
+
+    private readonly Func<NamedPipeServerStream> _listen;
+    private readonly BrokerDispatcher _dispatcher;
+    private readonly TimeSpan _requestTimeout;
+    private readonly TimeSpan _responseTimeout;
+    private readonly TimeSpan _retryDelay;
+
+    public BrokerServer(
+        Func<NamedPipeServerStream> listen,
+        BrokerDispatcher dispatcher,
+        TimeSpan? requestTimeout = null,
+        TimeSpan? responseTimeout = null,
+        TimeSpan? retryDelay = null)
+    {
+        ArgumentNullException.ThrowIfNull(listen);
+        ArgumentNullException.ThrowIfNull(dispatcher);
+        _listen = listen;
+        _dispatcher = dispatcher;
+        _requestTimeout = requestTimeout ?? RequestTimeout;
+        _responseTimeout = responseTimeout ?? ResponseTimeout;
+        _retryDelay = retryDelay ?? RetryDelay;
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(_requestTimeout, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(_responseTimeout, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfLessThan(_retryDelay, TimeSpan.Zero);
+    }
 
     public async Task RunAsync(CancellationToken ct)
     {
         var inFlight = new List<Task>();
-        while (!ct.IsCancellationRequested)
+        try
         {
-            NamedPipeServerStream? pipe = null;
-            try
+            while (!ct.IsCancellationRequested)
             {
-                pipe = listen();
-                await pipe.WaitForConnectionAsync(ct);
+                NamedPipeServerStream? pipe = null;
+                try
+                {
+                    pipe = _listen();
+                    await pipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    pipe?.Dispose();
+                    break;
+                }
+                catch (IOException)
+                {
+                    pipe?.Dispose();
+                    if (!await DelayRetryAsync(ct).ConfigureAwait(false)) break;
+                    continue;
+                }
+                catch
+                {
+                    pipe?.Dispose();
+                    throw;
+                }
+                inFlight.RemoveAll(t => t.IsCompleted);
+                var served = Task.Run(() => ServeAsync(pipe, ct));
+                ObserveFault(served);
+                inFlight.Add(served);
             }
-            catch (OperationCanceledException) { pipe?.Dispose(); break; }
-            catch (IOException) { pipe?.Dispose(); continue; }   // a broken connection is not a reason to stop the broker
-            inFlight.RemoveAll(t => t.IsCompleted);
-            inFlight.Add(Task.Run(() => Serve(pipe)));
         }
-        await Task.WhenAll(inFlight);
+        finally
+        {
+            // The host tracks this task before unloading native libraries. Never abandon an active
+            // dispatch (including read-only GPU queries) if the next listener fails unexpectedly.
+            await Task.WhenAll(inFlight).ConfigureAwait(false);
+        }
     }
 
     /// <summary>Accept and answer exactly one connection (tests use it to drive the loop one step at a time).</summary>
     public async Task ServeOneAsync(CancellationToken ct)
     {
-        var pipe = listen();
-        await pipe.WaitForConnectionAsync(ct);
-        await Task.Run(() => Serve(pipe), ct);
+        var pipe = _listen();
+        try
+        {
+            await pipe.WaitForConnectionAsync(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            pipe.Dispose();
+            throw;
+        }
+        await Task.Run(() => ServeAsync(pipe, ct)).ConfigureAwait(false);
     }
 
-    private void Serve(NamedPipeServerStream pipe)
+    private async Task<bool> DelayRetryAsync(CancellationToken ct)
+    {
+        if (_retryDelay == TimeSpan.Zero) return !ct.IsCancellationRequested;
+        try
+        {
+            await Task.Delay(_retryDelay, ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    private async Task ServeAsync(NamedPipeServerStream pipe, CancellationToken ct)
     {
         using (pipe)
         {
             try
             {
-                var read = Task.Run(() => BrokerTransport.ReadRequest(pipe));
-                if (!read.Wait(RequestTimeout)) return;   // disposing the pipe ends the stalled read
+                BrokerRequest req;
+                try
+                {
+                    var read = Task.Run(() => BrokerTransport.ReadRequest(pipe));
+                    ObserveFault(read);
+                    req = await read.WaitAsync(_requestTimeout, ct).ConfigureAwait(false);
+                }
+                catch (Exception bad) when (bad is InvalidDataException or JsonException)
+                {
+                    await WriteResponseAsync(pipe, new BrokerResponse(false, bad.Message, Code: BrokerCode.BadRequest), ct).ConfigureAwait(false);
+                    return;
+                }
+
                 BrokerResponse resp;
-                try { resp = dispatcher.FromClient(read.Result); }
+                try { resp = _dispatcher.FromClient(req); }
                 catch (Exception e) { resp = new BrokerResponse(false, e.Message); }   // a dispatch bug answers the client, never kills the broker
-                BrokerTransport.WriteResponse(pipe, resp);
+                await WriteResponseAsync(pipe, resp, ct).ConfigureAwait(false);
             }
-            catch (AggregateException e) when (e.InnerException is InvalidDataException bad)
-            {
-                try { BrokerTransport.WriteResponse(pipe, new BrokerResponse(false, bad.Message)); } catch (IOException) { }
-            }
-            catch (AggregateException e) when (e.InnerException is IOException or ObjectDisposedException) { }
-            catch (IOException) { }
-            catch (ObjectDisposedException) { }
+            catch (Exception e) when (e is IOException or ObjectDisposedException or TimeoutException or OperationCanceledException) { }
             finally
             {
                 if (pipe.IsConnected) try { pipe.Disconnect(); } catch (IOException) { } catch (ObjectDisposedException) { }
             }
         }
     }
+
+    private async Task WriteResponseAsync(NamedPipeServerStream pipe, BrokerResponse resp, CancellationToken ct)
+    {
+        try
+        {
+            var write = Task.Run(() => BrokerTransport.WriteResponse(pipe, resp));
+            ObserveFault(write);
+            await write.WaitAsync(_responseTimeout, ct).ConfigureAwait(false);
+        }
+        catch (InvalidDataException bad)
+        {
+            var fallback = Task.Run(() => BrokerTransport.WriteResponse(pipe, new BrokerResponse(false, bad.Message, Code: BrokerCode.Failed)));
+            ObserveFault(fallback);
+            await fallback.WaitAsync(_responseTimeout, ct).ConfigureAwait(false);
+        }
+    }
+
+    private static void ObserveFault(Task task) =>
+        _ = task.ContinueWith(
+            static t => _ = t.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
 }
