@@ -23,6 +23,9 @@ public class BrokerDispatcherTests : IDisposable
     private const int Board = 0;
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "clocktail-tests", Guid.NewGuid().ToString("n"));
     private readonly FakeHost _host = new();
+    private readonly MemoryProfileApprovals _approvals = new();
+    private void ApproveFixtureDaily() => _approvals.Remember("gpu-A", ProfileApproval.Daily,
+        DailyProfile.Load(DailyProfile.PathBeside(_journal.Path))!);
     private readonly OwnershipJournal _journal;
     private readonly ApplySentinel _sentinel;
     private readonly GpuSession _gpu = new(1, "fake");
@@ -88,7 +91,7 @@ public class BrokerDispatcherTests : IDisposable
             [Slot.ClientPwrPoliciesGetInfo, Slot.ClientPwrPoliciesGetControl, Slot.PowerPolicyGetInfo, Slot.PowerPolicyGetControl, Slot.PowerMonitorGetInfo],
             [Slot.ClientPwrPoliciesSetControl, Slot.PowerPolicySetControl]));
         var t = new Target(_journal, sentinel ?? _sentinel, _gpu) { Vbios = vbios, Driver = driver };
-        return new BrokerDispatcher(hw, t, _host, canWrite, judge);
+        return new BrokerDispatcher(hw, t, _host, canWrite, judge, profileApprovals: _approvals);
     }
 
     private static uint? AfterMw(BrokerResponse r) =>
@@ -1405,6 +1408,7 @@ public class BrokerDispatcherTests : IDisposable
         new DailyProfile([
             new ProfileWrite(RailWrites.Kind, RailWrites.Key(Rail.Msvdd), "rel=0,alt=0,ov=0,vmin=0"),
             new ProfileWrite(VfWrites.Kind, VfWrites.CoreKey, daily)], _host.Now).Save(DailyProfile.PathBeside(_journal.Path));
+        ApproveFixtureDaily();
         Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
         Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*60,45000*67", change = "+15 MHz" }))).Ok);
 
@@ -1648,6 +1652,7 @@ public class BrokerDispatcherTests : IDisposable
         CurrentLimitsFixture.Install();
         new DailyProfile([new ProfileWrite(PowerCap.Kind, PowerCap.Key(PowerRequestKind.Ordinary), "560000")], _host.Now)
             .On("98.02.2E.00.01", null).Save(DailyProfile.PathBeside(_journal.Path));
+        ApproveFixtureDaily();
         Assert.True(d.Dispatch(Exp("begin", """{"game":"A"}""")).Ok);
         Assert.True(d.Dispatch(Exp("try", JsonSerializer.Serialize(new { curve = "0*127", change = "450 W", power_mw = 450_000u, keep_curve = true }))).Ok);
         var stopped = _host.Now.AddMinutes(2);
@@ -2271,7 +2276,7 @@ public class BrokerDispatcherTests : IDisposable
             [Slot.ClockClientClkVfPointsGetInfo, Slot.ClockClientClkVfPointsGetStatus, Slot.ClockClientClkVfPointsGetControl, Slot.GetPstates20,
              Slot.VoltVoltRailsGetInfo, Slot.VoltVoltRailsGetControl, Slot.VoltVoltRailsGetStatus, Slot.VoltVoltDevicesGetInfo],
             [Slot.ClockClientClkVfPointsSetControl, Slot.VoltVoltRailsSetControl]), WritePolicySet.Default.WithEnabled(Slot.ClockClientClkVfPointsSetControl));
-        return new BrokerDispatcher(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true);
+        return new BrokerDispatcher(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true, profileApprovals: _approvals);
     }
 
     /// <summary>
@@ -2287,6 +2292,7 @@ public class BrokerDispatcherTests : IDisposable
         new DailyProfile([
             new ProfileWrite(RailWrites.Kind, RailWrites.Key(Rail.Msvdd), "rel=0,alt=0,ov=0,vmin=0"),
             new ProfileWrite(VfWrites.Kind, VfWrites.CoreKey, daily)], _host.Now).Save(DailyProfile.PathBeside(_journal.Path));
+        ApproveFixtureDaily();
 
         var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply", Value: "the broker started"));
         Assert.False(r.Ok);
@@ -2313,6 +2319,7 @@ public class BrokerDispatcherTests : IDisposable
         new DailyProfile([
             new ProfileWrite(RailWrites.Kind, RailWrites.Key(Rail.Nvvdd), "rel=-12500,alt=0,ov=0,vmin=0"),
             new ProfileWrite(VfWrites.Kind, VfWrites.CoreKey, "0*60,30000*67")], _host.Now).Save(DailyProfile.PathBeside(_journal.Path));
+        ApproveFixtureDaily();
 
         var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "apply"));
         Assert.False(r.Ok);

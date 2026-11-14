@@ -3,6 +3,8 @@
 基线：`26ab3d52b56dd4b8ef8295e85639f31390666b92`（0.9.6）。
 范围：根目录 `AUDIT_FIX_LIST.md` 的六项及三个待确认项。没有扩展为对未覆盖模块的完整审计。
 
+后续发现本轮确认框仍占有操作锁，且批准未覆盖用户可写配置文件；这两项不以本报告的历史测试通过作为完成依据。后续修复、迁移规则及额外验证见 [`broker-approval-boundary.md`](broker-approval-boundary.md)。
+
 ## 修复
 
 1. **提权 lab 路径**：`WindowsGameAccess` 仅使用 broker 目录下的 `BrokerInstallBundle.LabName`，忽略 `CLOCKTAIL_LAB_EXE`。MCP 的非提权开发路径不变。源码搜索确认 broker 无其他环境变量启动路径；Core 的 `CLOCKTAIL_GPU_PCI` 仍仅选择受支持设备。Domain 的 `CLOCKTAIL_Q2RTX` 定位器没有 broker 调用点。

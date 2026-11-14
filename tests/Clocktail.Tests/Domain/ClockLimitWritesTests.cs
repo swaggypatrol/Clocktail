@@ -132,10 +132,10 @@ public class ClockLimitWritesTests : IDisposable
         Assert.Empty(_journal.Inspect().Items);
     }
 
-    private Clocktail.Domain.Broker.BrokerDispatcher Dispatcher()
+    private Clocktail.Domain.Broker.BrokerDispatcher Dispatcher(IProfileApprovals? approvals = null)
     {
         var hw = new NvClient(FakeDriver.ApiFor([Slot.PerfClientLimitsGetStatus], [Slot.PerfClientLimitsSetStatus]));
-        return new Clocktail.Domain.Broker.BrokerDispatcher(hw, new Target(_journal, _sentinel), _host, canWrite: true);
+        return new Clocktail.Domain.Broker.BrokerDispatcher(hw, new Target(_journal, _sentinel), _host, canWrite: true, profileApprovals: approvals);
     }
 
     /// <summary>keep_as_daily keeps a cap and releases a floor: a floor, a point lock and Boost Lock would hold the card high
@@ -167,7 +167,9 @@ public class ClockLimitWritesTests : IDisposable
         Install();
         new DailyProfile([new(ClockLimitWrites.Kind, ClockLimitWrites.MaxKey, "2400000"), new(ClockLimitWrites.Kind, ClockLimitWrites.VoltageKey, "1500000")],
             _host.Now).Save(DailyProfile.PathBeside(_journal.Path));
-        var d = Dispatcher();
+        var approvals = new MemoryProfileApprovals();
+        approvals.Remember("gpu-A", ProfileApproval.Daily, DailyProfile.Load(DailyProfile.PathBeside(_journal.Path))!);
+        var d = Dispatcher(approvals);
         var r = d.Dispatch(new Clocktail.Domain.Broker.BrokerRequest(Clocktail.Domain.Broker.BrokerRequest.OpProfile, Kind: "apply"));
         Assert.True(r.Ok, r.Error);
         var held = Assert.Single(ClientLimitsLayout.Parse(FakeDriver.State[Word]));

@@ -11,7 +11,7 @@ public sealed partial class BrokerDispatcher
         if (target.GameAccess is not { } access) return Fail("this card host does not support guarded game sessions; update the broker", BrokerCode.BadRequest);
         string experiment = Experiment.PathBeside(target.Journal.Path);
         var game = new GameSession(target.StableId, GameSession.PathBeside(target.Journal.Path), access, Dispatch,
-            () => Experiment.Load(experiment), e => e.Save(experiment), () => DailyProfile.Load(DailyProfile.PathBeside(target.Journal.Path)),
+            () => Experiment.Load(experiment), e => e.Save(experiment), () => ApprovedDaily(target),
             (kind, key) => target.Journal.Inspect().Items.FirstOrDefault(i => i.Kind == kind && i.Key == key)?.Original, GameLeaseHeld,
             at => Experiment.ReadLast(Experiment.DataPathBeside(target.Journal.Path), 1000, includeDeleted: true).Any(p => p.TrialAt == at && p.Outcome == Experiment.Crash),
             at => OperatingSystem.IsWindows() && Platform.SystemLog.CountTarget(access.Identity, at.UtcDateTime) is var c && c.Target + c.Ambiguous > 0,

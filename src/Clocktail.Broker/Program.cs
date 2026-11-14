@@ -134,7 +134,8 @@ static int Run()
             return busy;
         };
         var targets = new WindowsGpuTargets(mgr, host, judge);  // each sentinel asks the judge again once it is on disk
-        dispatcher = new BrokerDispatcher(hw, targets, host, canWrite: true, judge, new FrameCapture());
+        dispatcher = new BrokerDispatcher(hw, targets, host, canWrite: true, judge, new FrameCapture(),
+            profileApprovals: new WindowsProfileApprovals());
         dispatcher.AuthorizeProfileChange = request => ProfileConsentDialog.Confirm(request);
         dispatcher.GameLeaseHeld = run => JudgeLock.Live(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out _)?.RunId == run;
         var server = new BrokerServer(

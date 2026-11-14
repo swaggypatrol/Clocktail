@@ -20,6 +20,7 @@ public class AuditProfileFixesTests : IDisposable
     private const int Board = 0;
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "clocktail-tests", Guid.NewGuid().ToString("n"));
     private readonly FakeHost _host = new();
+    private readonly MemoryProfileApprovals _approvals = new();
     private readonly OwnershipJournal _journal;
     private readonly ApplySentinel _sentinel;
     private readonly GpuSession _gpu = new(1, "fake");
@@ -81,7 +82,7 @@ public class AuditProfileFixesTests : IDisposable
         var hw = new NvClient(FakeDriver.ApiFor(
             [Slot.ClientPwrPoliciesGetInfo, Slot.ClientPwrPoliciesGetControl, Slot.PowerPolicyGetInfo, Slot.PowerPolicyGetControl, Slot.PowerMonitorGetInfo],
             [Slot.ClientPwrPoliciesSetControl, Slot.PowerPolicySetControl]));
-        return new BrokerDispatcher(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true);
+        return new BrokerDispatcher(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true, profileApprovals: _approvals);
     }
 
     private (BrokerDispatcher D, NvClient Hw) VfAndPower()
@@ -119,7 +120,7 @@ public class AuditProfileFixesTests : IDisposable
              Slot.ClientPwrPoliciesGetInfo, Slot.ClientPwrPoliciesGetControl, Slot.PowerPolicyGetInfo, Slot.PowerPolicyGetControl, Slot.PowerMonitorGetInfo],
             [Slot.ClockClientClkVfPointsSetControl, Slot.SetPstates20, Slot.ClientPwrPoliciesSetControl, Slot.PowerPolicySetControl]),
             WritePolicySet.Default.WithEnabled(Slot.ClockClientClkVfPointsSetControl));
-        return (new BrokerDispatcher(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true), hw);
+        return (new BrokerDispatcher(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true, profileApprovals: _approvals), hw);
     }
 
     private static BrokerRequest Exp(string kind, string? value = null) => new(BrokerRequest.OpExperiment, Kind: kind, Value: value);
@@ -306,6 +307,7 @@ public class AuditProfileFixesTests : IDisposable
         string path = DailyProfile.PathBeside(_journal.Path);
         var adopted = new[] { new ProfileWrite("vf", "core", "0*127") };
         new DailyProfile([new ProfileWrite("power", "fe", "560000")], _host.Now, Adopted: adopted).Save(path);
+        _approvals.Remember("gpu-A", ProfileApproval.Daily, DailyProfile.Load(path)!);
 
         var r = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "550000"));
         Assert.True(r.Ok, r.Error);
@@ -341,6 +343,7 @@ public class AuditProfileFixesTests : IDisposable
             _host.Now,
             Adopted: [new ProfileWrite(VfWrites.Kind, VfWrites.CoreKey, afterburnerCurve), new ProfileWrite("clockdomain", "xbar", "15000")]);
         wallAndCurve.Save(dailyPath);
+        _approvals.Remember("gpu-A", ProfileApproval.Daily, wallAndCurve);
 
         var save = d.Dispatch(new BrokerRequest(BrokerRequest.OpProfile, Kind: "save", Value: "tuned"));
         Assert.True(save.Ok, save.Error);
@@ -414,6 +417,7 @@ public class AuditProfileFixesTests : IDisposable
         Assert.False(File.Exists(DailyProfile.PathBeside(_journal.Path)));
 
         // Approving saves daily profile.
+        _host.Now += BrokerDispatcher.ConfirmationCooldown;
         d.AuthorizeProfileChange = req => { seen = req; return true; };
         var approved = d.FromClient(new BrokerRequest(BrokerRequest.OpProfile, Kind: "keep", ExpectedProfileFingerprint: fp));
         Assert.True(approved.Ok, approved.Error);
@@ -434,6 +438,7 @@ public class AuditProfileFixesTests : IDisposable
         Assert.False(d.FromClient(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preset", Value: "daily560", ExpectedProfileFingerprint: presetFp)).Ok);
 
         d.AuthorizeProfileChange = _ => true;
+        _host.Now += BrokerDispatcher.ConfirmationCooldown;
         Assert.True(d.FromClient(new BrokerRequest(BrokerRequest.OpProfile, Kind: "wall", Value: "540000")).Ok);
         Assert.Equal(540_000u, _requests[0xfe]);
         Assert.True(d.FromClient(new BrokerRequest(BrokerRequest.OpProfile, Kind: "preset", Value: "daily560", ExpectedProfileFingerprint: presetFp)).Ok);
@@ -656,6 +661,7 @@ public class AuditProfileFixesTests : IDisposable
         })
         {
             promptDepth = 0;
+            _host.Now += BrokerDispatcher.ConfirmationCooldown;
             nestedFailedClosed = false;
             nestedStartBlocked = false;
             var res = d.FromClient(req);

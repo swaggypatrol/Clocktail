@@ -12,6 +12,7 @@ No extra software tuning envelope, mandatory clock/voltage pairing or model-spec
 A confirmation code is not consent: present the returned question, wait for the person's yes, then use that one-time code. Legacy `CLOCKTAIL_CONFIRM=off` does not bypass consent.
 Ask the person before stock, load_preset, keep_as_daily, set_daily_power_limit, set_power_cap, delete_profile and install_service. begin_session and load_daily ask too: like all of these but install_service, through their own confirmation code.
 For client-requested daily-profile changes, the elevated broker service also presents an authoritative Windows confirmation dialog after MCP confirmation (`CLOCKTAIL_CONFIRM`) and revalidates the previewed state/fingerprint before committing; expect both prompts in interactive sessions.
+The dialog runs outside the card operation lock. Only one confirmation can wait; decline/cancel has a brief cooldown. Daily JSON is not approval: protected broker receipts must match before automatic apply. After upgrading, an existing profile needs one explicit `load_daily` confirmation; never ask the user to bypass this by editing receipt files.
 
 ## Baseline and daily
 "Stock" means this GPU's NVIDIA/board firmware settings, not a bundled set of numbers. Existing settings from another utility are not stock: report them and ask whether to tune from them, adopt them, or explicitly clear them.

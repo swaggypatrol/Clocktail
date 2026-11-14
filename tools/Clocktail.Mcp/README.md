@@ -8,6 +8,8 @@ MCP tools for the NVIDIA RTX 50 series, across models and board vendors. Each ch
 
 What the agent starts is a relay that loads no driver library and runs the same program again with `--worker`, which holds the GPU. When the driver goes away (a reset, an update, a device restart) the worker ends or dies in it, and the relay answers the calls it had in flight, starts a new worker and goes on: the agent keeps its tools. `CLOCKTAIL_MCP_DIRECT=1` runs it as one process. A read waits for the driver at most 5 s (`CLOCKTAIL_MCP_DRIVER_WAIT_S`) and then says so.
 
+Broker confirmation no longer holds the card's operation lock: recovery and trial writes continue while the person answers. Only one confirmation can wait, with a short cooldown after denial. Editable Daily/preset JSON is not proof of consent; the broker checks admin-owned receipts under `%ProgramData%\Clocktail\Approvals`. After upgrading, existing profiles need one explicit `load_daily` confirmation. An unapproved Daily is not applied automatically; the broker attempts to return owned settings to their originals and reports the approval requirement.
+
 ## Tuning policy
 
 Only explicit user consent and NVIDIA driver/firmware acceptance authorize tuning. `begin_session` asks for session approval; persistent changes ask separately. Clocktail adds no clock/voltage envelope or mandatory XBAR voltage coupling. Driver-reported capabilities, encoding, ownership/concurrency and exact readback checks remain. stress_test and lab_test stop within 2 °C of NVIDIA's slowdown point, and at a maxTempC when one is given; firmware protection remains active. Stock settings and ranges are discovered on the current GPU, never copied from another board. Per-control availability and hardware validation may vary.
