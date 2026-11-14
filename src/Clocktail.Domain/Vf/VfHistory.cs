@@ -154,7 +154,7 @@ public static class VfHistoryStore
         {
             string path = Path.Combine(dir, VfHistoryFile.DayFileName(day, part));
             using var fs = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read | FileShare.Delete);
-            long len = fs.Length, start;
+            long len = fs.Length, start, lastMs = -1;
             if (len < VfHistoryFile.HeaderSize)
             {
                 // Empty, or a header cut off as it was first written: only then is it ours to (re)write.
@@ -171,16 +171,8 @@ public static class VfHistoryStore
                 fs.ReadExactly(have);
                 if (!VfHistoryFile.ValidHeader(have, day)) continue;   // another version's, or damaged: left as it is
                 start = VfHistoryFile.HeaderSize + (len - VfHistoryFile.HeaderSize) / VfHistoryFile.RecordSize * VfHistoryFile.RecordSize;
-                start = WithoutInvalidTail(fs, start);
+                (start, lastMs) = WithoutInvalidTail(fs, start);
                 if (start != len) fs.SetLength(start);
-            }
-            long lastMs = -1;
-            if (start > VfHistoryFile.HeaderSize)
-            {
-                var last = new byte[VfHistoryFile.RecordSize];
-                fs.Position = start - VfHistoryFile.RecordSize;
-                fs.ReadExactly(last);
-                lastMs = BinaryPrimitives.ReadUInt32LittleEndian(last);
             }
             var fresh = new byte[items.Length * VfHistoryFile.RecordSize];
             int n = 0;
@@ -212,17 +204,18 @@ public static class VfHistoryStore
 
     /// <summary>Where the file's whole records end once the invalid ones at its end (zeros a power loss left) are cut:
     /// they hold nothing, and a later record after them would break the file's time order.</summary>
-    private static long WithoutInvalidTail(FileStream fs, long end)
+    private static (long End, long LastMs) WithoutInvalidTail(FileStream fs, long end)
     {
-        var rec = new byte[VfHistoryFile.RecordSize];
+        Span<byte> rec = stackalloc byte[VfHistoryFile.RecordSize];
+        long lastMs = -1;
         for (int i = 0; i < 4096 && end > VfHistoryFile.HeaderSize; i++)
         {
             fs.Position = end - VfHistoryFile.RecordSize;
             fs.ReadExactly(rec);
-            if (VfHistoryFile.TryRead(rec, out _)) break;
+            if (VfHistoryFile.TryRead(rec, out var r)) { lastMs = r.Ms; break; }
             end -= VfHistoryFile.RecordSize;
         }
-        return end;
+        return (end, lastMs);
     }
 
     /// <summary>Every observation of one UTC day, in time order, each millisecond once.</summary>
@@ -295,52 +288,59 @@ public static class VfHistoryStore
             else ordered = false;   // a probe met a record that cannot be one: the whole file is read
         }
         const int Chunk = 4096;
-        var buf = new byte[VfHistoryFile.RecordSize * Chunk];
-        fs.Position = VfHistoryFile.HeaderSize + first * VfHistoryFile.RecordSize;
-        long left = whole - first;
-        uint prev = 0;
-        bool any = false, inOrder = true;
-        while (left > 0)
+        var buf = System.Buffers.ArrayPool<byte>.Shared.Rent(VfHistoryFile.RecordSize * Chunk);
+        try
         {
-            int n = (int)Math.Min(left, Chunk);
-            int want = n * VfHistoryFile.RecordSize, got = 0;
-            while (got < want)
+            fs.Position = VfHistoryFile.HeaderSize + first * VfHistoryFile.RecordSize;
+            long left = whole - first;
+            uint prev = 0;
+            bool any = false, inOrder = true;
+            while (left > 0)
             {
-                int r = fs.Read(buf, got, want - got);
-                if (r == 0) break;   // shorter than when it was opened: whatever is whole is read
-                got += r;
+                int n = (int)Math.Min(left, Chunk);
+                int want = n * VfHistoryFile.RecordSize, got = 0;
+                while (got < want)
+                {
+                    int r = fs.Read(buf, got, want - got);
+                    if (r == 0) break;   // shorter than when it was opened: whatever is whole is read
+                    got += r;
+                }
+                n = got / VfHistoryFile.RecordSize;
+                for (int i = 0; i < n; i++)
+                {
+                    if (stats != null) stats.Records++;
+                    if (!VfHistoryFile.TryRead(buf.AsSpan(i * VfHistoryFile.RecordSize, VfHistoryFile.RecordSize), out var rec))
+                    {
+                        if (stats != null) stats.SkippedRecords++;
+                        ordered = false;
+                        continue;
+                    }
+                    if (any && rec.Ms <= prev) { inOrder = false; ordered = false; }
+                    if (!ordered && first > 0)
+                    {
+                        // The file is not in the order it claims (damage): what the search skipped may be in range.
+                        into.RemoveRange(added, into.Count - added);
+                        fs.Dispose();
+                        return ReadFile(path, day, fromMs, toMs, into, stats, search: false);
+                    }
+                    prev = rec.Ms;
+                    any = true;
+                    if (rec.Ms > toMs)
+                    {
+                        if (ordered) return inOrder;   // the rest is later still
+                        continue;
+                    }
+                    if (rec.Ms >= fromMs) into.Add(rec);
+                }
+                if (got < want) break;
+                left -= n;
             }
-            n = got / VfHistoryFile.RecordSize;
-            for (int i = 0; i < n; i++)
-            {
-                if (stats != null) stats.Records++;
-                if (!VfHistoryFile.TryRead(buf.AsSpan(i * VfHistoryFile.RecordSize, VfHistoryFile.RecordSize), out var rec))
-                {
-                    if (stats != null) stats.SkippedRecords++;
-                    ordered = false;
-                    continue;
-                }
-                if (any && rec.Ms <= prev) { inOrder = false; ordered = false; }
-                if (!ordered && first > 0)
-                {
-                    // The file is not in the order it claims (damage): what the search skipped may be in range.
-                    into.RemoveRange(added, into.Count - added);
-                    fs.Dispose();
-                    return ReadFile(path, day, fromMs, toMs, into, stats, search: false);
-                }
-                prev = rec.Ms;
-                any = true;
-                if (rec.Ms > toMs)
-                {
-                    if (ordered) return inOrder;   // the rest is later still
-                    continue;
-                }
-                if (rec.Ms >= fromMs) into.Add(rec);
-            }
-            if (got < want) break;
-            left -= n;
+            return inOrder;
         }
-        return inOrder;
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buf);
+        }
     }
 
     /// <summary>The first whole record at or after <paramref name="ms"/> in a file in time order; null when a probe meets a

@@ -21,4 +21,24 @@ public class PerfDecreaseTests
         Assert.InRange(PowerTopologyLayout.Watts(85_700, 575), 492, 494);
         Assert.InRange(PowerTopologyLayout.Watts(45_000, 575), 258, 260);
     }
+
+    [Fact]
+    public void IsRtx50_and_sample_quantiles_match_expected_values()
+    {
+        Assert.True(Card.IsRtx50("NVIDIA GeForce RTX 5090"));
+        Assert.True(Card.IsRtx50("RTX5080"));
+        Assert.False(Card.IsRtx50("NVIDIA GeForce RTX 4090"));
+
+        var items = new double?[] { null, 50.0, 10.0, 90.0, 30.0, 70.0, null };
+        var buf = new List<double>();
+        var (p10, p50, p90) = SampleQuantiles.P10P50P90(items, x => x, buf);
+        Assert.Equal(10.0, p10);
+        Assert.Equal(50.0, p50);
+        Assert.Equal(90.0, p90);
+        Assert.Equal(50.0, SampleQuantiles.Avg(items, x => x));
+
+        var empty = SampleQuantiles.P10P50P90(Array.Empty<double?>(), x => x, buf);
+        Assert.Equal((null, null, null), empty);
+        Assert.Null(SampleQuantiles.Avg(Array.Empty<double?>(), x => x));
+    }
 }

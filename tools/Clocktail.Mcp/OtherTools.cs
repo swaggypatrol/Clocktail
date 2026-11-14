@@ -30,12 +30,26 @@ public static class OtherTools
     ];
 
     /// <summary>The names of the ones running now, each once; empty when none is (or the process list cannot be read).</summary>
-    public static IReadOnlyList<string> Running() => Running(name =>
+    public static IReadOnlyList<string> Running()
     {
-        var found = Process.GetProcessesByName(name);
-        foreach (var p in found) p.Dispose();
-        return found.Length > 0;
-    });
+        HashSet<string> running;
+        try
+        {
+            var all = Process.GetProcesses();
+            running = new HashSet<string>(all.Length, StringComparer.OrdinalIgnoreCase);
+            foreach (var p in all)
+            {
+                try { running.Add(p.ProcessName); }
+                catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+                finally { p.Dispose(); }
+            }
+        }
+        catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception or PlatformNotSupportedException)
+        {
+            return [];
+        }
+        return Running(running.Contains);
+    }
 
     public static IReadOnlyList<string> Running(Func<string, bool> isRunning)
     {

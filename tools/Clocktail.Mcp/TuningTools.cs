@@ -79,11 +79,8 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         if (look.NvvddUv is { } uv && Nearest(look.Curve, uv) is { } p)
             point = Row(p, daily);
         var session = card.Broker(BrokerRequest.OpExperiment, "show");
-        GpcVoltages.Reading? gpc = null;
-        try { gpc = card.Gpc(); } catch (InvalidOperationException) { }
-        var clocks = card.Clocks();
+        var (gpc, clocks, locks, memoryC) = card.ReadStatusExtras();
         double? Domain(int id) => clocks != null && clocks.TryGetValue(id, out var k) ? Math.Round(k / 1000.0) : null;
-        var locks = card.ClockLocks();
         return Out(new
         {
             gpu = card.Name,
@@ -103,7 +100,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             temp_margin_c = t?.TempMarginC,
             pstate = t?.PState is { } ps ? $"P{ps}" : null,
             util_pct = t?.GpuUtilPercent,
-            memory_c = card.MemoryC(),
+            memory_c = memoryC,
             pcie = SettingsTools.Pcie(card.PcieLink()),
             vram_used_gib = Gib(t?.VramUsedBytes),
             vram_total_gib = Gib(t?.VramTotalBytes),
@@ -485,37 +482,11 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
 
         // The first 2 s are the ramp; the rest is what the settings were tested at. A run that hung ends in frozen readings
         // (the curve's top at ~125 W for the whole TdrDelay): they are not what it was tested at.
-        IReadOnlyList<Card.Sample> held = samples.Count > 4 ? samples.Skip(4).ToList() : samples;
+        IReadOnlyList<Card.Sample> held = samples.Count > 4 ? samples.GetRange(4, samples.Count - 4) : samples;
         if (failed) held = WithoutFrozenTail(held);
-        static double? P(IEnumerable<double?> xs, double q)
-        {
-            var v = xs.Where(x => x != null).Select(x => x!.Value).Order().ToList();
-            return v.Count == 0 ? null : Math.Round(v[(int)Math.Clamp(Math.Round(q * (v.Count - 1)), 0, v.Count - 1)], 1);
-        }
-        object Stat(double q) => new
-        {
-            clock_mhz = P(held.Select(s => (double?)s.Telemetry?.GraphicsClockMhz), q),
-            nvvdd_mv = P(held.Select(s => s.NvvddUv / 1000.0), q),
-            msvdd_mv = P(held.Select(s => s.MsvddUv / 1000.0), q),
-            board_w = P(held.Select(s => s.Telemetry?.PowerWatts), q),
-            nvvdd_w = P(held.Select(s => s.NvvddOut?.Mw / 1000.0), q),
-            nvvdd_a = P(held.Select(s => s.NvvddOut?.Ma / 1000.0), q),
-            msvdd_w = P(held.Select(s => s.MsvddOut?.Mw / 1000.0), q),
-            msvdd_a = P(held.Select(s => s.MsvddOut?.Ma / 1000.0), q),
-            xbar_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Xbar)), q),
-            sys_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Sys)), q),
-            video_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Video)), q),
-            memory_mhz = P(held.Select(s => s.Mhz(AllClocksLayout.Memory)), q),
-            temp_c = P(held.Select(s => (double?)s.Telemetry?.TemperatureC), q),
-            memory_c = P(held.Select(s => s.MemoryC), q),
-            vram_used_gib = P(held.Select(s => Gib(s.Telemetry?.VramUsedBytes)), q),
-            gpc_mean_mv = P(held.Select(s => s.Gpc?.MeanMv), q),
-            gpc_min_mv = P(held.Select(s => s.Gpc?.MinMv), q),
-        };
+        var (p10, p50, p90) = StressQuantiles(held);
         string csv = WriteSamples(samples, load, seconds);
-        double? p50Mv = P(held.Select(s => s.NvvddUv / 1000.0), 0.5), p50Mhz = P(held.Select(s => (double?)s.Telemetry?.GraphicsClockMhz), 0.5);
-        double? p50W = P(held.Select(s => s.Telemetry?.PowerWatts), 0.5), p50NvW = P(held.Select(s => s.NvvddOut?.Mw / 1000.0), 0.5);
-        double? p50MsMv = P(held.Select(s => s.MsvddUv / 1000.0), 0.5), p50MsW = P(held.Select(s => s.MsvddOut?.Mw / 1000.0), 0.5);
+        double? p50Mv = p50.nvvdd_mv, p50Mhz = p50.clock_mhz;
         var reasons = held.SelectMany(s => s.Telemetry?.ThrottleReasons ?? []).Distinct().ToList();
         int? pointIndex = p50Mv is { } mv && Nearest(before.Curve, (uint)(mv * 1000)) is { } pt ? pt.Index : null;
         var shift = CurveShift(before.Curve, ReadCurveOrNull(), pointIndex, held);
@@ -523,7 +494,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
 
         bool trial = hold.Trial != null;   // in force when the run began: the trial it measured
         string summary = string.Create(CultureInfo.InvariantCulture,
-            $"Stress nvgwls -l {load}, {seconds} s: {verdict} (exit code {(code?.ToString(CultureInfo.InvariantCulture) ?? "none")}). P50 {p50Mhz} MHz @ NVVDD {p50Mv} mV (curve point {pointIndex}), XBAR {P(held.Select(s => s.Mhz(AllClocksLayout.Xbar)), 0.5)} / SYS {P(held.Select(s => s.Mhz(AllClocksLayout.Sys)), 0.5)} MHz, board {p50W} W, NVVDD {p50NvW} W, MSVDD {p50MsMv} mV / {p50MsW} W; max {held.Max(s => s.Telemetry?.TemperatureC)} °C; limit reasons [{string.Join(", ", reasons)}]; {held.Count} samples; per sample {csv}")
+            $"Stress nvgwls -l {load}, {seconds} s: {verdict} (exit code {(code?.ToString(CultureInfo.InvariantCulture) ?? "none")}). P50 {p50Mhz} MHz @ NVVDD {p50Mv} mV (curve point {pointIndex}), XBAR {p50.xbar_mhz} / SYS {p50.sys_mhz} MHz, board {p50.board_w} W, NVVDD {p50.nvvdd_w} W, MSVDD {p50.msvdd_mv} mV / {p50.msvdd_w} W; max {held.Max(s => s.Telemetry?.TemperatureC)} °C; limit reasons [{string.Join(", ", reasons)}]; {held.Count} samples; per sample {csv}")
             + LocksWords(locksMet) + LocksUnreadWords(locks) + (exited ? "" : ". nvgwls did not exit after being stopped") + (note != null ? $". Purpose: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
         bool crashRecorded = failed && RecordCrash(hold, resets, $"nvgwls -l {load} {seconds} s: {verdict}");
@@ -536,9 +507,9 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
             load,
             seconds,
             samples = held.Count,
-            p50 = Stat(0.5),
-            p10 = Stat(0.1),
-            p90 = Stat(0.9),
+            p50,
+            p10,
+            p90,
             limit_reasons = reasons,
             pstates = PStates(held),
             efficiency = Efficiency(held, null, p50Mhz),
@@ -555,6 +526,32 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
                 : tooHot ? "too hot to test this way: a steeper fan curve (set_fan_curve), fans back to auto, or a lower wall, then run again" : null,
         });
     });
+
+    private static (StressStat P10, StressStat P50, StressStat P90) StressQuantiles(IReadOnlyList<Card.Sample> held)
+    {
+        var buf = new List<double>(held.Count);
+        var clk = SampleQuantiles.P10P50P90(held, s => (double?)s.Telemetry?.GraphicsClockMhz, buf);
+        var nvMv = SampleQuantiles.P10P50P90(held, s => s.NvvddUv / 1000.0, buf);
+        var msMv = SampleQuantiles.P10P50P90(held, s => s.MsvddUv / 1000.0, buf);
+        var brdW = SampleQuantiles.P10P50P90(held, s => s.Telemetry?.PowerWatts, buf);
+        var nvW = SampleQuantiles.P10P50P90(held, s => s.NvvddOut?.Mw / 1000.0, buf);
+        var nvA = SampleQuantiles.P10P50P90(held, s => s.NvvddOut?.Ma / 1000.0, buf);
+        var msW = SampleQuantiles.P10P50P90(held, s => s.MsvddOut?.Mw / 1000.0, buf);
+        var msA = SampleQuantiles.P10P50P90(held, s => s.MsvddOut?.Ma / 1000.0, buf);
+        var xbar = SampleQuantiles.P10P50P90(held, s => s.Mhz(AllClocksLayout.Xbar), buf);
+        var sys = SampleQuantiles.P10P50P90(held, s => s.Mhz(AllClocksLayout.Sys), buf);
+        var vid = SampleQuantiles.P10P50P90(held, s => s.Mhz(AllClocksLayout.Video), buf);
+        var mem = SampleQuantiles.P10P50P90(held, s => s.Mhz(AllClocksLayout.Memory), buf);
+        var tmp = SampleQuantiles.P10P50P90(held, s => (double?)s.Telemetry?.TemperatureC, buf);
+        var memC = SampleQuantiles.P10P50P90(held, s => s.MemoryC, buf);
+        var vram = SampleQuantiles.P10P50P90(held, s => Gib(s.Telemetry?.VramUsedBytes), buf);
+        var gpcMean = SampleQuantiles.P10P50P90(held, s => s.Gpc?.MeanMv, buf);
+        var gpcMin = SampleQuantiles.P10P50P90(held, s => s.Gpc?.MinMv, buf);
+        return (
+            new(clk.P10, nvMv.P10, msMv.P10, brdW.P10, nvW.P10, nvA.P10, msW.P10, msA.P10, xbar.P10, sys.P10, vid.P10, mem.P10, tmp.P10, memC.P10, vram.P10, gpcMean.P10, gpcMin.P10),
+            new(clk.P50, nvMv.P50, msMv.P50, brdW.P50, nvW.P50, nvA.P50, msW.P50, msA.P50, xbar.P50, sys.P50, vid.P50, mem.P50, tmp.P50, memC.P50, vram.P50, gpcMean.P50, gpcMin.P50),
+            new(clk.P90, nvMv.P90, msMv.P90, brdW.P90, nvW.P90, nvA.P90, msW.P90, msA.P90, xbar.P90, sys.P90, vid.P90, mem.P90, tmp.P90, memC.P90, vram.P90, gpcMean.P90, gpcMin.P90));
+    }
 
     [McpServerTool(Name = "mark_stable", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Record the active trial's observed stable outcome and the workload that was actually tested. Do not infer stability from another GPU or from an interrupted or inconclusive run.")]

@@ -55,6 +55,29 @@ public sealed class ResidencyLogTests : IDisposable
         Assert.Equal(read.OrderBy(t => t.At), read);
     }
 
+    [Fact]
+    public void Between_filters_by_time_window_and_flush_handles_overflow_prefix_trim()
+    {
+        var log = new ResidencyLog(() => _dir);
+        for (int i = -10; i < 15; i++)
+            log.Add(new Residency.Tick(T0.AddSeconds(i), 900_000u + (uint)(i + 10), 2500, 100, 400.5));
+        log.Flush();
+
+        var bounded = log.Between(T0, T0.AddSeconds(9));
+        Assert.Equal(10, bounded.Count);
+        Assert.All(bounded, t => Assert.InRange(t.At, T0, T0.AddSeconds(9)));
+
+        // Overflow MaxPending to trigger prefix eviction and ensure Flush removes remaining prefix cleanly.
+        var overflow = new ResidencyLog(() => _dir);
+        int total = ResidencyLog.MaxPending + 25;
+        for (int i = 0; i < total; i++)
+            overflow.Add(new Residency.Tick(T0.AddSeconds(100 + i), 910_000, 2600, 100, null));
+        overflow.Flush();
+        var kept = overflow.Between(T0.AddSeconds(99), T0.AddSeconds(100 + total));
+        Assert.Equal(ResidencyLog.MaxPending, kept.Count);
+        Assert.Equal(T0.AddSeconds(125), kept[0].At);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_dir)) Directory.Delete(_dir, recursive: true);

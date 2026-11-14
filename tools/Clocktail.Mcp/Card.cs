@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Clocktail.Core.Gpu;
 using Clocktail.Domain;
 using Clocktail.Domain.Broker;
@@ -16,7 +17,7 @@ namespace Clocktail.Mcp;
 /// broker for everything that writes or keeps state. Driver calls go one at a time (the SDK may call tools in parallel),
 /// and a read that cannot get to the driver within <see cref="DriverWait"/> says so instead of hanging (<see cref="DriverLane"/>).
 /// </summary>
-public sealed class Card : IDisposable
+public sealed partial class Card : IDisposable
 {
     private readonly GpuManager _mgr;
     private readonly GpuDevice _gpu;
@@ -40,7 +41,10 @@ public sealed class Card : IDisposable
     /// <summary>GpuManager has already selected and identified one supported card by PCI address. Never fall back.</summary>
     public static GpuDevice? Pick(IReadOnlyList<GpuDevice> gpus) => gpus.Count == 1 && gpus[0].Target is { Major: 12, Minor: 0 } ? gpus[0] : null;
 
-    public static bool IsRtx50(string name) => System.Text.RegularExpressions.Regex.IsMatch(name, @"RTX\s*50\d\d");
+    [GeneratedRegex(@"RTX\s*50\d\d")]
+    private static partial Regex Rtx50Regex();
+
+    public static bool IsRtx50(string name) => Rtx50Regex().IsMatch(name);
 
     /// <summary>The other NVIDIA GPUs in this PC, by name: Clocktail neither reads nor tunes them.</summary>
     public IReadOnlyList<string> OtherGpus { get; }
@@ -81,14 +85,20 @@ public sealed class Card : IDisposable
     }
 
     /// <summary>The public names of GetPerfDecreaseInfo's bits.</summary>
-    public static IReadOnlyList<string> PerfDecreaseReasons(uint bits) =>
+    private static readonly (uint Bit, string Name)[] PerfDecreaseReasonBits =
     [
-        .. new (uint Bit, string Name)[]
-        {
-            (0x1, "thermal_protection"), (0x2, "power_control"), (0x4, "ac_battery"), (0x8, "api_triggered"),
-            (0x10, "insufficient_power"), (0x80000000, "unknown"),
-        }.Where(r => (bits & r.Bit) != 0).Select(r => r.Name),
+        (0x1, "thermal_protection"), (0x2, "power_control"), (0x4, "ac_battery"), (0x8, "api_triggered"),
+        (0x10, "insufficient_power"), (0x80000000, "unknown"),
     ];
+
+    public static IReadOnlyList<string> PerfDecreaseReasons(uint bits)
+    {
+        if (bits == 0) return [];
+        var list = new List<string>(PerfDecreaseReasonBits.Length);
+        foreach (var (bit, name) in PerfDecreaseReasonBits)
+            if ((bits & bit) != 0) list.Add(name);
+        return list;
+    }
 
     /// <summary>Why the driver this process opened is gone, or null while it is there. Takes no driver call and no lane.</summary>
     public string? DriverGone() => DriverLoss.Why(_mgr.Nvml, [_session]);
@@ -112,28 +122,32 @@ public sealed class Card : IDisposable
             TelemetrySnapshot? t = null;
             if (_mgr.Nvml != null && _gpu.HasNvml)
                 try { t = Telemetry.Read(_gpu, _mgr.Nvml); } catch (Exception e) when (e is NvmlException or InvalidOperationException) { }
-            _railMask ??= RailsReader.Mask(_hw, _session);
             uint? nvvdd = null, msvdd = null, max = null, vmin = null;
-            if (_railMask is { } mask)
-            {
-                nvvdd = RailsReader.PresentUv(_hw, _session, mask, Rail.Nvvdd);
-                msvdd = RailsReader.PresentUv(_hw, _session, mask, Rail.Msvdd);
-            }
             RailRecord? msvddRail = null;
             try
             {
                 var rails = RailsReader.Read(_hw, _session);
+                _railMask ??= rails.Mask;
+                nvvdd = RailsReader.ExtractPresentUv(rails.RawStatus, rails.Mask, Rail.Nvvdd);
+                msvdd = RailsReader.ExtractPresentUv(rails.RawStatus, rails.Mask, Rail.Msvdd);
                 max = rails.Get(Rail.Nvvdd)?.Limits.MaxUv;
                 vmin = rails.Get(Rail.Nvvdd)?.Limits.VminUv is > 0 and var v ? v : null;
                 msvddRail = rails.Get(Rail.Msvdd);
             }
-            catch (InvalidOperationException) { }
+            catch (InvalidOperationException)
+            {
+                _railMask ??= RailsReader.Mask(_hw, _session);
+                if (_railMask is { } mask)
+                    (nvvdd, msvdd) = RailsReader.PresentUvPair(_hw, _session, mask);
+            }
             CurrentLimits? limits = null;
             MonitorReading? nvvddOut = null, msvddOut = null;
             BoardInput? input = null;
             try
             {
                 limits = CurrentLimitsReader.Read(_hw, _session);
+                _monitorLayout = limits;
+                _monitorAt = DateTime.UtcNow;
                 var readings = CurrentLimitsReader.Monitor(_hw, _session, limits.Channels);
                 nvvddOut = limits.Output(Rail.Nvvdd, readings);
                 msvddOut = limits.Output(Rail.Msvdd, readings);
@@ -165,7 +179,7 @@ public sealed class Card : IDisposable
     private DateTime _monitorAt;
     public static readonly TimeSpan MonitorLayoutFor = TimeSpan.FromSeconds(5);
 
-    public Sample ReadSample()
+    public Sample ReadSample(bool includeExtended = true)
     {
         using (_lane.Enter("a sample"))
         {
@@ -175,10 +189,7 @@ public sealed class Card : IDisposable
             _railMask ??= RailsReader.Mask(_hw, _session);
             uint? nvvdd = null, msvdd = null;
             if (_railMask is { } mask)
-            {
-                nvvdd = RailsReader.PresentUv(_hw, _session, mask, Rail.Nvvdd);
-                msvdd = RailsReader.PresentUv(_hw, _session, mask, Rail.Msvdd);
-            }
+                (nvvdd, msvdd) = RailsReader.PresentUvPair(_hw, _session, mask);
             MonitorReading? nvvddOut = null, msvddOut = null;
             try
             {
@@ -193,8 +204,15 @@ public sealed class Card : IDisposable
             }
             catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
             IReadOnlyDictionary<int, uint>? clocks = null;
-            try { clocks = PowerSplitReader.ReadClocks(_hw, _session); } catch (InvalidOperationException) { }
-            return new Sample(DateTimeOffset.Now, t, nvvdd, msvdd, nvvddOut, msvddOut, clocks, _monitorLayout, GpcLocked(), ThermChannels.MemoryC(_hw, _session));
+            GpcVoltages.Reading? gpc = null;
+            double? memC = null;
+            if (includeExtended)
+            {
+                try { clocks = PowerSplitReader.ReadClocks(_hw, _session); } catch (InvalidOperationException) { }
+                gpc = GpcLocked();
+                memC = ThermChannels.MemoryC(_hw, _session);
+            }
+            return new Sample(DateTimeOffset.Now, t, nvvdd, msvdd, nvvddOut, msvddOut, clocks, _monitorLayout, gpc, memC);
         }
     }
 
@@ -265,6 +283,21 @@ public sealed class Card : IDisposable
         catch (Exception e) when (e is InvalidOperationException or NvApiException or DriverBusyException) { return null; }
     }
 
+    /// <summary>GPC voltages, clock table, client clock locks, and memory temperature under a single driver lane acquisition.</summary>
+    public (GpcVoltages.Reading? Gpc, IReadOnlyDictionary<int, uint>? Clocks, IReadOnlyList<Clocktail.Domain.Clocks.ClientLimit>? Locks, double? MemoryC) ReadStatusExtras()
+    {
+        using (_lane.Enter("GPU status extras"))
+        {
+            GpcVoltages.Reading? gpc = null;
+            try { gpc = GpcLocked(); } catch (InvalidOperationException) { }
+            IReadOnlyDictionary<int, uint>? clocks = null;
+            try { clocks = PowerSplitReader.ReadClocks(_hw, _session); } catch (Exception e) when (e is InvalidOperationException or NvApiException) { }
+            IReadOnlyList<Clocktail.Domain.Clocks.ClientLimit>? locks = null;
+            try { locks = Clocktail.Domain.Clocks.ClientLimitsLayout.Read(_hw, _session); } catch (Exception e) when (e is InvalidOperationException or InvalidDataException or NvApiException) { }
+            return (gpc, clocks, locks, ThermChannels.MemoryC(_hw, _session));
+        }
+    }
+
     /// <summary>Any other read of the driver, in the same lane as every read above (a read that writes nothing needs no
     /// broker and no elevation, as the CLI's reads do). What <paramref name="f"/> throws reaches the caller.</summary>
     public T WithDriver<T>(Func<NvClient, GpuSession, T> f)
@@ -294,3 +327,50 @@ public sealed class Card : IDisposable
 
     public void Dispose() => _mgr.Dispose();
 }
+
+public static class SampleQuantiles
+{
+    public static double? At(List<double> buf, double q)
+    {
+        if (buf.Count == 0) return null;
+        buf.Sort();
+        return Math.Round(buf[(int)Math.Clamp(Math.Round(q * (buf.Count - 1)), 0, buf.Count - 1)], 1);
+    }
+
+    public static (double? P10, double? P50, double? P90) P10P50P90<T>(IReadOnlyList<T> items, Func<T, double?> pick, List<double> buf)
+    {
+        buf.Clear();
+        for (int i = 0; i < items.Count; i++)
+            if (pick(items[i]) is { } v) buf.Add(v);
+        if (buf.Count == 0) return (null, null, null);
+        buf.Sort();
+        int n = buf.Count - 1;
+        return (
+            Math.Round(buf[(int)Math.Clamp(Math.Round(0.1 * n), 0, n)], 1),
+            Math.Round(buf[(int)Math.Clamp(Math.Round(0.5 * n), 0, n)], 1),
+            Math.Round(buf[(int)Math.Clamp(Math.Round(0.9 * n), 0, n)], 1));
+    }
+
+    public static double? P50<T>(IReadOnlyList<T> items, Func<T, double?> pick, List<double> buf)
+    {
+        buf.Clear();
+        for (int i = 0; i < items.Count; i++)
+            if (pick(items[i]) is { } v) buf.Add(v);
+        return At(buf, 0.5);
+    }
+
+    public static double? Avg<T>(IReadOnlyList<T> items, Func<T, double?> pick)
+    {
+        double sum = 0;
+        int n = 0;
+        for (int i = 0; i < items.Count; i++)
+            if (pick(items[i]) is { } v) { sum += v; n++; }
+        return n == 0 ? null : Math.Round(sum / n, 1);
+    }
+}
+
+internal sealed record StressStat(
+    double? clock_mhz, double? nvvdd_mv, double? msvdd_mv, double? board_w,
+    double? nvvdd_w, double? nvvdd_a, double? msvdd_w, double? msvdd_a,
+    double? xbar_mhz, double? sys_mhz, double? video_mhz, double? memory_mhz,
+    double? temp_c, double? memory_c, double? vram_used_gib, double? gpc_mean_mv, double? gpc_min_mv);

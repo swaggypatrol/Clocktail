@@ -145,7 +145,7 @@ public sealed partial class SettingsTools(Card card)
         });
         using var doc = JsonDocument.Parse(json);
         if (DailyOffCard(doc.RootElement) is not { } off) return json;
-        var node = JsonNode.Parse(json)!.AsObject();
+        var node = System.Text.Json.Nodes.JsonObject.Create(doc.RootElement)!;
         node["daily_differs_on_card"] = new JsonArray([.. off.Select(x => (JsonNode?)x)]);
         return JsonText.Unescape(node.ToJsonString(Json));
     });
@@ -162,7 +162,7 @@ public sealed partial class SettingsTools(Card card)
         for (int i = 0; i < LimiterSamples; i++)
         {
             double? peak = card.PeakInstantW(LimiterGap);   // the gap is watched: the wall answers peaks the average hides
-            var s = card.ReadSample();
+            var s = card.ReadSample(includeExtended: false);
             if (s.Reading(peak) is not { } r) continue;
             samples.Add((s, r, Limiter.Holding(r, max, top?.EffectiveKhz)));
         }
@@ -338,7 +338,18 @@ public sealed partial class SettingsTools(Card card)
         var offsets = s.Offsets();
         uint? max = rails?.Get(Rail.Nvvdd)?.Limits.MaxUv;
         var top = Limiter.CurveTop(s.Points, max);
-        bool flat = top != null && s.Points.Any(p => p.Index > top.Index && (max == null || p.VoltageUv <= max));
+        int nextIdx = top == null ? -1 : top.Index + 1;
+        bool flat = top != null && ((uint)nextIdx < (uint)s.Points.Count && s.Points[nextIdx].Index == nextIdx
+            ? (max == null || s.Points[nextIdx].VoltageUv <= max)
+            : s.Points.Any(p => p.Index > top.Index && (max == null || p.VoltageUv <= max)));
+        int nonZero = 0, minOff = int.MaxValue, maxOff = int.MinValue;
+        foreach (int o in offsets)
+        {
+            if (o != 0) nonZero++;
+            if (o < minOff) minOff = o;
+            if (o > maxOff) maxOff = o;
+        }
+        if (offsets.Length == 0) minOff = maxOff = 0;
         int knee = VfShapes.Knee(s, max);
         string now = VfOffsets.Encode(offsets), stock = c.Stock(VfWrites.Kind, VfWrites.CoreKey, now) ?? "", daily = c.Daily(VfWrites.Kind, VfWrites.CoreKey) ?? "";
         int[]? dailyOffsets = null;
@@ -347,9 +358,9 @@ public sealed partial class SettingsTools(Card card)
         {
             offsets_khz = now,
             points = s.EditableCount,
-            offset_points = offsets.Count(o => o != 0),
-            min_offset_mhz = offsets.Min() / 1000.0,
-            max_offset_mhz = offsets.Max() / 1000.0,
+            offset_points = nonZero,
+            min_offset_mhz = minOff / 1000.0,
+            max_offset_mhz = maxOff / 1000.0,
             voltage_demand_mv = s.DemandShiftUv == 0 ? (double?)null : s.DemandShiftUv / 1000.0,
             // The highest clock the curve reaches up to MAX, at the lowest voltage that reaches it; flat when points above
             // it (still under MAX) give no more: the curve is cut flat there.
@@ -474,6 +485,7 @@ public sealed partial class SettingsTools(Card card)
         {
             var ctl = snap.Policies.FirstOrDefault(x => x.Index == p.Index);
             var st = snap.Status.FirstOrDefault(x => x.Index == p.Index);
+            var band = Band(snap.ControlRaw, p.Index);
             string key = FanPolicyWrites.Key(p.Index);
             return new
             {
@@ -486,8 +498,8 @@ public sealed partial class SettingsTools(Card card)
                 stock_curve = ctl == null ? null : c.Stock(FanPolicyWrites.Kind, key, ctl.Curve),
                 daily_curve = c.Daily(FanPolicyWrites.Kind, key),
                 // The zero-RPM band: the fans stop under stop and start past start (on the curve's temperature).
-                stop_start_c = Band(snap.ControlRaw, p.Index),
-                stock_stop_start_c = Band(snap.ControlRaw, p.Index) is { } band ? c.Stock(FanStopWrites.Kind, key, band) : null,
+                stop_start_c = band,
+                stock_stop_start_c = band is { } b ? c.Stock(FanStopWrites.Kind, key, b) : null,
                 daily_stop_start_c = c.Daily(FanStopWrites.Kind, key),
             };
         }).ToList();
@@ -669,9 +681,12 @@ public sealed partial class SettingsTools(Card card)
     /// <summary>A clock domain's offset (kHz) and voltage demand (µV, on the rail its topology names) on the card now.</summary>
     internal static (int OffsetKhz, int VdemandUv) Domain(Card card, ClockDomainId d)
     {
-        var t = ClockDomainsParser.Find(card.WithDriver(ClockDomainOffsets.ReadTopology), (uint)d);
-        var e = card.WithDriver((hw, s) => ReadControl(hw, s, t));
-        int slot = ClockVdemand.Slot(t, ClockVdemand.RailInfo(card.WithDriver(RailsReader.Read)));
+        var (t, e, rails) = card.WithDriver((hw, s) =>
+        {
+            var topo = ClockDomainsParser.Find(ClockDomainOffsets.ReadTopology(hw, s), (uint)d);
+            return (topo, ReadControl(hw, s, topo), RailsReader.Read(hw, s));
+        });
+        int slot = ClockVdemand.Slot(t, ClockVdemand.RailInfo(rails));
         return (e.OffsetKhz, slot == 0 ? e.VdemandNvvddUv : e.VdemandMsvddUv);
     }
 
@@ -711,8 +726,11 @@ public sealed partial class SettingsTools(Card card)
 
     private static double? Median(IEnumerable<double?> xs)
     {
-        var v = xs.Where(x => x != null).Select(x => x!.Value).Order().ToList();
+        var v = new List<double>();
+        foreach (var x in xs)
+            if (x is { } d) v.Add(d);
         if (v.Count == 0) return null;
+        v.Sort();
         return Math.Round(v.Count % 2 == 1 ? v[v.Count / 2] : (v[v.Count / 2 - 1] + v[v.Count / 2]) / 2, 1);
     }
 

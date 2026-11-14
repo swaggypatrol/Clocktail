@@ -167,4 +167,32 @@ public class FrameStatsTests
         Assert.Equal(1, apps.Single().Frames);
         Assert.Null(apps.Single().DisplayedFps);
     }
+
+    [Fact]
+    public void Shared_span_parse_across_two_accumulators_matches_individual_reads()
+    {
+        const string minimalHeader = "Application,MsBetweenPresents";
+        string[] lines =
+        [
+            (char)0xFEFF + minimalHeader,
+            "Game.exe,10.0",
+            "game.exe,20.0",
+            "Game.exe,0",
+            "Game.exe,-1",
+            "broken",
+            "Other.exe,12.5",
+        ];
+
+        var single = new Frames();
+        foreach (var l in lines) single.Add(l);
+
+        var total = new Frames();
+        var window = new Frames();
+        foreach (var l in lines) total.Add(l.AsSpan(), window);
+
+        Assert.Equal(single.Count, total.Count);
+        Assert.Equal(single.Apps(), total.Apps());
+        Assert.Equal(single.Count, window.Count);
+        Assert.Equal(single.Apps(), window.Apps());
+    }
 }

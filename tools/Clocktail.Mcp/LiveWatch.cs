@@ -161,12 +161,17 @@ public sealed class LiveWatch(Card card) : IDisposable
         List<string> fresh;
         int skipped;
         List<string>? tail = null;
+        bool running;
+        string? ended;
         lock (run)
         {
-            fresh = run.Lines.Skip(run.ReadUpTo).ToList();
+            int avail = run.Lines.Count - run.ReadUpTo;
+            skipped = Math.Max(0, avail - max);
+            int start = run.ReadUpTo + skipped;
+            fresh = run.Lines.GetRange(start, avail - skipped);
             run.ReadUpTo = run.Lines.Count;
-            skipped = Math.Max(0, fresh.Count - max);
-            if (skipped > 0) fresh = fresh.Skip(skipped).ToList();
+            running = run.Ended == null;
+            ended = run.EndReason;
             if (tailSeconds > 0)
             {
                 var since = (run.Ended ?? DateTimeOffset.Now) - TimeSpan.FromSeconds(tailSeconds);
@@ -175,8 +180,8 @@ public sealed class LiveWatch(Card card) : IDisposable
         }
         return new
         {
-            running = run.Ended == null,
-            ended = run.EndReason,
+            running,
+            ended,
             lines = fresh,
             skipped = skipped > 0 ? $"{skipped} older line(s) left out; all are in {run.LogPath}" : null,
             last_seconds = tail,
@@ -190,15 +195,23 @@ public sealed class LiveWatch(Card card) : IDisposable
     {
         Run run;
         lock (_gate) run = _run ?? throw new InvalidOperationException("no live watch yet: live_start starts one");
-        if (run.Ended == null)
-        {
-            run.EndReason ??= "live_stop";
-            run.Stop.Cancel();
-        }
+        lock (run)
+            if (run.Ended == null)
+            {
+                run.EndReason ??= "live_stop";
+                run.Stop.Cancel();
+            }
         var (summary, waiting) = StopAnswer(run.Loop, TimeSpan.FromSeconds(10), () => { lock (run) return run.Summary; }, () => SummaryLine(run));
         List<string> fresh;
-        lock (run) { fresh = run.Lines.Skip(run.ReadUpTo).ToList(); run.ReadUpTo = run.Lines.Count; }
-        return new { success = true, ended = run.EndReason, summary, still_waiting = waiting, lines = fresh.TakeLast(20), totals = Totals(run), log = run.LogPath, csv = run.CsvPath };
+        string? ended;
+        lock (run)
+        {
+            int start = Math.Max(run.ReadUpTo, run.Lines.Count - 20);
+            fresh = run.Lines.GetRange(start, run.Lines.Count - start);
+            run.ReadUpTo = run.Lines.Count;
+            ended = run.EndReason;
+        }
+        return new { success = true, ended, summary, still_waiting = waiting, lines = fresh, totals = Totals(run), log = run.LogPath, csv = run.CsvPath };
     }
 
     /// <summary>What live_stop says once it has waited up to <paramref name="wait"/> for the sampler to finish: its summary,
@@ -216,9 +229,13 @@ public sealed class LiveWatch(Card card) : IDisposable
     {
         Run? run;
         lock (_gate) run = _run;
-        if (run is not { Ended: null }) return;
-        run.EndReason ??= "the server stopped";
-        run.Stop.Cancel();
+        if (run == null) return;
+        lock (run)
+        {
+            if (run.Ended != null) return;
+            run.EndReason ??= "the server stopped";
+            run.Stop.Cancel();
+        }
         // A sampler stuck in a driver call finishes after the server: the capture must not outlive it.
         if (run.Loop?.Wait(TimeSpan.FromSeconds(5)) == false) run.Frames?.Stop();
     }
@@ -230,8 +247,12 @@ public sealed class LiveWatch(Card card) : IDisposable
         var every = TimeSpan.FromSeconds(run.EverySeconds);
         var cap = run.Started.AddHours(MaxHours);
         VfCurveSnapshot? curve = null;
+        VfPoint? top = null;
         uint? maxUv = null;
         IReadOnlyDictionary<int, int> edge = new Dictionary<int, int>();
+        string? edgeDataPath = null;
+        DateTime edgeMtimeUtc = DateTime.MinValue;
+        VfCurveSnapshot? edgeCurve = null;
         var shapeAt = DateTimeOffset.MinValue;
         bool inLoad = false, hot = false, hangReported = false;
         DateTimeOffset? notLoadedSince = null, hangSince = null;
@@ -240,11 +261,12 @@ public sealed class LiveWatch(Card card) : IDisposable
         DateTimeOffset? lastAt = null;
         double? windowW = null;   // the last window's median power under load, before any hang-like stretch
         var window = new List<Point>();
+        var statBuf = new List<double>();
         void Line()
         {
             if (window.Count == 0) return;
             Emit(run, WindowLine(window, curve, edge) + Fps(run));
-            if (hangSince == null) windowW = Pct(window.Select(p => p.BoardW), 0.5);
+            if (hangSince == null) windowW = SampleQuantiles.P50(window, p => p.BoardW, statBuf);
             window.Clear();
         }
         long next = 0;
@@ -253,13 +275,14 @@ public sealed class LiveWatch(Card card) : IDisposable
             while (!token.IsCancellationRequested)
             {
                 var now = DateTimeOffset.Now;
-                if (now >= cap) { run.EndReason = $"{MaxHours} h, the cap (CLOCKTAIL_MCP_MAX_LIVE_H)"; break; }
+                if (now >= cap) { lock (run) run.EndReason = $"{MaxHours} h, the cap (CLOCKTAIL_MCP_MAX_LIVE_H)"; break; }
                 if (now - shapeAt >= every)
                 {
                     // The curve's effective clocks move with temperature, and a trial may change it mid-watch: read it once a window.
                     try { curve = card.WithDriver(VfReader.Read); maxUv = card.WithDriver(RailsReader.Read).Get(Rail.Nvvdd)?.Limits.MaxUv; }
                     catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }
-                    if (curve != null) edge = Edge(curve);
+                    top = curve == null ? null : Limiter.CurveTop(curve.Points, maxUv);
+                    if (curve != null) edge = Edge(curve, ref edgeDataPath, ref edgeMtimeUtc, ref edgeCurve, edge);
                     // A lock set or released mid-watch (set_clock_lock, nvidia-smi -lgc, Afterburner's L) changes what the clocks mean:
                     // each lock period is checked on its own. An unreadable record is not a released lock: the last reading stands.
                     var locks = card.ClockLocks();
@@ -295,7 +318,7 @@ public sealed class LiveWatch(Card card) : IDisposable
                     if (silent is { } since) Emit(run, string.Create(CultureInfo.InvariantCulture, $"🔁 the card answers again after {(answered - since).TotalSeconds:0} s"));
                     LockSpan? span;
                     lock (run) span = OpenSpan(run.Spans);
-                    var p = ToPoint(s, t, curve, maxUv) with { Locks = span?.Key, LockSpan = span?.Id };
+                    var p = ToPoint(s, t, curve, top, maxUv) with { Locks = span?.Key, LockSpan = span?.Id };
                     if (HangLike(p, hangMhz, HangFloorW(t), windowW))
                     {
                         hangSince ??= now;
@@ -424,15 +447,27 @@ public sealed class LiveWatch(Card card) : IDisposable
             try { card.Broker(BrokerRequest.OpExperiment, "note", $"Live watch: {summary}"); } catch (Exception) { }
     }
 
-    private static Point ToPoint(Card.Sample s, TelemetrySnapshot t, VfCurveSnapshot? curve, uint? maxUv)
+    private static Point ToPoint(Card.Sample s, TelemetrySnapshot t, VfCurveSnapshot? curve, VfPoint? top, uint? maxUv)
     {
         var reading = s.Reading()!;
-        var top = curve == null ? null : Limiter.CurveTop(curve.Points, maxUv);
-        int? point = s.NvvddUv is { } uv && curve is { Points.Count: > 0 } c ? c.Points.MinBy(x => Math.Abs((long)x.VoltageUv - uv))!.Index : null;
+        int? point = s.NvvddUv is { } uv && curve is { Points.Count: > 0 } c ? NearestIndex(c.Points, uv) : null;
         return new Point(s.At, t.GraphicsClockMhz, s.NvvddUv / 1000.0, s.MsvddUv / 1000.0, s.Mhz(AllClocksLayout.Xbar), t.PowerWatts,
             t.PowerEnforcedWatts ?? t.PowerLimitWatts, t.TemperatureC, t.GpuUtilPercent, t.FanPercent.Count > 0 ? t.FanPercent.Average(x => (double)x) : null,
             Limiter.Key(Limiter.Holding(reading, maxUv, top?.EffectiveKhz)), point,
             IsLoaded(t), s.Mhz(AllClocksLayout.Sys), s.Mhz(AllClocksLayout.Video));
+    }
+
+    private static int NearestIndex(IReadOnlyList<VfPoint> pts, uint uv)
+    {
+        int lo = 0, hi = pts.Count - 1;
+        while (lo < hi)
+        {
+            int mid = lo + ((hi - lo) >> 1);
+            if (pts[mid].VoltageUv < uv) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo > 0 && uv - pts[lo - 1].VoltageUv <= pts[lo].VoltageUv - uv) return pts[lo - 1].Index;
+        return pts[lo].Index;
     }
 
     /// <summary>The board power from which a busy card counts as loaded: <see cref="LoadedShare"/> of the limit in force, at
@@ -541,33 +576,67 @@ public sealed class LiveWatch(Card card) : IDisposable
     /// <summary>One window under load, the way the reference card's runs were read: clock range and median, the voltage and
     /// the curve point it sat on, MSVDD and XBAR, power against the wall, temperature, fans, and what held the clock.</summary>
     /// <summary>The crash edge per curve point from this GPU's data points (<see cref="CrashEdge"/>); empty when there are none.</summary>
-    private IReadOnlyDictionary<int, int> Edge(VfCurveSnapshot curve)
+    private IReadOnlyDictionary<int, int> Edge(VfCurveSnapshot curve, ref string? dataPath, ref DateTime lastMtimeUtc,
+        ref VfCurveSnapshot? lastCurve, IReadOnlyDictionary<int, int> cached)
     {
         try
         {
-            var show = card.Broker(Clocktail.Domain.Broker.BrokerRequest.OpExperiment, "show");
-            if (show.Result is { } r && r.TryGetProperty("data", out var d) && d.GetString() is { } data)
-                return CrashEdge.From(Experiment.ReadLast(data, 1000), curve.Points);
+            if (dataPath == null)
+            {
+                var show = card.Broker(Clocktail.Domain.Broker.BrokerRequest.OpExperiment, "show");
+                if (show.Result is { } r && r.TryGetProperty("data", out var d) && d.GetString() is { } data)
+                    dataPath = data;
+            }
+            if (dataPath != null)
+            {
+                DateTime mtime = File.Exists(dataPath) ? File.GetLastWriteTimeUtc(dataPath) : DateTime.MinValue;
+                if (mtime == lastMtimeUtc && lastCurve != null && SameShape(lastCurve, curve))
+                    return cached;
+                var fresh = mtime == DateTime.MinValue ? new Dictionary<int, int>() : CrashEdge.From(Experiment.ReadLast(dataPath, 1000), curve.Points);
+                lastMtimeUtc = mtime;
+                lastCurve = curve;
+                return fresh;
+            }
         }
         catch (Exception e) when (e is IOException or InvalidOperationException or UnauthorizedAccessException) { }
-        return new Dictionary<int, int>();
+        return cached.Count == 0 ? cached : new Dictionary<int, int>();
+    }
+
+    private static VfPoint? PointAt(VfCurveSnapshot? curve, int index)
+    {
+        if (curve == null) return null;
+        var pts = curve.Points;
+        if ((uint)index < (uint)pts.Count && pts[index].Index == index) return pts[index];
+        return pts.FirstOrDefault(x => x.Index == index);
     }
 
     private static string WindowLine(List<Point> w, VfCurveSnapshot? curve, IReadOnlyDictionary<int, int>? edge = null)
     {
-        var clocks = w.Where(p => p.ClockMhz != null).Select(p => (double)p.ClockMhz!.Value).ToList();
+        var buf = new List<double>(w.Count);
+        double minClk = double.MaxValue, maxClk = double.MinValue;
+        double? maxBoard = null, maxTemp = null, limit = null;
+        int onWall = 0;
+        foreach (var p in w)
+        {
+            if (p.ClockMhz is { } c) { buf.Add(c); if (c < minClk) minClk = c; if (c > maxClk) maxClk = c; }
+            if (p.LimitW is { } lw) limit = lw;
+            if (p.BoardW is { } bw && (maxBoard == null || bw > maxBoard)) maxBoard = bw;
+            if (p.TempC is { } tc && (maxTemp == null || tc > maxTemp)) maxTemp = tc;
+            if (p.OnWall) onWall++;
+        }
+        double? clkP50 = SampleQuantiles.At(buf, 0.5);
         int? point = Mode(w.Select(p => p.CurvePoint));
-        var onCurve = point is { } i && curve?.Points.FirstOrDefault(x => x.Index == i) is { } vp ? $" ({vp.EffectiveKhz / 1000.0:0} MHz on the curve)" : "";
-        var limit = w.Select(p => p.LimitW).LastOrDefault(x => x != null);
+        var vp = point is { } i ? PointAt(curve, i) : null;
+        var onCurve = vp != null ? $" ({vp.EffectiveKhz / 1000.0:0} MHz on the curve)" : "";
         var sb = new StringBuilder("📊 ");
-        sb.Append(clocks.Count == 0 ? "clock unread" : string.Create(CultureInfo.InvariantCulture, $"{clocks.Min():0}-{clocks.Max():0} MHz (p50 {Pct(clocks, 0.5):0})"));
-        sb.Append(string.Create(CultureInfo.InvariantCulture, $" @ {Pct(w.Select(p => p.NvvddMv), 0.5):0} mV, point {point?.ToString(CultureInfo.InvariantCulture) ?? "?"}{onCurve}"));
-        sb.Append(string.Create(CultureInfo.InvariantCulture, $" · MSVDD {Pct(w.Select(p => p.MsvddMv), 0.5):0} mV · XBAR {Pct(w.Select(p => p.XbarMhz), 0.5):0} / SYS {Pct(w.Select(p => p.SysMhz), 0.5):0} MHz"));
+        sb.Append(buf.Count == 0 ? "clock unread" : string.Create(CultureInfo.InvariantCulture, $"{minClk:0}-{maxClk:0} MHz (p50 {clkP50:0})"));
+        sb.Append(string.Create(CultureInfo.InvariantCulture, $" @ {SampleQuantiles.P50(w, p => p.NvvddMv, buf):0} mV, point {point?.ToString(CultureInfo.InvariantCulture) ?? "?"}{onCurve}"));
+        sb.Append(string.Create(CultureInfo.InvariantCulture, $" · MSVDD {SampleQuantiles.P50(w, p => p.MsvddMv, buf):0} mV · XBAR {SampleQuantiles.P50(w, p => p.XbarMhz, buf):0} / SYS {SampleQuantiles.P50(w, p => p.SysMhz, buf):0} MHz"));
         sb.Append(string.Create(CultureInfo.InvariantCulture,
-            $" · {Avg(w.Select(p => p.BoardW)):0} W avg, {w.Max(p => p.BoardW):0} max of {limit:0} ({100.0 * w.Count(p => p.OnWall) / w.Count:0} % on the wall)"));
-        sb.Append(string.Create(CultureInfo.InvariantCulture, $" · {w.Max(p => p.TempC):0} °C · fans {Avg(w.Select(p => p.FanPct)):0} %"));
+            $" · {SampleQuantiles.Avg(w, p => p.BoardW):0} W avg, {maxBoard:0} max of {limit:0} ({100.0 * onWall / w.Count:0} % on the wall)"));
+        sb.Append(string.Create(CultureInfo.InvariantCulture, $" · {maxTemp:0} °C · fans {SampleQuantiles.Avg(w, p => p.FanPct):0} %"));
         sb.Append(" · ").Append(Words(Mode(w.Select(p => p.HeldBy)) ?? "idle"));
-        if (edge != null && point is { } pi && curve?.Points.FirstOrDefault(x => x.Index == pi) is { } ep && CrashEdge.Describe(edge, pi, ep.OffsetKhz) is { } e)
+        if (edge != null && point is { } pi && PointAt(curve, pi) is { } ep && CrashEdge.Describe(edge, pi, ep.OffsetKhz) is { } e)
             sb.Append(" · ").Append(e);
         return sb.ToString();
     }
@@ -584,7 +653,16 @@ public sealed class LiveWatch(Card card) : IDisposable
             l = [.. run.Loaded]; samples = run.Samples; stretches = run.Stretches; silences = run.Silences; hangs = run.SuspectedHangs;
             underLoad = run.LoadedTime; spans = run.Spans; locksRead = run.LocksRead;
         }
-        var clocks = l.Where(p => p.ClockMhz != null).Select(p => (double)p.ClockMhz!.Value).ToList();
+        var buf = new List<double>(l.Count);
+        var (p10Mhz, p50Mhz, p90Mhz) = SampleQuantiles.P10P50P90(l, p => (double?)p.ClockMhz, buf);
+        double? maxBoard = null, maxTemp = null;
+        int onWall = 0;
+        foreach (var p in l)
+        {
+            if (p.BoardW is { } bw && (maxBoard == null || bw > maxBoard)) maxBoard = bw;
+            if (p.TempC is { } tc && (maxTemp == null || tc > maxTemp)) maxTemp = tc;
+            if (p.OnWall) onWall++;
+        }
         return new
         {
             started = run.Started.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
@@ -594,14 +672,14 @@ public sealed class LiveWatch(Card card) : IDisposable
             samples,
             card_stopped_answering = silences,
             looked_hung = hangs,
-            p10_mhz = Pct(clocks, 0.1),
-            p50_mhz = Pct(clocks, 0.5),
-            p90_mhz = Pct(clocks, 0.9),
-            p50_nvvdd_mv = Pct(l.Select(p => p.NvvddMv), 0.5),
-            p50_msvdd_mv = Pct(l.Select(p => p.MsvddMv), 0.5),
-            p50_xbar_mhz = Pct(l.Select(p => p.XbarMhz), 0.5),
-            p50_sys_mhz = Pct(l.Select(p => p.SysMhz), 0.5),
-            p50_video_mhz = Pct(l.Select(p => p.VideoMhz), 0.5),
+            p10_mhz = p10Mhz,
+            p50_mhz = p50Mhz,
+            p90_mhz = p90Mhz,
+            p50_nvvdd_mv = SampleQuantiles.P50(l, p => p.NvvddMv, buf),
+            p50_msvdd_mv = SampleQuantiles.P50(l, p => p.MsvddMv, buf),
+            p50_xbar_mhz = SampleQuantiles.P50(l, p => p.XbarMhz, buf),
+            p50_sys_mhz = SampleQuantiles.P50(l, p => p.SysMhz, buf),
+            p50_video_mhz = SampleQuantiles.P50(l, p => p.VideoMhz, buf),
             clock_locks = LocksBySpan(spans, l)?.Select(s => new
             {
                 locks = s.Locks,
@@ -611,12 +689,16 @@ public sealed class LiveWatch(Card card) : IDisposable
                 outcomes = s.Outcomes,
             }).ToList(),
             clock_locks_unread = locksRead ? null : TuningTools.LocksUnread,
-            p50_board_w = Pct(l.Select(p => p.BoardW), 0.5),
-            max_board_w = l.Count == 0 ? null : Round1(l.Max(p => p.BoardW)),
-            max_temp_c = l.Count == 0 ? null : Round1(l.Max(p => p.TempC)),
-            on_the_wall_pct = l.Count == 0 ? (double?)null : Math.Round(100.0 * l.Count(p => p.OnWall) / l.Count),
+            p50_board_w = SampleQuantiles.P50(l, p => p.BoardW, buf),
+            max_board_w = l.Count == 0 ? null : Round1(maxBoard),
+            max_temp_c = l.Count == 0 ? null : Round1(maxTemp),
+            on_the_wall_pct = l.Count == 0 ? (double?)null : Math.Round(100.0 * onWall / l.Count),
             curve_points = l.Where(p => p.CurvePoint != null).GroupBy(p => p.CurvePoint!.Value).OrderByDescending(g => g.Count()).Take(5)
-                .Select(g => new { point = g.Key, mv = Pct(g.Select(p => p.NvvddMv), 0.5), p50_mhz = Pct(g.Where(p => p.ClockMhz != null).Select(p => (double)p.ClockMhz!.Value).ToList(), 0.5), pct = Math.Round(100.0 * g.Count() / l.Count) }),
+                .Select(g =>
+                {
+                    var gp = g as IReadOnlyList<Point> ?? [.. g];
+                    return new { point = g.Key, mv = SampleQuantiles.P50(gp, p => p.NvvddMv, buf), p50_mhz = SampleQuantiles.P50(gp, p => (double?)p.ClockMhz, buf), pct = Math.Round(100.0 * gp.Count / l.Count) };
+                }),
             held_by = l.GroupBy(p => p.HeldBy).OrderByDescending(g => g.Count())
                 .Select(g => new { what = Words(g.Key), pct = Math.Round(100.0 * g.Count() / l.Count) }),
             fps_under_load = FrameFeed.Show(SafePlayed(run)),
@@ -637,12 +719,22 @@ public sealed class LiveWatch(Card card) : IDisposable
         string answers = (silences > 0 ? $"; the card stopped answering {silences} time(s)" : "")
             + (hangs > 0 ? $"; the readings looked like a hang (clock frozen at full use, power down) {hangs} time(s)" : "");
         if (l.Count == 0) return string.Create(CultureInfo.InvariantCulture, $"{minutes:0.#} min, never under load") + answers + (run.Note != null ? $". Playing: {run.Note}" : "");
-        var clocks = l.Where(p => p.ClockMhz != null).Select(p => (double)p.ClockMhz!.Value).ToList();
+        var buf = new List<double>(l.Count);
+        var (p10Mhz, p50Mhz, p90Mhz) = SampleQuantiles.P10P50P90(l, p => (double?)p.ClockMhz, buf);
+        double? p50Mv = SampleQuantiles.P50(l, p => p.NvvddMv, buf);
+        double? maxTemp = null, maxBoard = null;
+        int onWall = 0;
+        foreach (var p in l)
+        {
+            if (p.TempC is { } tc && (maxTemp == null || tc > maxTemp)) maxTemp = tc;
+            if (p.BoardW is { } bw && (maxBoard == null || bw > maxBoard)) maxBoard = bw;
+            if (p.OnWall) onWall++;
+        }
         int? point = Mode(l.Select(p => p.CurvePoint));
         var held = string.Join(", ", l.GroupBy(p => p.HeldBy).OrderByDescending(g => g.Count()).Take(3).Select(g => $"{Words(g.Key)} {100.0 * g.Count() / l.Count:0} %"));
         return string.Create(CultureInfo.InvariantCulture,
-            $"{minutes:0.#} min, {underLoad.TotalMinutes:0.#} min of it under load in {stretches} stretch(es). P50 {Pct(clocks, 0.5):0} MHz @ {Pct(l.Select(p => p.NvvddMv), 0.5):0} mV (point {point}), " +
-            $"P10 {Pct(clocks, 0.1):0}, P90 {Pct(clocks, 0.9):0}; {100.0 * l.Count(p => p.OnWall) / l.Count:0} % on the wall; max {l.Max(p => p.TempC):0} °C, {l.Max(p => p.BoardW):0} W; {held}")
+            $"{minutes:0.#} min, {underLoad.TotalMinutes:0.#} min of it under load in {stretches} stretch(es). P50 {p50Mhz:0} MHz @ {p50Mv:0} mV (point {point}), " +
+            $"P10 {p10Mhz:0}, P90 {p90Mhz:0}; {100.0 * onWall / l.Count:0} % on the wall; max {maxTemp:0} °C, {maxBoard:0} W; {held}")
             + answers
             + (run.Frames is { } f ? $"; under load {FrameFeed.Words(SafePlayed(run), f.EndedAt)}" : "") + SpanWords(LocksBySpan(spans, l))
             + (run.Note != null ? $". Playing: {run.Note}" : "");
@@ -717,21 +809,6 @@ public sealed class LiveWatch(Card card) : IDisposable
     private static string? Mode(IEnumerable<string> xs) => xs.GroupBy(x => x).OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault();
 
     private static double? Round1(double? x) => x is { } v ? Math.Round(v, 1) : null;
-
-    private static double? Avg(IEnumerable<double?> xs)
-    {
-        var v = xs.Where(x => x != null).Select(x => x!.Value).ToList();
-        return v.Count == 0 ? null : Math.Round(v.Average(), 1);
-    }
-
-    private static double? Pct(IEnumerable<double?> xs, double q) => Pct(xs.Where(x => x != null).Select(x => x!.Value).ToList(), q);
-
-    private static double? Pct(List<double> xs, double q)
-    {
-        if (xs.Count == 0) return null;
-        var v = xs.Order().ToList();
-        return Math.Round(v[(int)Math.Clamp(Math.Round(q * (v.Count - 1)), 0, v.Count - 1)], 1);
-    }
 
     private static int Env(string name, int fallback) =>
         int.TryParse(Environment.GetEnvironmentVariable(name), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) && v > 0 ? v : fallback;

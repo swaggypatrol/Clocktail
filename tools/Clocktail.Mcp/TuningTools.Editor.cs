@@ -52,7 +52,8 @@ public sealed partial class TuningTools
         }
         EditorData data;
         object observed;
-        try { data = EditorData(out observed); }
+        VfTimeline? historyTimeline;
+        try { data = EditorData(out observed, out historyTimeline); }
         catch { EditorState.Release(); throw; }
         CurveEditorForm.Show(data, (request, progress) => SaveFromEditor(data, request, progress), point =>
         {
@@ -60,7 +61,9 @@ public sealed partial class TuningTools
             var path = Path.Combine(data.Dir, Experiment.DataFileName);
             Experiment.DeletePoint(path, point);
             // Rebuild using the opened curve's voltage/base mapping, never the user's unsaved edits.
-            return ReadEditorHistory(path, data.Mv, data.BaseKhz, data.Curve, new VfReadStats());
+            return historyTimeline != null
+                ? ProjectEditorHistory(Experiment.ReadLast(path, int.MaxValue), data.Mv, data.BaseKhz, data.Curve, historyTimeline)
+                : ReadEditorHistory(path, data.Mv, data.BaseKhz, data.Curve, new VfReadStats());
         }, outcome =>
         {
             EditorState.Closed(outcome);
@@ -97,7 +100,7 @@ public sealed partial class TuningTools
 
     /// <summary>The curve, the firmware range, the crashes on their points, each point's evidence and where the card ran,
     /// read once; <paramref name="info"/>: the observed seconds of each source and the broker's V/F history status.</summary>
-    private EditorData EditorData(out object info)
+    private EditorData EditorData(out object info, out VfTimeline? historyTimeline)
     {
         var look = card.Read();
         var pts = look.Curve.Points;
@@ -120,12 +123,24 @@ public sealed partial class TuningTools
         var show = card.Broker(BrokerRequest.OpExperiment, "show");
         var evidenceRead = new VfReadStats();
         var now = DateTimeOffset.Now;
-        var ticks = residency.Between(now - RunsSpan, now);
+        var runsFrom = now - RunsSpan;
+        IReadOnlyList<Residency.Tick> ticks;
         if (show.Ok && show.Result is { } res && res.TryGetProperty("data", out var dp) && dp.GetString() is { } dataPath)
         {
             dir = Path.GetDirectoryName(dataPath);
             band = ReadBand(dir, offsets);
-            history = ReadEditorHistory(dataPath, mv, baseKhz, look.Curve, evidenceRead);
+            var all = Experiment.ReadLast(dataPath, int.MaxValue);
+            DateTimeOffset earliest = all.Count > 0 ? all.Min(Experiment.StartOf) : runsFrom;
+            if (runsFrom < earliest) earliest = runsFrom;
+            var allTicks = residency.Between(earliest, now);
+            ticks = runsFrom <= earliest ? allTicks : [.. allTicks.Where(t => t.At >= runsFrom)];
+            historyTimeline = HistoryTimeline(all, allTicks, VfHistoryFile.DirBeside(dataPath), evidenceRead);
+            history = ProjectEditorHistory(all, mv, baseKhz, look.Curve, historyTimeline);
+        }
+        else
+        {
+            historyTimeline = null;
+            ticks = residency.Between(runsFrom, now);
         }
         // Where the card ran: the residency samples and the broker's always-on V/F history (beside the same records), one
         // timeline weighted by observed time, streamed a UTC day at a time over the 60 days.

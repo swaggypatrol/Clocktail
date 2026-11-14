@@ -176,14 +176,34 @@ public static class RailsReader
     /// </summary>
     public static uint? PresentUv(NvClient hw, GpuSession gpu, uint mask, Rail rail)
     {
-        int bit = (int)rail;
-        if ((mask >> bit & 1) == 0) return null;
+        if ((mask >> (int)rail & 1) == 0) return null;
+        var st = ReadStatus(hw, gpu, mask);
+        return st == null ? null : ExtractPresentUv(st, mask, rail);
+    }
+
+    /// <summary>Read both NVVDD and MSVDD present voltages from a single status driver call.</summary>
+    public static (uint? Nvvdd, uint? Msvdd) PresentUvPair(NvClient hw, GpuSession gpu, uint mask)
+    {
+        if ((mask >> (int)Rail.Nvvdd & 1) == 0 && (mask >> (int)Rail.Msvdd & 1) == 0) return (null, null);
+        var st = ReadStatus(hw, gpu, mask);
+        return st == null ? (null, null) : (ExtractPresentUv(st, mask, Rail.Nvvdd), ExtractPresentUv(st, mask, Rail.Msvdd));
+    }
+
+    private static byte[]? ReadStatus(NvClient hw, GpuSession gpu, uint mask)
+    {
         var st = NvClient.NewBuffer(Slot.VoltVoltRailsGetStatus);
         BinaryPrimitives.WriteUInt32LittleEndian(st.AsSpan(4), mask);
-        if (!hw.Call(gpu, Slot.VoltVoltRailsGetStatus, st).IsOk || BinaryPrimitives.ReadUInt32LittleEndian(st.AsSpan(4)) != mask) return null;
+        return hw.Call(gpu, Slot.VoltVoltRailsGetStatus, st).IsOk && BinaryPrimitives.ReadUInt32LittleEndian(st.AsSpan(4)) == mask ? st : null;
+    }
+
+    /// <summary>Extract a rail's present voltage, µV, from an already-read rails status buffer.</summary>
+    public static uint? ExtractPresentUv(ReadOnlySpan<byte> status, uint mask, Rail rail)
+    {
+        int bit = (int)rail;
+        if ((mask >> bit & 1) == 0 || status.Length < 8 || BinaryPrimitives.ReadUInt32LittleEndian(status[4..]) != mask) return null;
         int at = RailsLayout.StatusBase + BitOperations.PopCount(mask & ((1u << bit) - 1)) * RailsLayout.StatusEntry;
-        if (at + 4 > st.Length) return null;
-        uint uv = BinaryPrimitives.ReadUInt32LittleEndian(st.AsSpan(at));
+        if (at + 4 > status.Length) return null;
+        uint uv = BinaryPrimitives.ReadUInt32LittleEndian(status[at..]);
         return uv is > 0 and < 2_000_000 ? uv : null;
     }
 

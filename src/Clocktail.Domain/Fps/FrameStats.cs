@@ -95,36 +95,102 @@ public sealed class Frames
         public bool Overlaps(Series o) => First < o.Last && o.First < Last;
     }
 
-    private int _app = -1, _between = -1, _shown = -1, _pid = -1, _chain = -1, _time = -1;
-    private readonly Dictionary<string, Series> _series = new(StringComparer.OrdinalIgnoreCase);
+    private int _app = -1, _between = -1, _shown = -1, _pid = -1, _chain = -1, _time = -1, _maxCol = -1;
+    private readonly Dictionary<string, Series> _series;
+    private readonly Dictionary<string, Series>.AlternateLookup<ReadOnlySpan<char>> _seriesLookup;
     private IReadOnlyList<FrameStats.App>? _apps;
     private int _appsAt = -1;
+
+    public Frames()
+    {
+        _series = new(StringComparer.OrdinalIgnoreCase);
+        _seriesLookup = _series.GetAlternateLookup<ReadOnlySpan<char>>();
+    }
 
     /// <summary>The header line, once seen: a window of rows read later needs it too.</summary>
     public string? Header { get; private set; }
 
     public int Count { get; private set; }
 
-    public void Add(string line)
+    public void Add(string line) => Add(line.AsSpan(), null);
+
+    public void Add(ReadOnlySpan<char> line, Frames? also = null)
     {
-        line = line.TrimStart((char)0xFEFF);   // PresentMon writes its CSV as UTF-8 with a byte-order mark
-        if (line.Length == 0) return;
-        var f = line.Split(',');
+        line = line.TrimStart('\uFEFF');   // PresentMon writes its CSV as UTF-8 with a byte-order mark
+        if (line.IsEmpty) return;
         if (_app < 0)
         {
-            int app = Array.IndexOf(f, "Application"), between = Array.IndexOf(f, "MsBetweenPresents");
+            int app = -1, between = -1, shown = -1, pid = -1, chain = -1, time = -1;
+            int col = 0, pos = 0;
+            while (true)
+            {
+                int comma = line[pos..].IndexOf(',');
+                var tok = comma < 0 ? line[pos..] : line.Slice(pos, comma);
+                if (app < 0 && tok.SequenceEqual("Application")) app = col;
+                else if (between < 0 && tok.SequenceEqual("MsBetweenPresents")) between = col;
+                else if (shown < 0 && tok.SequenceEqual("MsBetweenDisplayChange")) shown = col;
+                else if (pid < 0 && tok.SequenceEqual("ProcessID")) pid = col;
+                else if (chain < 0 && tok.SequenceEqual("SwapChainAddress")) chain = col;
+                else if (time < 0 && tok.SequenceEqual("TimeInMs")) time = col;
+                if (comma < 0) break;
+                pos += comma + 1;
+                col++;
+            }
             if (app < 0 || between < 0) return;   // not the header
-            (_app, _between, _shown, Header) = (app, between, Array.IndexOf(f, "MsBetweenDisplayChange"), line);
-            (_pid, _chain, _time) = (Array.IndexOf(f, "ProcessID"), Array.IndexOf(f, "SwapChainAddress"), Array.IndexOf(f, "TimeInMs"));
+            string header = new string(line);
+            (_app, _between, _shown, Header) = (app, between, shown, header);
+            (_pid, _chain, _time) = (pid, chain, time);
+            _maxCol = Math.Max(Math.Max(app, between), Math.Max(Math.Max(shown, pid), Math.Max(chain, time)));
+            also?.SetHeader(header, app, between, shown, pid, chain, time, _maxCol);
             return;
         }
-        if (f.Length <= Math.Max(_app, _between) || !double.TryParse(f[_between], NumberStyles.Float, CultureInfo.InvariantCulture, out double ms) || ms <= 0) return;
-        string key = f[_app] + "\0" + Field(f, _pid) + "\0" + Field(f, _chain);
-        if (!_series.TryGetValue(key, out var s)) _series[key] = s = new Series(f[_app]);
+
+        ReadOnlySpan<char> appSpan = default, betweenSpan = default, shownSpan = default, pidSpan = default, chainSpan = default, timeSpan = default;
+        int c = 0, p = 0;
+        while (true)
+        {
+            int comma = line[p..].IndexOf(',');
+            var tok = comma < 0 ? line[p..] : line.Slice(p, comma);
+            if (c == _app) appSpan = tok;
+            else if (c == _between) betweenSpan = tok;
+            else if (c == _shown) shownSpan = tok;
+            else if (c == _pid) pidSpan = tok;
+            else if (c == _chain) chainSpan = tok;
+            else if (c == _time) timeSpan = tok;
+            if (comma < 0 || c >= _maxCol) break;
+            p += comma + 1;
+            c++;
+        }
+        if (c < Math.Max(_app, _between) || !double.TryParse(betweenSpan, NumberStyles.Float, CultureInfo.InvariantCulture, out double ms) || ms <= 0) return;
+        double? d = _shown >= 0 && c >= _shown && double.TryParse(shownSpan, NumberStyles.Float, CultureInfo.InvariantCulture, out double dv) && dv > 0 ? dv : null;
+        double? t = _time >= 0 && c >= _time && double.TryParse(timeSpan, NumberStyles.Float, CultureInfo.InvariantCulture, out double tv) ? tv : null;
+
+        int keyLen = appSpan.Length + 1 + pidSpan.Length + 1 + chainSpan.Length;
+        Span<char> keyBuf = keyLen <= 512 ? stackalloc char[512] : new char[keyLen];
+        var key = keyBuf[..keyLen];
+        appSpan.CopyTo(key);
+        key[appSpan.Length] = '\0';
+        pidSpan.CopyTo(key[(appSpan.Length + 1)..]);
+        key[appSpan.Length + 1 + pidSpan.Length] = '\0';
+        chainSpan.CopyTo(key[(appSpan.Length + 2 + pidSpan.Length)..]);
+
+        AddParsed(key, appSpan, ms, d, t);
+        also?.AddParsed(key, appSpan, ms, d, t);
+    }
+
+    private void SetHeader(string header, int app, int between, int shown, int pid, int chain, int time, int maxCol)
+    {
+        (_app, _between, _shown, _pid, _chain, _time, _maxCol, Header) = (app, between, shown, pid, chain, time, maxCol, header);
+    }
+
+    private void AddParsed(ReadOnlySpan<char> key, ReadOnlySpan<char> appSpan, double ms, double? shownMs, double? timeMs)
+    {
+        if (!_seriesLookup.TryGetValue(key, out var s))
+            _series[new string(key)] = s = new Series(new string(appSpan));
         s.Ms.Add(ms);
         s.MsSum += ms;
-        if (Number(f, _shown) is { } d && d > 0) { s.Shown++; s.ShownSum += d; }
-        if (Number(f, _time) is { } t) s.Time(t);
+        if (shownMs is { } d) { s.Shown++; s.ShownSum += d; }
+        if (timeMs is { } t) s.Time(t);
         Count++;
     }
 
@@ -170,11 +236,6 @@ public sealed class Frames
         _appsAt = Count;
         return _apps;
     }
-
-    private static string Field(string[] f, int i) => i >= 0 && i < f.Length ? f[i] : "";
-
-    private static double? Number(string[] f, int i) =>
-        i >= 0 && i < f.Length && double.TryParse(f[i], NumberStyles.Float, CultureInfo.InvariantCulture, out double v) ? v : null;
 }
 
 /// <summary>A frame-rate capture the elevated broker runs (PresentMon needs administrator rights or the Performance Log

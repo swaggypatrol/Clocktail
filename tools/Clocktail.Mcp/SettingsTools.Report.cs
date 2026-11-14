@@ -35,6 +35,7 @@ public sealed partial class SettingsTools
         "Summarize this RTX 50 GPU's actual settings, known stock values and user-kept daily profile when present, plus live readings and a V/F chart. Show the returned table and chart, then explain uncertainty. Report marks are advisory, not hardware-safety guarantees or extra tuning vetoes. Missing capabilities are not zero; another utility's settings are not stock.")]
     public string CardReport() => Guard(() =>
     {
+        var updateTask = Task.Run(UpdateCheck.Latest);
         using var settingsDoc = JsonDocument.Parse(CardSettings());
         using var limiterDoc = JsonDocument.Parse(WhatLimits());
         var s = settingsDoc.RootElement;
@@ -54,7 +55,7 @@ public sealed partial class SettingsTools
                 $"Clocktail reads and tunes the {Str(s, "gpu")} only; stress_test's load (nvgwls) picks its own GPU, so check the clock moves when it runs"));
         if (Str(s, "driver") is { } driver && Str(s, "tested_on") is { } tested)
             live.Add(new("🧪", "Tested on", "", $"driver {driver}, VBIOS {Str(s, "vbios")}", "", Info, tested));
-        var (version, newer, versionNote) = UpdateCheck.Describe(UpdateCheck.Latest());
+        var (version, newer, versionNote) = UpdateCheck.Describe(updateTask.GetAwaiter().GetResult());
         live.Add(new(newer ? "🆕" : "🏷️", "Clocktail", "", version, "", Info, versionNote));
         var chart = CurveChart(s, l);
         string verdict = Verdict(rows.Concat(live).ToList());
@@ -564,7 +565,7 @@ public sealed partial class SettingsTools
     {
         foreach (var p in path)
             if (e.ValueKind != JsonValueKind.Object || !e.TryGetProperty(p, out e)) return [];
-        return e.ValueKind == JsonValueKind.Array ? e.EnumerateArray().ToList() : [];
+        return e.ValueKind == JsonValueKind.Array ? (IEnumerable<JsonElement>)e.EnumerateArray() : [];
     }
 
     private static string F(double? v) => v is { } x ? x.ToString("0.#", Inv) : "?";

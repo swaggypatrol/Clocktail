@@ -165,9 +165,11 @@ public sealed record Experiment(string Game, string? Note, DateTimeOffset Starte
         File.AppendAllText(dataPath, JsonSerializer.Serialize(point, Line) + "\n");
     }
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<DataPoint, string> PointIdCache = [];
+
     /// <summary>A stable identity for a complete test record, not just its timestamp or curve point.</summary>
-    public static string PointId(DataPoint point) =>
-        Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(point, Line)));
+    public static string PointId(DataPoint point) => PointIdCache.GetValue(point, static p =>
+        Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(p, Line))));
 
     public static string DeletedDirectory(string dataPath) => dataPath + ".deleted";
 

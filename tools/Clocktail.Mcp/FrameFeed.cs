@@ -121,12 +121,17 @@ public sealed class FrameFeed
             if (_dropPartial) _dropPartial = false;
             else
             {
-                string line;
-                if (_partial.Length > 0) { _partial.Append(text[..nl]); line = _partial.ToString(); _partial.Clear(); }
-                else line = new string(text[..nl]);
-                line = line.TrimEnd('\r');
-                _total.Add(line);
-                _window.Add(line);
+                if (_partial.Length > 0)
+                {
+                    _partial.Append(text[..nl]);
+                    ReadOnlySpan<char> line = _partial.ToString().AsSpan().TrimEnd('\r');
+                    _partial.Clear();
+                    _total.Add(line, _window);
+                }
+                else
+                {
+                    _total.Add(text[..nl].TrimEnd('\r'), _window);
+                }
             }
             text = text[(nl + 1)..];
         }

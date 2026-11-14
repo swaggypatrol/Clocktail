@@ -17,6 +17,19 @@ public class LastLoadTests
         Assert.Null(Residency.LastLoadMedian(ticks, T0.AddMinutes(5), TimeSpan.FromMinutes(2), TimeSpan.FromSeconds(10)));   // too long ago
         Assert.Null(Residency.LastLoadMedian([], now, TimeSpan.FromMinutes(2), TimeSpan.FromSeconds(10)));
     }
+
+    [Fact]
+    public void Last_load_median_handles_unordered_ticks_and_cutoff_intersection()
+    {
+        var ticks = new List<Residency.Tick>
+        {
+            new(T0.AddSeconds(58), 940_000, 2880, 100, 500),
+            new(T0.AddSeconds(10), 800_000, 2500, 95, 400),   // outside within-window
+            new(T0.AddSeconds(52), 920_000, 2880, 100, 500),
+            new(T0.AddSeconds(55), 930_000, 2880, 100, 500),
+        };
+        Assert.Equal(930_000u, Residency.LastLoadMedian(ticks, T0.AddSeconds(60), TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(10)));
+    }
 }
 
 /// <summary>A light-load stress run (nvgwls -l 30/40, read as 30-57 % utilization) leaves samples for its trial.</summary>

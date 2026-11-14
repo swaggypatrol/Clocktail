@@ -40,3 +40,58 @@
   - `FlattenTests.A_point_lifted_by_a_left_neighbor_spike_uses_its_own_base_when_flattened`
 - 构建：`dotnet build Clocktail.slnx --no-restore --nologo` — **0 warnings / 0 errors**。
 - 测试：`dotnet test tests/Clocktail.Tests/Clocktail.Tests.csproj --no-build --nologo` — **1660/1660 通过**。
+
+---
+
+## Phase 2：驱动读合并、重复序列化消除、零分配遥测与单次排序分位数
+
+### 1. 驱动层读取与锁合并（`Card` / `RailsReader` / `SettingsTools` / `TuningTools`）
+- **合并 Rails 电压读取并复用缓存**（[`src/Clocktail.Domain/Rails/RailsModel.cs`](../src/Clocktail.Domain/Rails/RailsModel.cs)、[`tools/Clocktail.Mcp/Card.cs`](../tools/Clocktail.Mcp/Card.cs)）：
+  - 在 `RailsReader` 新增 `ExtractPresentUv` 与 `PresentUvPair`：`Card.Read()` 直接从已获取的 `RailsReader.Read` 原始状态缓冲提取 `NVVDD`/`MSVDD` 当前电压（仅异常时单次 `PresentUvPair` 回退），并顺带回填 `_railMask`、`_monitorLayout` 与 `_monitorAt`，避免紧随其后的 `ReadSample()` 在 5 秒内重复读取电流限制表；`Card.ReadSample` 则以单次 `PresentUvPair` 替代两次独立 `VoltVoltRailsGetStatus` 驱动调用。
+  - 为 `Card.ReadSample(bool includeExtended = true)` 增加轻量模式：`limiter`（[`tools/Clocktail.Mcp/SettingsTools.cs`](../tools/Clocktail.Mcp/SettingsTools.cs) `WhatLimits`）传入 `includeExtended: false`，跳过每次采样多余的时钟表、`GpcLocked()` 与显存温度驱动读取（单次 `limiter` 节省 15 次驱动读取）。
+- **批处理状态与时钟域读取**（[`tools/Clocktail.Mcp/Card.cs`](../tools/Clocktail.Mcp/Card.cs)、[`tools/Clocktail.Mcp/TuningTools.cs`](../tools/Clocktail.Mcp/TuningTools.cs)、[`tools/Clocktail.Mcp/SettingsTools.cs`](../tools/Clocktail.Mcp/SettingsTools.cs)）：
+  - 新增 `Card.ReadStatusExtras()` 在单次 `DriverLane` 加锁周期内完成 `Gpc`、`Clocks`、`ClockLocks` 与 `MemoryC` 读取，`gpu_status` 节省 3 次加锁排队。
+  - `SettingsTools.Domain` 将拓扑、控制与 Rails 三次 `WithDriver` 合并为单次锁内执行。
+- **试探读取复用**（[`tools/Clocktail.Mcp/TuningTools.Trials.cs`](../tools/Clocktail.Mcp/TuningTools.Trials.cs)）：
+  - `set_clock_lock` 在查找目标曲线点时改用 $O(\log N)$ 二分查找 `Nearest` 并把已取得的 `Card.Look` 传入 `Trial(..., beforeLook)`，消除紧随其后的重复全卡 `card.Read()`。
+- **正则与位掩码快路径**（[`tools/Clocktail.Mcp/Card.cs`](../tools/Clocktail.Mcp/Card.cs)）：
+  - `Card.IsRtx50` 改用编译期 `[GeneratedRegex]`（`Rtx50Regex()`）；`PerfDecreaseReasons(0)` 直接返回空集合，非零位掩码遍历静态数组避免每次分配元组数组与 LINQ 委托。
+
+### 2. JSON 序列化、并发与杂项计算消冗
+- **消除二次文本解析与并行版本检查**（[`tools/Clocktail.Mcp/SettingsTools.cs`](../tools/Clocktail.Mcp/SettingsTools.cs)、[`tools/Clocktail.Mcp/SettingsTools.Report.cs`](../tools/Clocktail.Mcp/SettingsTools.Report.cs)）：
+  - `card_settings` 在需附加 `daily_differs_on_card` 时直接以 `JsonObject.Create(doc.RootElement)` 包装已解析的 `JsonElement`，移除第二次全量 JSON 字符串解析（`JsonNode.Parse`）。
+  - `SettingsTools.Curve` 单遍扫描 `offsets` 统计 `nonZero`/`min`/`max` 并利用 `VoltageUv` 升序对 `flat` 检查增加 $O(1)$ 右邻快路径；`FanCurves` 复用单次 `Band(snap.ControlRaw, p.Index)`。
+  - `card_report` 在执行 `CardSettings()`/`WhatLimits()` 前通过 `Task.Run(UpdateCheck.Latest)` 并发检查版本；`Arr` 移除多余 `.ToList()` 分配。
+- **进程快照合并**（[`tools/Clocktail.Mcp/OtherTools.cs`](../tools/Clocktail.Mcp/OtherTools.cs)）：
+  - `OtherTools.Running()` 改为单次 `Process.GetProcesses()` 构建进程名集合并在 `finally` 中逐个释放句柄，将 9 次全系统进程枚举合并为 1 次。
+
+### 3. 单次排序多分支分位数与 `LiveWatch` 热路径优化
+- **统一复用缓冲区单次排序**（[`tools/Clocktail.Mcp/Card.cs`](../tools/Clocktail.Mcp/Card.cs) `SampleQuantiles`、[`tools/Clocktail.Mcp/TuningTools.cs`](../tools/Clocktail.Mcp/TuningTools.cs)、[`tools/Clocktail.Mcp/TuningTools.Trials.cs`](../tools/Clocktail.Mcp/TuningTools.Trials.cs)、[`tools/Clocktail.Mcp/LiveWatch.cs`](../tools/Clocktail.Mcp/LiveWatch.cs)、[`tools/Clocktail.Mcp/SettingsTools.cs`](../tools/Clocktail.Mcp/SettingsTools.cs)）：
+  - 引入 `SampleQuantiles.P10P50P90` / `P50` / `Avg`，复用单个 `List<double>` 原地 `.Sort()`：
+    - `stress_test` 由 59 次 LINQ 排序降至 17 次原地排序，直接读取 `StressStat p50` 生成摘要；
+    - `watch` 由 50 次 LINQ 排序降至 10 次原地排序，消除对 `WatchStats` 与 `Pct` 的重复调用；
+    - `LiveWatch`（`WindowLine`/`Totals`/`SummaryLine`/`Line`）统一采用复用缓冲原地排序；`SettingsTools.Median` 改为原生 `List<double>.Sort()`（保持偶数长度中位均值语义）。
+- **`LiveWatch` 运行期缓存与锁一致性**（[`tools/Clocktail.Mcp/LiveWatch.cs`](../tools/Clocktail.Mcp/LiveWatch.cs)）：
+  - `CurveTop` 上移至窗口刷新阶段按窗计算一次（不再每 500 ms 重算），`ToPoint` 改用 $O(\log N)$ 二分 `NearestIndex`，`WindowLine`/`PointAt` 优先使用 $O(1)$ 下标访问；
+  - `Edge` 缓存 `datapoints.jsonl` 路径、文件 `LastWriteTimeUtc` 与曲线形态，仅在文件修改或曲线形态变化时调用 `Experiment.ReadLast`；
+  - `Read`/`Stop`/`Dispose` 统一 `lock (run)` 读写 `Ended`/`EndReason` 并用 `List.GetRange` 替代 `.Skip().ToList()`。
+
+### 4. 零分配 CSV 解析、历史读取与策略微优化
+- **PresentMon 帧统计零分配单遍解析**（[`src/Clocktail.Domain/Fps/FrameStats.cs`](../src/Clocktail.Domain/Fps/FrameStats.cs)、[`tools/Clocktail.Mcp/FrameFeed.cs`](../tools/Clocktail.Mcp/FrameFeed.cs)）：
+  - `Frames.Add(ReadOnlySpan<char>, Frames? also)` 直接对 UTF-8 解码行切片按逗号遍历列字段，使用 `_series.GetAlternateLookup<ReadOnlySpan<char>>()` 查询已有 swap chain（零 per-frame 字符串分配），并在 `FrameFeed.Lines` 中由 `_total` 一次解析同时驱动 `_window`，消除双倍解析与 `line.Split(',')`。
+- **Residency Span 解析与 $O(1)$ 前缀清理**（[`tools/Clocktail.Mcp/Residency.cs`](../tools/Clocktail.Mcp/Residency.cs)）：
+  - `ResidencyLog.Between`/`Parse` 优先用 `ReadOnlySpan<char>` 解析首列时间并于时间窗口外立即早退；`FlushHeld` 以单调计数 `_trimmed` 跟踪前缀修剪并调用 `RemoveRange(0, removeCount)` 取代 `ToHashSet` + `RemoveAll`；`LastLoadMedian` 去除 LINQ 分配。
+- **曲线编辑器与历史文件 I/O 优化**（[`src/Clocktail.Domain/Profiles/Experiment.cs`](../src/Clocktail.Domain/Profiles/Experiment.cs)、[`tools/Clocktail.Mcp/TuningTools.Editor.cs`](../tools/Clocktail.Mcp/TuningTools.Editor.cs)、[`src/Clocktail.Domain/Vf/VfHistory.cs`](../src/Clocktail.Domain/Vf/VfHistory.cs)、[`src/Clocktail.Domain/Limiter.cs`](../src/Clocktail.Domain/Limiter.cs)）：
+  - `Experiment.PointId` 引入 `ConditionalWeakTable<DataPoint, string>` 缓存同一实例的 SHA-256 哈希；
+  - `TuningTools.Editor` 合并 `EditorData` 两次 `residency.Between` 为单次时间跨度读取，并在 `curve_editor` 删除历史点回调中复用已建成的 `VfTimeline`；
+  - `VfHistoryStore.WithoutInvalidTail` 使用 `stackalloc` 返回 `(End, LastMs)` 省略末尾时间戳二次 seek/read，`ReadFile` 改用 `ArrayPool<byte>.Shared` 租借块读取缓冲；
+  - `Limiter.Holding` 复用静态 `IdleOnly`/`NoneOnly` 与 `power`/`current` 布尔值，消除重复判定与单元素列表分配。
+
+### Phase 2 验证结果
+- 新增单元测试：
+  - `FrameStatsTests.Shared_span_parse_across_two_accumulators_matches_individual_reads`
+  - `ResidencyLogTests.Between_filters_by_time_window_and_flush_handles_overflow_prefix_trim`
+  - `LastLoadTests.Last_load_median_handles_unordered_ticks_and_cutoff_intersection`
+  - `PerfDecreaseTests.IsRtx50_and_sample_quantiles_match_expected_values`
+- 构建：`dotnet build Clocktail.slnx --no-restore --nologo` — **0 warnings / 0 errors**。
+- 测试：`dotnet test tests/Clocktail.Tests/Clocktail.Tests.csproj --no-build --nologo` — **1664/1664 通过**。

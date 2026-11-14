@@ -218,6 +218,7 @@ public sealed partial class TuningTools
         uint max = maxMhz is { } a ? ToUInt32Units(a) : Held(0), min = minMhz is { } b ? ToUInt32Units(b) : Held(1);
         uint voltage = Held(6);
         string? point = null;
+        Card.Look? look = null;
         if (boostLock is { } bl) voltage = bl ? ClientLimitsLayout.BoostLockUv : voltage == ClientLimitsLayout.BoostLockUv ? 0 : voltage;
         if (lockMv is { } mv)
         {
@@ -225,7 +226,8 @@ public sealed partial class TuningTools
             if (mv == 0) voltage = 0;
             else
             {
-                var p = card.Read().Curve.Points.MinBy(x => Math.Abs((double)x.VoltageUv - mv * 1000)) ?? throw new InvalidOperationException("the V/F curve is unreadable");
+                look = card.Read();
+                var p = Nearest(look.Curve, (uint)(mv * 1000)) ?? throw new InvalidOperationException("the V/F curve is unreadable");
                 voltage = p.VoltageUv;
                 point = string.Create(CultureInfo.InvariantCulture, $"point {p.Index}, {p.VoltageUv / 1000.0} mV, {p.EffectiveKhz / 1000.0} MHz");
             }
@@ -240,7 +242,7 @@ public sealed partial class TuningTools
             ? (v == ClientLimitsLayout.BoostLockUv ? "Boost Lock" : $"voltage locked at {v / 1000.0} mV ({point})")
             : string.Create(CultureInfo.InvariantCulture, $"{key} clock {v / 1000.0} MHz");
         return Trial("clock lock: " + string.Join(", ", items.Select(i => Words(i.Key, i.Value))), reason,
-            new() { ["writes"] = items.Select(i => TrialWrite(ClockLimitWrites.Kind, i.Key, i.Value)).ToList() });
+            new() { ["writes"] = items.Select(i => TrialWrite(ClockLimitWrites.Kind, i.Key, i.Value)).ToList() }, look);
     });
 
     [McpServerTool(Name = "set_clock_ratio", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
@@ -326,20 +328,22 @@ public sealed partial class TuningTools
             try { samples.Add(card.ReadSample()); } catch (InvalidOperationException) { }
             Thread.Sleep(500);
         }
-        var loaded = samples.Where(s => s.Telemetry is { } t && LiveWatch.IsLoaded(t)).ToList();   // the live watch's rule
+        var loaded = new List<Card.Sample>(samples.Count);
+        foreach (var s in samples)
+            if (s.Telemetry is { } t && LiveWatch.IsLoaded(t)) loaded.Add(s);   // the live watch's rule
         double? atWall = loaded.Count == 0 ? null : Math.Round(100.0 * loaded.Count(s =>
             s.Telemetry is { PowerWatts: { } w, PowerEnforcedWatts: { } l } && w >= l - Limiter.WallBandW) / loaded.Count);
-        double? p50Mv = Pct(loaded.Select(s => s.NvvddUv / 1000.0), 0.5);
+        var (p10, p50, p90) = WatchQuantiles(loaded);
+        double? p50Mv = p50.nvvdd_mv;
         var point = p50Mv is { } mv && Nearest(curve, (uint)(mv * 1000)) is { } pt
             ? new { index = pt.Index, mv = pt.VoltageUv / 1000.0, curve_mhz = pt.EffectiveKhz / 1000.0 } : null;
         var reasons = loaded.SelectMany(s => s.Telemetry?.ThrottleReasons ?? []).Distinct().ToList();
         var locksMet = LocksMet(locks, loaded.Select(s => (double?)s.Telemetry?.GraphicsClockMhz), curve, look.NvvddMaxUv);
         if (shared == null) frames?.Settle(TimeSpan.FromSeconds(3));   // its own capture ends by itself: let it finish writing
         var fps = frames?.Total();
-        var p50 = WatchStats(loaded, 0.5);
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Watched {seconds} s: {loaded.Count} of {samples.Count} samples under load. P50 {p50.clock_mhz} MHz @ NVVDD {p50.nvvdd_mv} mV (curve point {point?.index}), " +
-            $"P90 {WatchStats(loaded, 0.9).clock_mhz} MHz, P10 {WatchStats(loaded, 0.1).clock_mhz} MHz; MSVDD {p50.msvdd_mv} mV, XBAR {p50.xbar_mhz} / SYS {p50.sys_mhz} MHz, board {p50.board_w} W, " +
+            $"P90 {p90.clock_mhz} MHz, P10 {p10.clock_mhz} MHz; MSVDD {p50.msvdd_mv} mV, XBAR {p50.xbar_mhz} / SYS {p50.sys_mhz} MHz, board {p50.board_w} W, " +
             $"{atWall} % of the time on the wall, max {loaded.Max(s => s.Telemetry?.TemperatureC)} °C, VRAM {p50.vram_used_gib} GiB; limit reasons [{string.Join(", ", reasons)}]")
             + (frames != null ? $"; {FrameFeed.Words(fps)}" : "") + LocksWords(locksMet) + LocksUnreadWords(locks)
             + (note != null ? $". Playing: {note}" : "");
@@ -349,9 +353,9 @@ public sealed partial class TuningTools
             seconds,
             samples = samples.Count,
             under_load = loaded.Count,
-            p10 = WatchStats(loaded, 0.1),
+            p10,
             p50,
-            p90 = WatchStats(loaded, 0.9),
+            p90,
             on_the_wall_pct = atWall,
             curve_point = point,
             limit_reasons = reasons,
@@ -380,24 +384,30 @@ public sealed partial class TuningTools
     private sealed record WatchStat(double? clock_mhz, double? nvvdd_mv, double? msvdd_mv, double? xbar_mhz, double? sys_mhz, double? video_mhz,
         double? board_w, double? temp_c, double? vram_used_gib, double? memory_c);
 
-    private static WatchStat WatchStats(IReadOnlyList<Card.Sample> s, double q) => new(
-        Pct(s.Select(x => (double?)x.Telemetry?.GraphicsClockMhz), q), Pct(s.Select(x => x.NvvddUv / 1000.0), q),
-        Pct(s.Select(x => x.MsvddUv / 1000.0), q), Pct(s.Select(x => x.Mhz(AllClocksLayout.Xbar)), q),
-        Pct(s.Select(x => x.Mhz(AllClocksLayout.Sys)), q), Pct(s.Select(x => x.Mhz(AllClocksLayout.Video)), q),
-        Pct(s.Select(x => x.Telemetry?.PowerWatts), q), Pct(s.Select(x => x.Telemetry?.TemperatureC), q),
-        Pct(s.Select(x => Gib(x.Telemetry?.VramUsedBytes)), q), Pct(s.Select(x => x.MemoryC), q));
-
-    private static double? Pct(IEnumerable<double?> xs, double q)
+    private static (WatchStat P10, WatchStat P50, WatchStat P90) WatchQuantiles(IReadOnlyList<Card.Sample> s)
     {
-        var v = xs.Where(x => x != null).Select(x => x!.Value).Order().ToList();
-        return v.Count == 0 ? null : Math.Round(v[(int)Math.Clamp(Math.Round(q * (v.Count - 1)), 0, v.Count - 1)], 1);
+        var buf = new List<double>(s.Count);
+        var clk = SampleQuantiles.P10P50P90(s, x => (double?)x.Telemetry?.GraphicsClockMhz, buf);
+        var nv = SampleQuantiles.P10P50P90(s, x => x.NvvddUv / 1000.0, buf);
+        var ms = SampleQuantiles.P10P50P90(s, x => x.MsvddUv / 1000.0, buf);
+        var xbar = SampleQuantiles.P10P50P90(s, x => x.Mhz(AllClocksLayout.Xbar), buf);
+        var sys = SampleQuantiles.P10P50P90(s, x => x.Mhz(AllClocksLayout.Sys), buf);
+        var vid = SampleQuantiles.P10P50P90(s, x => x.Mhz(AllClocksLayout.Video), buf);
+        var brd = SampleQuantiles.P10P50P90(s, x => x.Telemetry?.PowerWatts, buf);
+        var tmp = SampleQuantiles.P10P50P90(s, x => (double?)x.Telemetry?.TemperatureC, buf);
+        var vram = SampleQuantiles.P10P50P90(s, x => Gib(x.Telemetry?.VramUsedBytes), buf);
+        var memC = SampleQuantiles.P10P50P90(s, x => x.MemoryC, buf);
+        return (
+            new(clk.P10, nv.P10, ms.P10, xbar.P10, sys.P10, vid.P10, brd.P10, tmp.P10, vram.P10, memC.P10),
+            new(clk.P50, nv.P50, ms.P50, xbar.P50, sys.P50, vid.P50, brd.P50, tmp.P50, vram.P50, memC.P50),
+            new(clk.P90, nv.P90, ms.P90, xbar.P90, sys.P90, vid.P90, brd.P90, tmp.P90, vram.P90, memC.P90));
     }
 
     /// <summary>One trial with the V/F curve left as it is: the broker writes <paramref name="items"/> beside the curve
     /// on the card (written again when the memory offset is among them) and records the trial.</summary>
-    private string Trial(string change, string? reason, Dictionary<string, object?> items)
+    private string Trial(string change, string? reason, Dictionary<string, object?> items, Card.Look? beforeLook = null)
     {
-        var look = card.Read();
+        var look = beforeLook ?? card.Read();
         var t = look.Telemetry;
         var context = new List<string> { Readings(look) };
         if (reason != null) context.Add($"Purpose: {reason}");
