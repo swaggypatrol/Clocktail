@@ -81,11 +81,10 @@
   - `Frames.Add(ReadOnlySpan<char>, Frames? also)` 直接对 UTF-8 解码行切片按逗号遍历列字段，使用 `_series.GetAlternateLookup<ReadOnlySpan<char>>()` 查询已有 swap chain（零 per-frame 字符串分配），并在 `FrameFeed.Lines` 中由 `_total` 一次解析同时驱动 `_window`，消除双倍解析与 `line.Split(',')`。
 - **Residency Span 解析与 $O(1)$ 前缀清理**（[`tools/Clocktail.Mcp/Residency.cs`](../tools/Clocktail.Mcp/Residency.cs)）：
   - `ResidencyLog.Between`/`Parse` 优先用 `ReadOnlySpan<char>` 解析首列时间并于时间窗口外立即早退；`FlushHeld` 以单调计数 `_trimmed` 跟踪前缀修剪并调用 `RemoveRange(0, removeCount)` 取代 `ToHashSet` + `RemoveAll`；`LastLoadMedian` 去除 LINQ 分配。
-- **曲线编辑器与历史文件 I/O 优化**（[`src/Clocktail.Domain/Profiles/Experiment.cs`](../src/Clocktail.Domain/Profiles/Experiment.cs)、[`tools/Clocktail.Mcp/TuningTools.Editor.cs`](../tools/Clocktail.Mcp/TuningTools.Editor.cs)、[`src/Clocktail.Domain/Vf/VfHistory.cs`](../src/Clocktail.Domain/Vf/VfHistory.cs)、[`src/Clocktail.Domain/Limiter.cs`](../src/Clocktail.Domain/Limiter.cs)）：
-  - `Experiment.PointId` 引入 `ConditionalWeakTable<DataPoint, string>` 缓存同一实例的 SHA-256 哈希；
-  - `TuningTools.Editor` 合并 `EditorData` 两次 `residency.Between` 为单次时间跨度读取，并在 `curve_editor` 删除历史点回调中复用已建成的 `VfTimeline`；
+- **曲线编辑器与历史文件 I/O 优化**（[`tools/Clocktail.Mcp/TuningTools.Editor.cs`](../tools/Clocktail.Mcp/TuningTools.Editor.cs)、[`src/Clocktail.Domain/Vf/VfHistory.cs`](../src/Clocktail.Domain/Vf/VfHistory.cs)、[`src/Clocktail.Domain/Limiter.cs`](../src/Clocktail.Domain/Limiter.cs)）：
+  - `TuningTools.Editor` 合并 `EditorData` 两次 `residency.Between` 为单次时间跨度读取；
   - `VfHistoryStore.WithoutInvalidTail` 使用 `stackalloc` 返回 `(End, LastMs)` 省略末尾时间戳二次 seek/read，`ReadFile` 改用 `ArrayPool<byte>.Shared` 租借块读取缓冲；
-  - `Limiter.Holding` 复用静态 `IdleOnly`/`NoneOnly` 与 `power`/`current` 布尔值，消除重复判定与单元素列表分配。
+  - `Limiter.Holding` 复用静态 `IdleOnly`/`NoneOnly`，消除单元素列表分配。
 
 ### Phase 2 验证结果
 - 新增单元测试：
@@ -98,36 +97,28 @@
 
 ---
 
-## Phase 3（已完成 — `c01_test` SIMD 与传感器去毛刺 / `tune_memory` 峰值钳制 / `tune_uncore` MSVDD 悬崖早停 / `game_test` 亚秒步长轮询）
+## Phase 3（已完成 — `c01_test` SIMD / `tune_uncore` MSVDD 悬崖早停 / `game_test` 亚秒步长轮询）
 
-### 1. `c01_test` 按类并行 SIMD Oracle 与传感器去毛刺
+### 1. `c01_test` 按类并行 SIMD Oracle
 - **YMM 8 类并行 Reference + 预分配复用缓冲区**（[`tools/Clocktail.Lab/C01/C01Fp32Fma.cs`](../tools/Clocktail.Lab/C01/C01Fp32Fma.cs)）：
   - 在 `C01Kernel` 新增 `ReferenceAllClasses`，在支持 `Fma` 与 `Avx2` 且 `classes % 8 == 0`、`nacc in {8, 16, 32}` 时，按 8 个类为一组将各累加器状态转置为 `Vector256<float>` 列向量并参数化统一 `hashInterval == 32` 与 `hashInterval == 8` 的检查点/归一化循环，通过 `Avx2.MultiplyLow` + `Avx2.Add` 在寄存器内并行计算全部 8 类的 FNV 风格哈希，消除 `Bits.GetElement` 标量提取与逐类堆分配。
   - 在 `C01Fp32Fma.Prepare` 预分配 `_refBits` / `_refH` 并在 `RunBatch` 中复用，移除每批次 `new uint[...]` 与 32 任务 `Parallel.For` 调度开销。
-- **温度毛刺迟滞滤波**（[`tools/Clocktail.Lab/C01/SafetyMonitor.cs`](../tools/Clocktail.Lab/C01/SafetyMonitor.cs)、[`tools/Clocktail.Lab/C01/C01Command.cs`](../tools/Clocktail.Lab/C01/C01Command.cs)）：
-  - 两处温度阈值检查均要求连续 2 次读数达到 `maxTemp` 才触发中断/取消，温度回落即清零计数，避免单次 NVML 采样毛刺误杀长稳运行。
 
-### 2. `tune_memory` 降速复测峰值钳制
-- **历史未复测尖峰钳制**（[`tools/Clocktail.Lab/MemoryComparison.cs`](../tools/Clocktail.Lab/MemoryComparison.cs)）：
-  - 在 `MemoryComparisonRules.Recheck` 更新完成对复测点 `A`/`B` 后，若复测结果不是 `MemoryComparison.Slower`，使用 `A`/`B` 确认后的最高带宽与最低延迟对 `idxB` 之前的未复测历史步进行上限/下限钳制（`Gbps` 不高于确认峰值、`LatencyNs` 不低于确认谷值），保持原始 `raw` 扫描记录不变的同时阻止相邻历史噪声尖峰在后续步引发级联复测。
-
-### 3. `tune_uncore` MSVDD 悬崖首轮早停
+### 2. `tune_uncore` MSVDD 悬崖首轮早停
 - **`b1` 降频悬崖检测并立即恢复 incumbent**（[`tools/Clocktail.Lab/UncoreTune.cs`](../tools/Clocktail.Lab/UncoreTune.cs)）：
   - 在 `Compare` 完成 `b1` 后，若 `a1.MemSmMhz > 0` 且 `b1.MemSmMhz < a1.MemSmMhz * 0.85`（MSVDD/FCLK 跌落超 15% 悬崖），立即通过 `Write(a)` 将 incumbent 写回显卡、跳过 `b2`/`a2`，并返回 `Outcome = Comparison.NotBetter`、`Veto = Comparison.Cliff`，在保留 `UncoreSearch.Xbar` 提压重试语义的同时削减 50% 无效 ABBA 运行。
 
-### 4. `game_test` 亚秒 Dwell 自适应轮询
+### 3. `game_test` 亚秒 Dwell 自适应轮询
 - **子秒步长紧凑采样间隔**（[`tools/Clocktail.Lab/Game/GameRunner.cs`](../tools/Clocktail.Lab/Game/GameRunner.cs)）：
   - `GameRunner.Dwell` 在 `want < 1.0` 时将单次 `Sleep` 上限收紧至 `Math.Clamp(want / 4.0, 0.05, 0.25)` 秒（保持 `>= 1.0 s` 步长原有的 `1.0 s` 轮询），确保 `0.25 s` 等短时突发步能够完成多次帧采样而不受单次过长休眠或单帧读取延迟影响。
 
 ### Phase 3 验证结果
 - 新增单元测试：
   - `AriaOracleTests.Class_parallel_oracle_agrees_bit_for_bit_with_per_class_reference`
-  - `SymphonySafetyTests.Single_transient_temperature_spike_does_not_cancel`
-  - `MemoryComparisonTests.Recheck_clamps_earlier_unrechecked_peaks_after_clearing_a_slowdown`
   - `UncoreWorkflowTests.B1_msvdd_cliff_aborts_abba_early_and_restores_incumbent`
   - `GameTests.Sub_second_dwell_polls_at_sub_second_intervals`
 - 构建：`dotnet build Clocktail.slnx --no-restore --nologo` — **0 warnings / 0 errors**。
-- 测试：`dotnet test tests/Clocktail.Tests/Clocktail.Tests.csproj --no-build --nologo` — **1669/1669 通过**（0 skipped, 0 failed）。
+- 测试：`dotnet test tests/Clocktail.Tests/Clocktail.Tests.csproj --no-build --nologo` — **1667/1667 通过**（0 skipped, 0 failed）。
 
 ## Phase 4：Partial 类模块化与事务边界细节优化
 
@@ -155,5 +146,5 @@
   - `PersistenceBoundaryTests.Saved_profiles_delete_removes_case_insensitively_and_preserves_siblings`
   - `RailWritesTests.First_difference_fast_paths_identical_spans_and_respects_volatile_ranges`
 - 构建：`dotnet build Clocktail.slnx --no-restore --nologo` — **0 warnings / 0 errors**。
-- 测试：`dotnet test tests/Clocktail.Tests/Clocktail.Tests.csproj --no-build --nologo` — **1671/1671 通过**（0 skipped, 0 failed）。
+- 测试：`dotnet test tests/Clocktail.Tests/Clocktail.Tests.csproj --no-build --nologo` — **1669/1669 通过**（0 skipped, 0 failed）。
 - 格式检查：`git diff --check` — 通过（exit code 0）。

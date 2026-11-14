@@ -41,7 +41,7 @@ internal static class C01Command
         string verdict = "inconclusive";
         DateTime? measurementStarted = null, measurementFinished = null;
         long nextSample = 0;
-        int reasonSamples = 0, powerCapSamples = 0, hotReadings = 0;
+        int reasonSamples = 0, powerCapSamples = 0;
         const int launchBudgetMs = 50;
 
         void Sample(bool measuring = false)
@@ -57,8 +57,7 @@ internal static class C01Command
             }
             if (sample.TempC is not { } temp) return;
             peak = Math.Max(peak ?? temp, temp);
-            if (temp < maxTemp) { hotReadings = 0; return; }
-            if (++hotReadings < 2) return;
+            if (temp < maxTemp) return;
             interrupted = "temperature";
             cancel.Cancel();
         }

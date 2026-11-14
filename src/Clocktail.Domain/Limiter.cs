@@ -99,11 +99,9 @@ public static class Limiter
     {
         if (Idle(r)) return IdleOnly;
         var held = new List<ClockLimit>();
-        bool power = PowerHolds(r);
-        bool current = CurrentHolds(r);
-        if (power) held.Add(ClockLimit.Power);
-        if (current) held.Add(ClockLimit.Current);
-        if (!power && !current && r.Reasons.Contains("sw_power_cap")) held.Add(ClockLimit.PowerPolicy);
+        if (PowerHolds(r)) held.Add(ClockLimit.Power);
+        if (CurrentHolds(r)) held.Add(ClockLimit.Current);
+        if (PowerPolicyHolds(r)) held.Add(ClockLimit.PowerPolicy);
         if (TopHolds(r, maxUv)) held.Add(ClockLimit.Voltage);
         else if (CurveHolds(r, curveTopKhz)) held.Add(ClockLimit.Curve);
         if (ThermalHolds(r)) held.Add(ClockLimit.Thermal);

@@ -155,20 +155,4 @@ public sealed class SymphonySafetyTests
         Assert.Empty(TuningTools.PhaseObservations(report, []));
     }
 
-    [Fact]
-    public void Single_transient_temperature_spike_does_not_cancel()
-    {
-        uint[] sequence = [86u, 60u, 60u];
-        int reads = 0;
-        using var cancel = new CancellationTokenSource();
-        using var monitor = new SafetyMonitor(() => new Sensor(() =>
-        {
-            int idx = Interlocked.Increment(ref reads) - 1;
-            return idx < sequence.Length ? sequence[idx] : 60u;
-        }), 85, cancel);
-        Assert.True(monitor.WaitReady(TimeSpan.FromSeconds(2)));
-        Assert.False(cancel.IsCancellationRequested);
-        Assert.Null(monitor.Interrupted);
-    }
-
 }

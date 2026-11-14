@@ -24,23 +24,14 @@ public sealed class SafetyMonitor : IDisposable
             {
                 using var sensor = open();
                 var since = Stopwatch.StartNew();
-                int hotReadings = 0;
                 while (!_stop.IsCancellationRequested)
                 {
                     uint? temp = sensor.ReadTemperature();
                     if (temp is { } t)
                     {
                         since.Restart();
-                        if (t >= maxTemp)
-                        {
-                            // Require 2 consecutive hot readings to filter single-sample NVML sensor glitches.
-                            if (++hotReadings >= 2) { Halt("temperature", $"GPU reached {t} °C, the {maxTemp:0} °C limit"); return; }
-                        }
-                        else
-                        {
-                            hotReadings = 0;
-                            _ready.Set();
-                        }
+                        if (t >= maxTemp) { Halt("temperature", $"GPU reached {t} °C, the {maxTemp:0} °C limit"); return; }
+                        _ready.Set();
                     }
                     else if (since.Elapsed >= limit) { Halt("telemetry", "GPU temperature was unavailable for too long"); return; }
                     if (_stop.Token.WaitHandle.WaitOne(100)) return;

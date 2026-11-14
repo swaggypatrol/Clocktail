@@ -133,18 +133,4 @@ public class MemoryComparisonTests
         var shortlist = MemoryComparisonRules.Shortlist([S(0), S(50, 1530, 520), S(100, 1490, 510), S(150, 1500, 490)]);
         Assert.Equal(new[] { 50, 150 }, shortlist);
     }
-
-    [Fact]
-    public void Recheck_clamps_earlier_unrechecked_peaks_after_clearing_a_slowdown()
-    {
-        var effective = new List<SweepStep> { S(0), S(50, 1525, 485), S(100, 1518, 488), S(150), S(200) };
-        var recheck = MemoryComparisonRules.Judge("recheck", 50, 200, [S(50), S(200), S(200), S(50)]);
-        Assert.Equal(MemoryComparison.Equivalent, recheck.Outcome);
-        MemoryComparisonRules.Recheck(effective, recheck);
-        Assert.Equal(1500, effective[2].Gbps);
-        Assert.Equal(500, effective[2].LatencyNs);
-        effective.Add(S(250));
-        effective.Add(S(300));
-        Assert.Null(MemorySweep.Edge(effective));
-    }
 }

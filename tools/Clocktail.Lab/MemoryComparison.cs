@@ -110,24 +110,5 @@ public static class MemoryComparisonRules
                 MemMhz = runs.Average(r => r.MemMhz), TempP50 = runs.Average(r => r.TempP50),
             };
         }
-        // When a recheck clears an apparent slowdown (not Slower), clamp earlier un-rechecked steps below idxB so
-        // adjacent transient peaks cannot cascade into repeated rechecks on subsequent steps.
-        if (comparison.Outcome == MemoryComparison.Slower) return;
-        int idxA = effective.FindIndex(r => r.OffsetMhz == comparison.A);
-        int idxB = effective.FindIndex(r => r.OffsetMhz == comparison.B);
-        if (idxA < 0 || idxB < 0) return;
-        double? maxGbps = effective[idxA].Gbps is { } ga && effective[idxB].Gbps is { } gb ? Math.Max(ga, gb)
-            : effective[idxA].Gbps ?? effective[idxB].Gbps;
-        double? minLat = effective[idxA].LatencyNs is { } la && effective[idxB].LatencyNs is { } lb ? Math.Min(la, lb)
-            : effective[idxA].LatencyNs ?? effective[idxB].LatencyNs;
-        for (int k = 0; k < idxB; k++)
-        {
-            if (k == idxA) continue;
-            var s = effective[k];
-            double? gbps = maxGbps is { } mg && s.Gbps is { } sg && sg > mg ? mg : s.Gbps;
-            double? lat = minLat is { } ml && s.LatencyNs is { } sl && sl < ml ? ml : s.LatencyNs;
-            if (gbps != s.Gbps || lat != s.LatencyNs)
-                effective[k] = s with { Gbps = gbps, LatencyNs = lat };
-        }
     }
 }
