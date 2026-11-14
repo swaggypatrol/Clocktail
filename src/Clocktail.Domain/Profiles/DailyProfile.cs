@@ -51,11 +51,14 @@ public sealed record DailyProfile(
             var profile = JsonSerializer.Deserialize<DailyProfile>(bytes, Json);
             // Missing required members deserialize to null despite the non-nullable record contract.
             // Treat structural corruption like malformed JSON, before callers enumerate the writes.
-            return profile?.Writes == null || profile.Writes.Any(InvalidWrite)
-                || profile.Adopted?.Any(InvalidWrite) == true ? null : profile;
+            return IsValid(profile) ? profile : null;
         }
         catch (JsonException) { return null; }
     }
+
+    // SavedProfiles deserializes these records too; it must enforce the same non-null contract.
+    internal static bool IsValid(DailyProfile? profile) =>
+        profile?.Writes != null && !profile.Writes.Any(InvalidWrite) && profile.Adopted?.Any(InvalidWrite) != true;
 
     private static bool InvalidWrite(ProfileWrite? write) =>
         write == null || string.IsNullOrWhiteSpace(write.Kind) || string.IsNullOrWhiteSpace(write.Key) || write.Value == null;

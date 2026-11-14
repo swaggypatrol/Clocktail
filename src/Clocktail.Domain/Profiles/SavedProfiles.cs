@@ -38,8 +38,20 @@ public static class SavedProfiles
         if (bytes == null) return [];
         try
         {
-            var list = JsonSerializer.Deserialize<List<Entry>>(bytes, Json) ?? [];
-            return list.Where(e => e.Name != null && e.Profile != null).Select(e => (e.Name!, e.Profile!)).ToList();
+            using var document = JsonDocument.Parse(bytes);
+            if (document.RootElement.ValueKind != JsonValueKind.Array) return [];
+            var valid = new List<(string Name, DailyProfile Profile)>();
+            foreach (var element in document.RootElement.EnumerateArray())
+            {
+                try
+                {
+                    var entry = element.Deserialize<Entry>(Json);
+                    if (entry != null && Normalize(entry.Name).Name is { } name && DailyProfile.IsValid(entry.Profile))
+                        valid.Add((name, entry.Profile!));
+                }
+                catch (JsonException) { } // one malformed entry must not hide the other saved profiles
+            }
+            return valid;
         }
         catch (JsonException) { return []; }
     }

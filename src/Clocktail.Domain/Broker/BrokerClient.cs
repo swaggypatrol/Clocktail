@@ -21,6 +21,11 @@ public static class BrokerClient
     /// <exception cref="IOException">The pipe broke after the request went out: whether it was carried out is unknown.</exception>
     public static BrokerResponse? TryCall(BrokerRequest req, string pipeName = BrokerTransport.PipeName, int connectMs = 2000, TimeSpan? answerWait = null)
     {
+        var wait = answerWait ?? AnswerWait;
+        // Validate before connecting: invalid arguments must never send a potentially mutating request.
+        if (connectMs < 0) throw new ArgumentOutOfRangeException(nameof(connectMs));
+        if (wait <= TimeSpan.Zero || wait.TotalMilliseconds > uint.MaxValue - 1)
+            throw new ArgumentOutOfRangeException(nameof(answerWait), "the answer wait must be a positive, finite supported timeout");
         var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
         try
         {
@@ -31,18 +36,19 @@ public static class BrokerClient
 
             // The write is under the same clock: a pipe's flush waits until the other end has read the request, so a
             // broker stuck before reading would hold the writer as long as one stuck before answering.
-            var wait = answerWait ?? AnswerWait;
             var exchange = Task.Run(() =>
             {
                 BrokerTransport.WriteRequest(pipe, req);
                 return BrokerTransport.ReadResponse(pipe);
             });
-            if (!((IAsyncResult)exchange).AsyncWaitHandle.WaitOne(wait))
+            // Observe faults even if the timed wait finishes first and disposal aborts the I/O later.
+            _ = exchange.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            try { return exchange.WaitAsync(wait).GetAwaiter().GetResult(); }
+            catch (TimeoutException)
             {
-                _ = exchange.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);   // it ends when the pipe closes
                 throw new TimeoutException($"the Clocktail service took longer than {wait.TotalSeconds:0} s to answer");
             }
-            return exchange.GetAwaiter().GetResult();
         }
         finally { pipe.Dispose(); }
     }

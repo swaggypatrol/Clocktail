@@ -136,6 +136,17 @@ public sealed class Recovery(NvClient hw, OwnershipJournal journal, ApplySentine
             return (Item(null, RecoveryAction.Refused, $"{cell.Id} could not be read; nothing written", null, false), false);
         if (current == item.Original)
         {
+            // No driver write is needed, but dropping a dead owner's debt still mutates its journal.
+            // Adopt explicitly, preserving the remaining items' original values and the new owner's timestamp.
+            try
+            {
+                if (writer.AdoptedOriginal(item.Kind, item.Key) != item.Original)
+                    return (Item(current, RecoveryAction.Refused, "the recorded original changed during recovery; nothing released", null, true), false);
+            }
+            catch (InvalidOperationException e)
+            {
+                return (Item(current, RecoveryAction.Refused, $"ownership changed during recovery: {e.Message}", null, true), false);
+            }
             journal.Release(item.Kind, item.Key);
             return (Item(current, RecoveryAction.Released, "already at the original value; nothing written", null, true), false);
         }

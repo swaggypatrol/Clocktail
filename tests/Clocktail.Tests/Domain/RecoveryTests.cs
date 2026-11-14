@@ -79,6 +79,42 @@ public class RecoveryTests : IDisposable
     }
 
     [Fact]
+    public void Corrupt_backup_only_is_not_no_debt_and_does_not_clear_the_sentinel()
+    {
+        var (rec, _) = Setup(coreDelta: 15_000);
+        File.WriteAllText(_journal.Path + ".bak", "{ invalid ownership");
+        _sentinel.Begin("manual", false);
+        var result = rec.Run(_gpu, canWrite: true);
+        Assert.Equal(RecoveryReason.Foreign, result.Reason);
+        Assert.False(result.Clean);
+        Assert.False(result.JournalCleared);
+        Assert.True(_sentinel.IsBlocked(out _));
+        Assert.Equal(0, FakeDriver.Sets);
+        Assert.False(File.Exists(_journal.Path));
+        Assert.Equal("{ invalid ownership", File.ReadAllText(_journal.Path + ".bak"));
+    }
+
+    [Fact]
+    public void Releasing_an_already_restored_orphan_adopts_the_remaining_debt_with_the_new_owner_time()
+    {
+        var (rec, _) = Setup(coreDelta: 0);
+        LeaveOrphan();
+        _host.Pid = 32316;
+        _journal.Claim(new OwnedItem("unknown-path", "x", "1", _host.Now));
+        _host.Pid = 100;
+        _host.Now = _host.Now.AddMinutes(5);
+        var result = rec.Run(_gpu, canWrite: false);
+        Assert.Contains(result.Items, i => i.Kind == ClockOffsets.Kind && i.Action == RecoveryAction.Released);
+        Assert.Equal(0, FakeDriver.Sets);
+        Assert.Equal(_host.Now, _journal.Load()!.AdoptedAt);
+        Assert.Equal("unknown-path", Assert.Single(_journal.Load()!.Items).Kind);
+        var observer = new FakeHost { Pid = 200 };
+        observer.StartedAt[100] = _host.Now.AddSeconds(-1);
+        Assert.Equal(RecoveryReason.OwnedByLiveProcess,
+            new OwnershipJournal(_journal.Path, observer, "gpu-A").Inspect().Reason);
+    }
+
+    [Fact]
     public void Orphan_with_hardware_moved_is_written_back_through_the_transaction()
     {
         var (rec, _) = Setup(coreDelta: 15_000);

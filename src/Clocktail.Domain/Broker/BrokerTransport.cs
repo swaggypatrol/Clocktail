@@ -24,7 +24,10 @@ public static class BrokerTransport
     public static BrokerRequest ReadRequest(Stream s)
         => JsonSerializer.Deserialize<BrokerRequest>(Read(s), Wire) ?? throw new InvalidDataException("empty request");
     public static BrokerResponse ReadResponse(Stream s)
-        => JsonSerializer.Deserialize<BrokerResponse>(Read(s), Wire) ?? throw new InvalidDataException("empty response");
+    {
+        try { return JsonSerializer.Deserialize<BrokerResponse>(Read(s), Wire) ?? throw new InvalidDataException("empty response"); }
+        catch (JsonException e) { throw new InvalidDataException("invalid broker response JSON", e); }
+    }
 
     private static void Write(Stream s, byte[] payload)
     {
