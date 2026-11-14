@@ -428,6 +428,17 @@ public class UncoreTune(UncoreSpec spec, string jobDir, string labExe, Action<st
             if (b1.Verdict == LabResult.Fail) return Crash(b1);
             if (Moved() is { } m2) return m2;
             if (b1.Verdict != LabResult.Pass) return Done(Comparison.Unjudged, "the candidate's run could not be judged: " + (b1.Detail ?? b1.Verdict));
+            // Severe MSVDD/FCLK cliff on b1 (>15% memory-phase SM clock drop): abort b2/a2 and restore incumbent immediately.
+            if (a1.MemSmMhz is > 0 && b1.MemSmMhz is { } bm && bm < a1.MemSmMhz.Value * 0.85)
+            {
+                double corePct = Math.Round((bm / a1.MemSmMhz.Value - 1) * 100, 2);
+                double? l2Pct = a1.L2Gbps is > 0 && b1.L2Gbps is { } bl ? Math.Round((bl / a1.L2Gbps.Value - 1) * 100, 2) : null;
+                double? dramPct = a1.DramGbps is > 0 && b1.DramGbps is { } bd ? Math.Round((bd / a1.DramGbps.Value - 1) * 100, 2) : null;
+                if (Write(a) is { } waCliff) return Done(Comparison.Unjudged, $"the service did not write the incumbent back: {waCliff}");
+                return Done(Comparison.NotBetter,
+                    Inv($"the memory phase's core clock fell {corePct:0.0} % on b1: the cliff (MSVDD at its floor pins the core); aborted remaining ABBA runs"),
+                    l2Pct, dramPct, corePct, gain: false, veto: Comparison.Cliff);
+            }
             var b2 = Run(b);
             if (b2.DriverResets > 0) return Reset(b2, candidate: true);
             if (StopAsked) return Done(Comparison.Unjudged, "stopped (lab_stop)");

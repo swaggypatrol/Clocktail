@@ -215,6 +215,108 @@ internal sealed unsafe class C01Kernel
     }
 
     /// <summary>
+    /// Computes reference bits and hashes for all <paramref name="classes"/> classes into caller buffers.
+    /// Vectorises across 8 classes per YMM register (FMA3 + AVX2 integer hashing) to eliminate lane extraction and per-class allocations.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static void ReferenceAllClasses(ulong nonce, uint classes, int nacc, uint segs, Span<uint> refBits, Span<uint> refH, int hashInterval = 32)
+    {
+        ValidateHashInterval(hashInterval);
+        if (refBits.Length < (int)classes * nacc) throw new ArgumentException("refBits buffer too small", nameof(refBits));
+        if (refH.Length < (int)classes) throw new ArgumentException("refH buffer too small", nameof(refH));
+        if (!Fma.IsSupported || !Avx2.IsSupported || (classes & 7) != 0 || nacc is not (8 or 16 or 32))
+        {
+            for (int k = 0; k < (int)classes; k++)
+            {
+                var (bits, h) = Reference(nonce, (uint)k, nacc, segs, hashInterval: hashInterval);
+                bits.CopyTo(refBits.Slice(k * nacc, nacc));
+                refH[k] = h;
+            }
+            return;
+        }
+
+        int stride = nacc * 8;
+        Span<float> xCols = stackalloc float[stride], mCols = stackalloc float[stride], aCols = stackalloc float[stride];
+        Span<float> initX = stackalloc float[nacc], initM = stackalloc float[nacc], initA = stackalloc float[nacc];
+        Span<uint> hArr = stackalloc uint[8];
+        Span<uint> xBits = stackalloc uint[8];
+        var vHashMul = Vector256.Create(HashMul);
+        var vMask = Vector256.Create(0x007FFFFFu);
+        int checkpoints = Seg / hashInterval;
+
+        for (uint cBase = 0; cBase < classes; cBase += 8)
+        {
+            for (int lane = 0; lane < 8; lane++)
+            {
+                Init(nonce, cBase + (uint)lane, initX, initM, initA, out hArr[lane]);
+                for (int j = 0; j < nacc; j++)
+                {
+                    int idx = j * 8 + lane;
+                    xCols[idx] = initX[j];
+                    mCols[idx] = initM[j];
+                    aCols[idx] = initA[j];
+                }
+            }
+            var vh = Vector256.Create((ReadOnlySpan<uint>)hArr);
+
+            for (uint s = 0; s < segs; s++)
+            {
+                var vKey = Vector256.Create(SegKey(s));
+                for (int checkpoint = 0; checkpoint < checkpoints; checkpoint++)
+                {
+                    bool renorm = checkpoint == checkpoints - 1;
+                    for (int j = 0; j < nacc; j += 4)
+                    {
+                        int o0 = j * 8, o1 = (j + 1) * 8, o2 = (j + 2) * 8, o3 = (j + 3) * 8;
+                        var x0 = Vector256.Create((ReadOnlySpan<float>)xCols.Slice(o0, 8));
+                        var m0 = Vector256.Create((ReadOnlySpan<float>)mCols.Slice(o0, 8));
+                        var a0 = Vector256.Create((ReadOnlySpan<float>)aCols.Slice(o0, 8));
+                        var x1 = Vector256.Create((ReadOnlySpan<float>)xCols.Slice(o1, 8));
+                        var m1 = Vector256.Create((ReadOnlySpan<float>)mCols.Slice(o1, 8));
+                        var a1 = Vector256.Create((ReadOnlySpan<float>)aCols.Slice(o1, 8));
+                        var x2 = Vector256.Create((ReadOnlySpan<float>)xCols.Slice(o2, 8));
+                        var m2 = Vector256.Create((ReadOnlySpan<float>)mCols.Slice(o2, 8));
+                        var a2 = Vector256.Create((ReadOnlySpan<float>)aCols.Slice(o2, 8));
+                        var x3 = Vector256.Create((ReadOnlySpan<float>)xCols.Slice(o3, 8));
+                        var m3 = Vector256.Create((ReadOnlySpan<float>)mCols.Slice(o3, 8));
+                        var a3 = Vector256.Create((ReadOnlySpan<float>)aCols.Slice(o3, 8));
+                        for (int i = 0; i < hashInterval; i++)
+                        {
+                            x0 = Fma.MultiplyAdd(x0, m0, a0);
+                            x1 = Fma.MultiplyAdd(x1, m1, a1);
+                            x2 = Fma.MultiplyAdd(x2, m2, a2);
+                            x3 = Fma.MultiplyAdd(x3, m3, a3);
+                        }
+                        var b0 = x0.AsUInt32(); vh = Avx2.Add(Avx2.MultiplyLow(vh, vHashMul), b0);
+                        var b1 = x1.AsUInt32(); vh = Avx2.Add(Avx2.MultiplyLow(vh, vHashMul), b1);
+                        var b2 = x2.AsUInt32(); vh = Avx2.Add(Avx2.MultiplyLow(vh, vHashMul), b2);
+                        var b3 = x3.AsUInt32(); vh = Avx2.Add(Avx2.MultiplyLow(vh, vHashMul), b3);
+                        if (renorm)
+                        {
+                            x0 = ((b0 & vMask) ^ vKey).AsSingle();
+                            x1 = ((b1 & vMask) ^ vKey).AsSingle();
+                            x2 = ((b2 & vMask) ^ vKey).AsSingle();
+                            x3 = ((b3 & vMask) ^ vKey).AsSingle();
+                        }
+                        x0.CopyTo(xCols.Slice(o0, 8));
+                        x1.CopyTo(xCols.Slice(o1, 8));
+                        x2.CopyTo(xCols.Slice(o2, 8));
+                        x3.CopyTo(xCols.Slice(o3, 8));
+                    }
+                }
+            }
+
+            vh.CopyTo(refH.Slice((int)cBase, 8));
+            for (int j = 0; j < nacc; j++)
+            {
+                Vector256.Create((ReadOnlySpan<float>)xCols.Slice(j * 8, 8)).AsUInt32().CopyTo(xBits);
+                for (int lane = 0; lane < 8; lane++)
+                    refBits[(int)(cBase + (uint)lane) * nacc + j] = xBits[lane];
+            }
+        }
+    }
+
+    /// <summary>
     /// Compares one launch's (or chain's) outputs against per-class references: tags first (completion/freshness), then
     /// every float (sentinel → stale, non-finite → NonFinite, else bit-exact), then every hash.
     /// Layout: outBits[j * n + tid], outH[tid], class = tid % classes, refBits[class * nacc + j].
@@ -315,7 +417,7 @@ public sealed unsafe class C01Fp32Fma : IWorkload
     private int _n, _nacc, _hashInterval = 32;
     private ulong _dOutF, _dOutH, _dTags;
     private PinnedArray? _outPinned;
-    private uint[] _outBits = [], _outH = [], _tags = [];
+    private uint[] _outBits = [], _outH = [], _tags = [], _refBits = [], _refH = [];
 
     public WorkloadSupport Probe(GpuContext gpu) => new(Info.Id, gpu.Info.CcMajor >= 12, gpu.Info.CcMajor >= 12 ? null : "needs CUDA compute capability 12.0 or later");
 
@@ -343,6 +445,8 @@ public sealed unsafe class C01Fp32Fma : IWorkload
         _outBits = _outPinned.Data;
         _outH = new uint[_n];
         _tags = new uint[_grid];
+        _refBits = new uint[_classes * _nacc];
+        _refH = new uint[_classes];
         _clock = new LaunchClock(gpu);
         double targetMs = Evidence.Param(p, "target_ms", 20);
         double maxMs = Math.Min(50, Evidence.Param(p, "max_ms", 50));
@@ -401,14 +505,7 @@ public sealed unsafe class C01Fp32Fma : IWorkload
         }
         // 3. Independent CPU reference for this batch's nonce, computed while the GPU runs.
         long r0 = Stopwatch.GetTimestamp();
-        var refBits = new uint[_classes * _nacc];
-        var refH = new uint[_classes];
-        Parallel.For(0, (int)_classes, k =>
-        {
-            var (bits, h) = C01Kernel.Reference(req.Nonce, (uint)k, _nacc, _segs, hashInterval: _hashInterval);
-            bits.CopyTo(refBits, k * _nacc);
-            refH[k] = h;
-        });
+        C01Kernel.ReferenceAllClasses(req.Nonce, _classes, _nacc, _segs, _refBits, _refH, _hashInterval);
         double refMs = Evidence.Ms(r0);
         // 4. Completion.
         long w0 = Stopwatch.GetTimestamp();
@@ -424,9 +521,9 @@ public sealed unsafe class C01Fp32Fma : IWorkload
         c.MemcpyDtoH<uint>(_outH, _dOutH);
         c.MemcpyDtoH<uint>(_tags, _dTags);
         long complete = Mono.Qpc();
-        if (req.Fault == FaultKind.ComparatorFixture) refBits[0] ^= 1u << 5;
+        if (req.Fault == FaultKind.ComparatorFixture) _refBits[0] ^= 1u << 5;
         // 7. Compare: tags, then every element.
-        var t = C01Kernel.Compare(_outBits, _outH, _tags, refBits, refH, _n, _nacc, (int)_classes, epoch, req.Nonce, 0, OutSentinel, TagSentinel, "c01");
+        var t = C01Kernel.Compare(_outBits, _outH, _tags, _refBits, _refH, _n, _nacc, (int)_classes, epoch, req.Nonce, 0, OutSentinel, TagSentinel, "c01");
         double checkMs = Evidence.Ms(h0);
         long work = launched ? (long)_n * _nacc * C01Kernel.Seg * _segs : 0;
         // Reference time not hidden behind the GPU (it ran concurrently) counts as host time too.

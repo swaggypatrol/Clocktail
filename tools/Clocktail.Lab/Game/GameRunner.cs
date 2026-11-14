@@ -205,7 +205,8 @@ public sealed class GameRunner(IGameWorld world, GameTimings? timings = null)
         while (credited < want - 1e-6)
         {
             if (Checks(step) is { } stopped) return stopped;
-            world.Sleep(TimeSpan.FromSeconds(Math.Min(1.0, want - credited)));
+            double maxPoll = want < 1.0 ? Math.Clamp(want / 4.0, 0.05, 0.25) : 1.0;
+            world.Sleep(TimeSpan.FromSeconds(Math.Min(maxPoll, want - credited)));
             var f = world.Query();
             var now = world.Now;
             double dt = Math.Clamp((now - last).TotalSeconds, 0, 1.5);

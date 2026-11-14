@@ -848,4 +848,16 @@ public class GameTests
         Assert.True(TuningTools.IsJob("sweep-20261028-120000-abcdef"));
         Assert.False(TuningTools.IsJob("run-123.json"));
     }
+
+    [Fact]
+    public void Sub_second_dwell_polls_at_sub_second_intervals()
+    {
+        var game = new FakeGame { QueryDelay = 0.0 };
+        var plan = Short(30) with { Seconds = 0.25, Steps = [new GameStep(0, "heavy", "burst", GameStep.Heavy, 0.25, new Render(100))] };
+        var runner = new GameRunner(game);
+        var result = runner.Run(plan, "q2demo1");
+        Assert.Equal(GameEnd.Survived, result.End);
+        Assert.Equal(0.25, result.Credited, 6);
+        Assert.True(game.TraceLines.Count(t => t.Contains("\"kind\":\"frame\"")) >= 4);
+    }
 }

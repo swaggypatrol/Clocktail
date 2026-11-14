@@ -59,4 +59,25 @@ public sealed class AriaOracleTests
             C01Fp32Fma.OutSentinel, 0, "test");
         Assert.Equal(fault == "none", result.Clean);
     }
+
+    [Fact]
+    public void Class_parallel_oracle_agrees_bit_for_bit_with_per_class_reference()
+    {
+        const uint classes = 32;
+        foreach (int accumulators in new[] { 8, 16, 32 })
+        foreach (int hash in new[] { 8, 32 })
+        foreach (ulong nonce in new[] { 0UL, 1UL, 0x5eed5eed5eed5eedUL })
+        foreach (uint segments in new[] { 0u, 1u, 3u, 25u })
+        {
+            var actualBits = new uint[classes * accumulators];
+            var actualH = new uint[classes];
+            C01Kernel.ReferenceAllClasses(nonce, classes, accumulators, segments, actualBits, actualH, hashInterval: hash);
+            for (int k = 0; k < classes; k++)
+            {
+                var (expectedBits, expectedH) = C01Kernel.Reference(nonce, (uint)k, accumulators, segments, hashInterval: hash);
+                Assert.Equal(expectedH, actualH[k]);
+                Assert.Equal(expectedBits, actualBits.AsSpan(k * accumulators, accumulators).ToArray());
+            }
+        }
+    }
 }

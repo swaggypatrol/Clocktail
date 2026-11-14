@@ -23,7 +23,8 @@ public class UncoreWorkflowTests : IDisposable
         Candidates: [Start with { XbarMhz = 50 }, Start with { XbarMhz = 100 }]), dir, "fake")
     {
         public string? CrashReply, Preflight, RestoreReply;
-        public int FaultRun, ResetRun, FaultOffset = 50;
+        public int FaultRun, ResetRun, FaultOffset = 50, CliffOffset = -1;
+        public int CurrentOffset => _offset;
         public bool ResetRecorded = true, MissingTrialId;
         public int Generation, CrashAttempts, Crashes, WritesAfterFault, Restores, Measurements;
         public string? FaultTrial, RecordedTrial, RecoveryStamp;
@@ -110,7 +111,7 @@ public class UncoreWorkflowTests : IDisposable
             var result = phases.Split(',').Select(p => new PhaseResult
             {
                 Kind = Enum.Parse<LabPhase>(p, true), Seconds = seconds, Completed = true,
-                Gbps = p == "l2" ? 4780 + _offset : 1570, SmMhzP50 = 2970, TempMax = 60,
+                Gbps = p == "l2" ? 4780 + _offset : 1570, SmMhzP50 = _offset == CliffOffset ? 1610 : 2970, TempMax = 60,
                 MemoryErrors = fault ? 1 : 0,
             }).ToList();
             return new("fake", "fake", 1024, 100, DateTime.UtcNow, DateTime.UtcNow, result,
@@ -281,5 +282,21 @@ public class UncoreWorkflowTests : IDisposable
         Assert.Equal(0, rig.Generation);
         Assert.Equal(0, rig.Measurements);
         Assert.Equal(0, rig.Restores);
+    }
+
+    [Fact]
+    public void B1_msvdd_cliff_aborts_abba_early_and_restores_incumbent()
+    {
+        var rig = new Rig(_dir) { CliffOffset = 50 };
+        Assert.Equal(0, rig.Run());
+        var status = Status();
+        var cliff = status.Comparisons[0];
+        Assert.Equal(Comparison.NotBetter, cliff.Outcome);
+        Assert.Equal(Comparison.Cliff, cliff.Veto);
+        Assert.Equal(2, cliff.Runs.Count);
+        Assert.Equal(Start with { XbarMhz = 100 }, status.Best);
+        Assert.Equal(11, rig.Measurements);
+        Assert.Equal(0, rig.CurrentOffset);
+        Assert.Equal(1, rig.Restores);
     }
 }
