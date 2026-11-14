@@ -128,3 +128,32 @@
   - `GameTests.Sub_second_dwell_polls_at_sub_second_intervals`
 - 构建：`dotnet build Clocktail.slnx --no-restore --nologo` — **0 warnings / 0 errors**。
 - 测试：`dotnet test tests/Clocktail.Tests/Clocktail.Tests.csproj --no-build --nologo` — **1669/1669 通过**（0 skipped, 0 failed）。
+
+## Phase 4：Partial 类模块化与事务边界细节优化
+
+### 1. `BrokerDispatcher` 职责拆分为 Partial 类
+- 将原本 2143 行的 [`src/Clocktail.Domain/Broker/BrokerDispatcher.cs`](../src/Clocktail.Domain/Broker/BrokerDispatcher.cs) 按职责拆分为核心调度文件与 3 个功能明确的 `partial` 文件（均保留完整 XML 文档注释与原有锁/并发语义）：
+  - [`src/Clocktail.Domain/Broker/BrokerDispatcher.cs`](../src/Clocktail.Domain/Broker/BrokerDispatcher.cs)（545 行）：核心状态、锁（`_operation`、`_writeWindow`、`_experiment`、`_settle`）、`Dispatch` / `DispatchOne` / `FromClient`、`JudgeNow`、`Write` / `Prove` / `Power` / `Clock` / `FpsOp` 等基础入口与共享辅助。
+  - [`src/Clocktail.Domain/Broker/BrokerDispatcher.Profile.cs`](../src/Clocktail.Domain/Broker/BrokerDispatcher.Profile.cs)（793 行）：`Profile` 请求分发、`KeepWrites`、`ToFactory`、`LoadSaved`、`ApplyProfile`、`ApplyOnce` 等 daily / preset 配置管理逻辑。
+  - [`src/Clocktail.Domain/Broker/BrokerDispatcher.Experiment.cs`](../src/Clocktail.Domain/Broker/BrokerDispatcher.Experiment.cs)（509 行）：`ExperimentOp`、`Back` / `LeaveBack`、`CloseTrial` / `CrashHeld`、`Gone`、`Leave` 等试验会话生命周期逻辑。
+  - [`src/Clocktail.Domain/Broker/BrokerDispatcher.Recovery.cs`](../src/Clocktail.Domain/Broker/BrokerDispatcher.Recovery.cs)（344 行）：`SettleAll` / `Settle`、`Ownership`、`Recover`、`HandBack`、`CellsToPutBack`、`CurveAside`、`GivenBack`、`CrashedAt` 等启动结算、归属接管与异常恢复逻辑。
+
+### 2. `TuningTools` 按领域拆分为 Partial 类与 JSON Node 直接合并
+- [`tools/Clocktail.Mcp/TuningTools.cs`](../tools/Clocktail.Mcp/TuningTools.cs)（1349 行精简至 561 行）与已有 [`TuningTools.Trials.cs`](../tools/Clocktail.Mcp/TuningTools.Trials.cs) 协同，新增 3 个 `partial` 文件：
+  - [`tools/Clocktail.Mcp/TuningTools.Curve.cs`](../tools/Clocktail.Mcp/TuningTools.Curve.cs)（261 行）：V/F 曲线工具与计划逻辑（`CurveAround`、`AdjustCurve`、`FlattenPlan`、`FlattenCurve`、`SetCurve`、`ShiftCurve`、`CurveTrial`、`CurveShift` 等）。
+  - [`tools/Clocktail.Mcp/TuningTools.Profiles.cs`](../tools/Clocktail.Mcp/TuningTools.Profiles.cs)（224 行）：日常配置与预设管理工具（`BackToDaily`、`Stock`、`LoadDaily`、`PreviewDaily`、`KeepAsDaily`、`ListPresets`、`SaveProfile`、`DeleteProfile`、`LoadPreset`、`Changes`、`Fingerprint`），并将 `Merge` 改为直接通过 `JsonSerializer.SerializeToNode(more, Json)` 将属性写入现有 `JsonObject`，消除 `more` 的中间字符串序列化开销。
+  - [`tools/Clocktail.Mcp/TuningTools.Session.cs`](../tools/Clocktail.Mcp/TuningTools.Session.cs)（444 行）：游戏会话与 V/F 数据统计工具（`BeginSession`、`MarkStable`、`MarkCrash`、`LogNote`、`ReadLog`、`EndSession`、`DataPoints`、`PointRecordsFrom`、`HistoryTimeline`、`CrashAt`、`WithoutFrozenTail` 等）。
+
+### 3. `Transaction` 与 `SavedProfiles` 路径细节优化
+- **硬件寄存器逐字节比较快速路径**（[`src/Clocktail.Domain/Transaction.cs`](../src/Clocktail.Domain/Transaction.cs)）：
+  - 在 `Transaction.FirstDifference` 长度检查之后加入 `if (a.SequenceEqual(b)) return null;`，在两个缓冲区完全相同时利用向量化 `Span<byte>.SequenceEqual` 直接返回 `null`，避免逐字节循环与 `volatileRanges` 遍历。
+- **预设删除单次读取与解析**（[`src/Clocktail.Domain/Profiles/SavedProfiles.cs`](../src/Clocktail.Domain/Profiles/SavedProfiles.cs)）：
+  - `SavedProfiles.Delete` 改为在规范化名称后通过单次 `All(path)` 读取并解析 JSON，使用 `FindIndex`（`StringComparison.OrdinalIgnoreCase`）定位并用 `RemoveAt` 移除后再写回，消除原先 `Find` + `All` 的两次文件读取与反序列化。
+
+### Phase 4 验证结果
+- 新增单元测试：
+  - `PersistenceBoundaryTests.Saved_profiles_delete_removes_case_insensitively_and_preserves_siblings`
+  - `RailWritesTests.First_difference_fast_paths_identical_spans_and_respects_volatile_ranges`
+- 构建：`dotnet build Clocktail.slnx --no-restore --nologo` — **0 warnings / 0 errors**。
+- 测试：`dotnet test tests/Clocktail.Tests/Clocktail.Tests.csproj --no-build --nologo` — **1671/1671 通过**（0 skipped, 0 failed）。
+- 格式检查：`git diff --check` — 通过（exit code 0）。

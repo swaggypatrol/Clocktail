@@ -128,4 +128,21 @@ public sealed class PersistenceBoundaryTests : IDisposable
         Assert.False(File.Exists(path));
         Assert.Equal(1024 * 1024 + 1, new FileInfo(backup).Length);
     }
+
+    [Fact]
+    public void Saved_profiles_delete_removes_case_insensitively_and_preserves_siblings()
+    {
+        string path = PathOf("saved-profiles.json");
+        var first = new DailyProfile([new ProfileWrite("power", "fe", "500000")], DateTimeOffset.UtcNow);
+        var second = new DailyProfile([new ProfileWrite("power", "fe", "550000")], DateTimeOffset.UtcNow);
+        SavedProfiles.Save(path, "Quiet", first);
+        SavedProfiles.Save(path, "Balanced", second);
+
+        var deleted = SavedProfiles.Delete(path, "  QUIET  ");
+        Assert.NotNull(deleted);
+        Assert.Equal("Quiet", deleted!.Value.Name);
+        Assert.Null(SavedProfiles.Delete(path, "quiet"));
+        var remaining = Assert.Single(SavedProfiles.All(path));
+        Assert.Equal("Balanced", remaining.Name);
+    }
 }

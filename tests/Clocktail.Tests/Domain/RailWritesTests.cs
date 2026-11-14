@@ -401,5 +401,16 @@ public class RailWritesTests : IDisposable
         Assert.True(rails.Apply(_gpu, Rail.Nvvdd, Rel(100_000)).Succeeded);
     }
 
+    [Fact]
+    public void First_difference_fast_paths_identical_spans_and_respects_volatile_ranges()
+    {
+        byte[] a = [1, 2, 3, 4, 5, 6];
+        byte[] b = [1, 2, 3, 4, 5, 6];
+        Assert.Null(Transaction.FirstDifference(a, b, []));
+
+        b[2] = 99;
+        Assert.Null(Transaction.FirstDifference(a, b, [new ByteRange(2, 1)]));
+        Assert.Equal(2, Transaction.FirstDifference(a, b, []));
+    }
 
 }

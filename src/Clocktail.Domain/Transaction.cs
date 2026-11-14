@@ -329,6 +329,7 @@ public sealed class Transaction
     public static int? FirstDifference(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, IReadOnlyList<ByteRange> volatileRanges)
     {
         if (a.Length != b.Length) return Math.Min(a.Length, b.Length);
+        if (a.SequenceEqual(b)) return null;
         for (int i = 0; i < a.Length; i++)
         {
             if (a[i] == b[i]) continue;

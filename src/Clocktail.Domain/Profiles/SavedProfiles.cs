@@ -79,9 +79,14 @@ public static class SavedProfiles
     /// <summary>Deletes the one saved under the name; the deleted profile, or null when there was none.</summary>
     public static (string Name, DailyProfile Profile)? Delete(string path, string? name)
     {
-        var gone = Find(path, name);
-        if (gone == null) return null;
-        Write(path, All(path).Where(e => !string.Equals(e.Name, gone.Value.Name, StringComparison.OrdinalIgnoreCase)).ToList());
+        var n = name?.Trim();
+        if (string.IsNullOrEmpty(n)) return null;
+        var all = All(path).ToList();
+        int i = all.FindIndex(e => string.Equals(e.Name, n, StringComparison.OrdinalIgnoreCase));
+        if (i < 0) return null;
+        var gone = all[i];
+        all.RemoveAt(i);
+        Write(path, all);
         return gone;
     }
 
