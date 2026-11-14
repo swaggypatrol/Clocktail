@@ -209,9 +209,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         int top = window[^1].Index, lifted = 0;
         for (int k = top + 1; delta > 0 && k < pts.Count; k++)
         {
-            long need = (long)pts[k - 1].BaseKhz + next[k - 1] - pts[k].BaseKhz;
-            if (need <= next[k]) break;
-            next[k] = (int)(Math.Ceiling(need / 7500.0) * 7500);
+            long prevLanded = VfShapes.Landing(pts[k - 1].BaseKhz, next[k - 1]);
+            if (VfShapes.Landing(pts[k].BaseKhz, next[k]) >= prevLanded) break;
+            long rawNeed = prevLanded - pts[k].BaseKhz;
+            int candidate = (int)(Math.Ceiling(rawNeed / 7500.0) * 7500);
+            while (VfShapes.Landing(pts[k].BaseKhz, candidate) < prevLanded) candidate += 7500;
+            next[k] = candidate;
             lifted = k;
         }
         if (lifted > 0) top = lifted;
@@ -248,10 +251,12 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     public static int[] FlattenPlan(IReadOnlyList<VfPoint> points, int[] offsets, uint fromUv, long targetKhz, uint minUv)
     {
         var next = (int[])offsets.Clone();
-        foreach (var p in points)
+        for (int i = 0; i < points.Count; i++)
         {
+            var p = points[i];
             if (p.VoltageUv < minUv || p.Index >= next.Length) continue;
-            long bare = (long)p.EffectiveKhz - p.OffsetKhz;
+            bool liftedByLeft = i > 0 && p.EffectiveKhz <= points[i - 1].EffectiveKhz && (long)p.EffectiveKhz - p.OffsetKhz > p.BaseKhz && p.BaseKhz > 0;
+            long bare = liftedByLeft ? p.BaseKhz : (long)p.EffectiveKhz - p.OffsetKhz;
             if (p.VoltageUv < fromUv && bare + next[p.Index] <= targetKhz) continue;
             long want = (long)(Math.Floor((targetKhz - bare) / 7500.0) * 7500);
             if (want < next[p.Index]) next[p.Index] = (int)want;
@@ -1342,8 +1347,22 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     /// <summary>Bytes as GiB to 0.1 (what NVML's 32 GB card calls 31.8).</summary>
     internal static double? Gib(ulong? bytes) => bytes is { } b ? Math.Round(b / 1073741824.0, 1) : null;
 
-    private static VfPoint? Nearest(VfCurveSnapshot c, uint uv) =>
-        c.Points.Count == 0 ? null : c.Points.MinBy(p => Math.Abs((long)p.VoltageUv - uv));
+    private static VfPoint? Nearest(VfCurveSnapshot c, uint uv)
+    {
+        var pts = c.Points;
+        if (pts.Count == 0) return null;
+        int lo = 0, hi = pts.Count - 1;
+        while (lo < hi)
+        {
+            int mid = lo + (hi - lo) / 2;
+            if (pts[mid].VoltageUv < uv) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo == 0) return pts[0];
+        long leftDist = Math.Abs((long)pts[lo - 1].VoltageUv - uv);
+        long rightDist = Math.Abs((long)pts[lo].VoltageUv - uv);
+        return leftDist <= rightDist ? pts[lo - 1] : pts[lo];
+    }
 
     /// <summary>The client clock limits that were in force for a run (<paramref name="held"/>, read as it began) against the
     /// core clock it sampled under load; null when none was in force. A voltage lock is set against its curve point's clock,

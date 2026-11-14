@@ -807,4 +807,19 @@ public class VfWritesTests : IDisposable
             Assert.True(unread == every, $"global {now} → {next}: unread {(unread ? "allows" : "refuses")}, admissible curves {(every ? "all allow" : "do not all allow")}");
         }
     }
+
+    [Fact]
+    public void Shifting_the_current_curve_clamps_total_offsets_within_the_firmware_limits()
+    {
+        var f = Live5090.Curve();
+        var s = VfParser.Parse(f.Info(), f.Status(f.Control()), f.Control());
+        // Already near the +1000 MHz firmware edge on existing offsets: shifting further must clamp total offsets to [Min, Max].
+        var raised = s with { Points = s.Points.Select(p => p with { OffsetKhz = 950_000 }).ToList() };
+        var limits = new VfLimits(-1_000_000, 1_000_000, 0);
+        var shifted = VfShapes.ShiftCurrent(raised, limits, 25_000, Live5090.CeilingUv);
+
+        Assert.All(shifted.Offsets, o => Assert.InRange(o, -1_000_000, 1_000_000));
+        Assert.NotEmpty(shifted.Clamped);
+        Assert.All(Enumerable.Range(0, s.EditableCount), i => Assert.Equal(VfShapes.Landing(s.Points[i].BaseKhz, shifted.Offsets[i]), shifted.NewKhz[i]));
+    }
 }

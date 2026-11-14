@@ -43,4 +43,22 @@ public class FlattenTests
         var next = TuningTools.FlattenPlan(Points(), Offsets(), 900_000, 2_700_000, 950_000);
         Assert.All(Enumerable.Range(80, 5), i => Assert.Equal(15_000, next[i]));   // under 950 mV
     }
+
+    [Fact]
+    public void A_point_lifted_by_a_left_neighbor_spike_uses_its_own_base_when_flattened()
+    {
+        // Point 80 has a +200 MHz spike (2800 -> 3000 MHz); point 81 has Base=2820, Offset=0, Effective=3000 because driver clamps monotonically.
+        var pts = new List<VfPoint>
+        {
+            new(80, 900_000, 2_800_000, 3_000_000, 200_000, 900_000),
+            new(81, 910_000, 2_820_000, 3_000_000, 0, 910_000),
+        };
+        var offsets = new int[82];
+        offsets[80] = 200_000;
+        offsets[81] = 0;
+
+        var next = TuningTools.FlattenPlan(pts, offsets, 900_000, 2_900_000, 850_000);
+        Assert.Equal(97_500, next[80]);   // 2800 + 97.5 <= 2900
+        Assert.Equal(0, next[81]);        // 2820 + 0 <= 2900 already; must NOT get pushed down to -100 MHz!
+    }
 }

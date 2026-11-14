@@ -254,9 +254,10 @@ public sealed partial class TuningTools
             residency.StressUntil(DateTimeOffset.MinValue);
         }
 
-        int? resets = Nvgwls.DriverResets(started, code is 0 or 4 or 5 ? 0 : 2);
         string labVerdict = lab is { } l && l.TryGetProperty("verdict", out var v) ? v.GetString() ?? "?" : "none";
         var reasons = lab is { } l2 && l2.TryGetProperty("reasons", out var rs) ? rs.EnumerateArray().Select(x => x.GetString() ?? "").ToList() : [];
+        bool gpuFault = reasons.Any(r => r.Contains("GPU fault", StringComparison.OrdinalIgnoreCase) || r.Contains("DeviceLost", StringComparison.OrdinalIgnoreCase));
+        int? resets = Nvgwls.DriverResets(started, code is 0 or 5 || code == 4 && !gpuFault && labVerdict != "none" ? 0 : 2);
         double? busy = lab is { } l3 && l3.TryGetProperty("busy_before_pct", out var bb) && bb.ValueKind == JsonValueKind.Number ? bb.GetDouble() : null;
         double? others = lab is { } l6 && l6.TryGetProperty("others_vram_mib", out var ov) && ov.ValueKind == JsonValueKind.Number ? ov.GetDouble() : null;
         double? busyAfter = lab is { } l7 && l7.TryGetProperty("busy_after_pct", out var ba) && ba.ValueKind == JsonValueKind.Number ? ba.GetDouble() : null;

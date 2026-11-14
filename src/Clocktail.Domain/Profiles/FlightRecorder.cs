@@ -129,7 +129,7 @@ public sealed class FlightRecorder(TimeSpan keep)
     public static (DateTimeOffset Answered, DateTimeOffset Stopped)? Hang(IReadOnlyList<FlightSample> window, DateTimeOffset resetSeenAt)
     {
         var looks = window.Where(s => s.At <= resetSeenAt).ToList();
-        FlightSample? FrozenTo(int i) => FrozenFrom(looks.GetRange(0, i + 1)) is { } f && f.At != looks[0].At ? f : null;
+        FlightSample? FrozenTo(int i) => FrozenFrom(looks, i + 1) is { } f && f.At != looks[0].At ? f : null;
         bool Stuck(int i) => looks[i].ReadMs >= BlockedMs || FrozenTo(i) != null;
         bool Near(int i) => resetSeenAt - (looks[i].At + TimeSpan.FromMilliseconds(looks[i].ReadMs)) <= HangEndsWithin;
         int end = looks.Count - 1;
@@ -141,7 +141,8 @@ public sealed class FlightRecorder(TimeSpan keep)
         int start = end;
         while (true)
         {
-            if (FrozenTo(start) is { } f) start = looks.FindIndex(s => s.At == f.At);   // back to its frozen stretch's first look
+            if (FrozenTo(start) is { } f)
+                while (start > 0 && looks[start].At > f.At) start--;   // back to its frozen stretch's first look
             int before = start - 1;
             while (before > 0 && Unread(before) && !Stuck(before) && looks[start].At - looks[before].At <= HangEndsWithin)
                 before--;                                                               // across looks that read nothing
@@ -170,22 +171,29 @@ public sealed class FlightRecorder(TimeSpan keep)
     /// it fills the window or power fell into it (the sample before drew at least 1.5× the tail's highest power). A steady
     /// load pinned at the curve's cap does not drop power, so it is not mistaken for a hang.
     /// </summary>
-    public static FlightSample? FrozenFrom(IReadOnlyList<FlightSample> window)
+    public static FlightSample? FrozenFrom(IReadOnlyList<FlightSample> window) => FrozenFrom(window, -1);
+
+    public static FlightSample? FrozenFrom(IReadOnlyList<FlightSample> window, int count)
     {
-        if (window.Count == 0) return null;
-        var last = window[^1];
+        int end = count < 0 ? window.Count : Math.Min(count, window.Count);
+        if (end == 0) return null;
+        var last = window[end - 1];
         if (last.ClockMhz is null || last.CoreMv is not uint lastMv || !(last.UtilPercent >= 60)) return null;
-        int i = window.Count - 1;
+        int i = end - 1;
+        double tailMax = last.Watts ?? 0;
         while (i > 0)
         {
             var p = window[i - 1];
-            if (p.ClockMhz == last.ClockMhz && p.CoreMv is uint mv && Math.Abs((int)mv - (int)lastMv) <= FrozenMvSlack && p.UtilPercent >= 60) i--;
+            if (p.ClockMhz == last.ClockMhz && p.CoreMv is uint mv && Math.Abs((int)mv - (int)lastMv) <= FrozenMvSlack && p.UtilPercent >= 60)
+            {
+                i--;
+                if (p.Watts is double pw && pw > tailMax) tailMax = pw;
+            }
             else break;
         }
         var first = window[i];
         if (last.At - first.At < FrozenAtLeast) return null;
         if (i == 0) return first;
-        double tailMax = window.Skip(i).Max(s => s.Watts ?? 0);
         return window[i - 1].Watts is double before && before >= 1.5 * tailMax ? first : null;
     }
 

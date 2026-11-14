@@ -187,7 +187,11 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
                 pr.StartedUtc = phaseStarted;
                 pr.FinishedUtc = DateTime.UtcNow;
                 phases.Add(pr);
-                if (pr.Error != null) { log?.Invoke($"{pr.Kind} stopped: {pr.Error}"); break; }
+                if (pr.Error != null || pr.ComputeMismatches > 0 || pr.MemoryErrors > 0 || pr.ChainErrors > 0)
+                {
+                    if (pr.Error != null) log?.Invoke($"{pr.Kind} stopped: {pr.Error}");
+                    break;
+                }
             }
         }
         finally
@@ -212,7 +216,7 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         uint seed = cfg.Seed ^ ((uint)index * 0x9E3779B9u);
         int lightThreads = Math.Max(256, engine.ComputeThreads / Math.Max(1, cfg.LightDiv));
         double share = 1, lastSteer = 0, workSum = 0, msSum = 0, threadSum = 0;
-        int lastThreads = -1, rounds = 0;
+        int maxRefThreads = 0, rounds = 0;
         var frozenMs = new List<double>();
         var perPattern = Enum.GetValues<AccessPattern>().ToDictionary(p => p, _ => new List<double>());
         var l2Gbps = new List<double>();
@@ -225,8 +229,8 @@ public sealed class LabRunner(LabConfig cfg, ILoadEngine engine, ISampler sample
         bool Compute(int threads)
         {
             uint iters = ctrl.Current;
-            bool reference = ctrl.Launches == ctrl.WarmupLaunches || threads != lastThreads && ctrl.Frozen;
-            lastThreads = threads;
+            bool reference = ctrl.Launches == ctrl.WarmupLaunches || threads > maxRefThreads && ctrl.Frozen;
+            if (reference) maxRefThreads = Math.Max(maxRefThreads, threads);
             var o = kind == LabPhase.Latency ? engine.RunLatency(iters) : engine.RunCompute(iters, reference, threads);
             pr.Launches++;
             if (o.Error != null) { pr.Error = o.Error; pr.ErrorCode = o.ErrorCode; return false; }

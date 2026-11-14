@@ -389,7 +389,29 @@ public static class VfShapes
     {
         var asStock = s with { Points = [.. s.Points.Select(p => p with { BaseKhz = (uint)Math.Max(0, (long)p.BaseKhz + p.OffsetKhz), OffsetKhz = 0 })] };
         var shape = Undervolt(asStock, limits, shiftUv, capUv);
-        return shape with { Offsets = [.. shape.Offsets.Select((o, i) => o + s.Points[i].OffsetKhz)] };
+        long lo = CeilStep(limits.LowestKhz), hi = FloorStep(limits.HighestKhz);
+        bool clockSteps = Steps.Of(s.Points).ClockSteps;
+        var offsets = new int[shape.Offsets.Length];
+        var news = new long[shape.Offsets.Length];
+        var clamped = shape.Clamped.ToList();
+        var shorted = shape.Short.ToList();
+        for (int i = 0; i < offsets.Length; i++)
+        {
+            long total = (long)shape.Offsets[i] + s.Points[i].OffsetKhz;
+            if (total < lo || total > hi)
+            {
+                if (!clamped.Contains(i)) clamped.Add(i);
+                total = Math.Clamp(total, lo, hi);
+            }
+            long asked = total;
+            if (clockSteps && total % StepKhz == 0)
+                while (total - StepKhz >= lo && Landing(s.Points[i].BaseKhz, total - StepKhz) == Landing(s.Points[i].BaseKhz, total))
+                    total -= StepKhz;
+            if (total != asked && !shorted.Contains(i)) shorted.Add(i);
+            offsets[i] = (int)total;
+            news[i] = clockSteps ? Landing(s.Points[i].BaseKhz, total) : s.Points[i].BaseKhz + total;
+        }
+        return shape with { Offsets = offsets, NewKhz = news, Clamped = clamped, Short = shorted };
     }
 
     /// <summary>
@@ -443,7 +465,7 @@ public static class VfShapes
     /// The stock curve in hardware steps: each point's firmware voltage and base, put back on the regulator and
     /// clock grids where every point fits them, as reported where not.
     /// </summary>
-    private sealed record Steps(long[] V, long[] F, bool VoltSteps, bool ClockSteps)
+    private sealed record Steps(long[] V, long[] F, long[] MaxF, bool VoltSteps, bool ClockSteps)
     {
         public static Steps Of(IReadOnlyList<VfPoint> points) =>
             Of([.. points.Select(p => (long)p.ReferenceVoltageUv)], [.. points.Select(p => (long)p.BaseKhz)]);
@@ -465,7 +487,12 @@ public static class VfShapes
             var vs = v.Select(Volt).ToArray();
             var fs = f.Select(Clock).ToArray();
             bool onV = vs.All(x => x != null), onF = fs.All(x => x != null);
-            return new(onV ? [.. vs.Select(x => x!.Value)] : v, onF ? [.. fs.Select(x => x!.Value)] : f, onV, onF);
+            var finalV = onV ? [.. vs.Select(x => x!.Value)] : v;
+            var finalF = onF ? [.. fs.Select(x => x!.Value)] : f;
+            var maxF = new long[finalF.Length];
+            for (int j = 0; j < finalF.Length; j++)
+                maxF[j] = j == 0 ? finalF[0] : Math.Max(maxF[j - 1], finalF[j]);
+            return new(finalV, finalF, maxF, onV, onF);
         }
 
         /// <summary>The regulator step a reported voltage was rounded up from: the one multiple of 6.25 mV in (r − 5 mV, r].</summary>
@@ -481,10 +508,11 @@ public static class VfShapes
         /// <summary>The highest stock frequency of any point at or below voltage <paramref name="uv"/>; null below the curve.</summary>
         public long? Stock(long uv)
         {
-            long? best = null;
-            for (int j = 0; j < V.Length; j++)
-                if (V[j] <= uv && (best == null || F[j] > best)) best = F[j];
-            return best;
+            if (V.Length == 0 || uv < V[0]) return null;
+            int idx = Array.BinarySearch(V, uv);
+            if (idx < 0) idx = ~idx - 1;
+            else while (idx + 1 < V.Length && V[idx + 1] == uv) idx++;
+            return idx >= 0 ? MaxF[idx] : null;
         }
 
         /// <summary>What the driver reports for a hardware frequency: floored to whole MHz when the clock is in steps.</summary>
