@@ -87,6 +87,9 @@ public sealed class BrokerLogRotationTests : IDisposable
     [Fact]
     public void Locked_backup_target_does_not_crash_or_stop_logging()
     {
+        // FileShare.None is a Windows share lock; on Linux it does not stop the rename, so there is no locked target to test
+        // (the broker, and its log, run on Windows only).
+        if (!OperatingSystem.IsWindows()) return;
         Directory.CreateDirectory(_dir);
         File.WriteAllText(LogPath + ".1", "locked backup\n");
 
