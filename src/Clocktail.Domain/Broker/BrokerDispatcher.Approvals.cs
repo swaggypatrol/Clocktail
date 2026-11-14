@@ -17,9 +17,19 @@ public sealed partial class BrokerDispatcher
     private void SaveApprovedDaily(IGpuTarget target, DailyProfile profile, string path)
     {
         profile.Save(path);
+        // Without a store nothing is approved, the suspended state "stock" and "off" save here included: the file is
+        // written for the record and no receipt is. What would grant an approval never gets this far (DispatchClient).
+        if (_profileApprovals.Unavailable != null) return;
         // Sign the in-memory candidate, not a re-read of the attacker-writable file. Failure is fail-closed.
         _profileApprovals.Remember(target.StableId, ProfileApproval.Daily, profile);
     }
+
+    /// <summary>The kinds that work without an approval store: they take the card or a saved entry away and grant nothing.</summary>
+    private static bool GrantsNoApproval(string? kind) => kind is "stock" or "off" or "factory" or "forget";
+
+    private static string ApprovalsUnavailable(string why) =>
+        $"profile approvals are unavailable ({why}): nothing can be kept, loaded or saved as a daily profile until the protected approval folder is repaired. " +
+        "Run the Clocktail setup again (its service install repairs the folder). Trials, back_to_daily and stock still work";
 
     private DailyProfile? ApprovedDaily(IGpuTarget target)
     {

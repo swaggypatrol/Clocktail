@@ -270,6 +270,7 @@ public sealed partial class BrokerDispatcher
                     pong = true, pid = _host.Pid, can_write = _canWrite, gpus = _gpus.Ids, game_protocol = Game.GameSession.Protocol,
                     paths = WriteRegistry.All.Select(p => new { kind = p.Kind, keys = p.Keys, values = p.Values, checks_after_write = p.AfterWrite, equal_value_proof = p.ProveEqual != null }),
                     vf_history = HistoryStatusOrNull(),
+                    profile_approvals = new { available = _profileApprovals.Unavailable == null, reason = _profileApprovals.Unavailable },
                 });
 
             var target = _gpus.Resolve(req.GpuId);
@@ -434,7 +435,7 @@ public sealed partial class BrokerDispatcher
         switch (req.Kind)
         {
             case "show":
-                return Ok(new { success = true, path, profile, approved = profile != null && Approved(target, profile), card = new { vbios = target.Vbios, driver = target.Driver } });
+                return Ok(new { success = true, path, profile, approved = profile != null && Approved(target, profile), approvals_unavailable = _profileApprovals.Unavailable, card = new { vbios = target.Vbios, driver = target.Driver } });
             case "preview":
             case "preview-adopt":
             {

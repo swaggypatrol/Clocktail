@@ -134,8 +134,19 @@ static int Run()
             return busy;
         };
         var targets = new WindowsGpuTargets(mgr, host, judge);  // each sentinel asks the judge again once it is on disk
+        // A protected folder that cannot be opened (another account made %ProgramData%\Clocktail first, a link, a
+        // changed ACL) costs the approvals, not the service: no daily profile goes on and none can be kept until the
+        // install repairs it, while trials, recovery and stock work as ever. Ending the worker here instead would have
+        // the supervisor start it again for ever, and any account that made the folder first could keep it so.
+        Clocktail.Domain.Profiles.IProfileApprovals approvals;
+        try { approvals = new WindowsProfileApprovals(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            approvals = new Clocktail.Domain.Profiles.UnavailableProfileApprovals(e.Message);
+            Log($"profile approvals unavailable ({e.Message}): daily profiles stay off and none can be kept until the setup is run again (its service install repairs the folder)");
+        }
         dispatcher = new BrokerDispatcher(hw, targets, host, canWrite: true, judge, new FrameCapture(),
-            profileApprovals: new WindowsProfileApprovals());
+            profileApprovals: approvals);
         dispatcher.AuthorizeProfileChange = request => ProfileConsentDialog.Confirm(request);
         dispatcher.GameLeaseHeld = run => JudgeLock.Live(JudgeLock.Candidates(judgePath, Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)), host, out _)?.RunId == run;
         var server = new BrokerServer(

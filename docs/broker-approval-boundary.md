@@ -32,7 +32,9 @@
 
 没有“第一次启动自动批准”迁移。现有用户首次应用会收到未批准提示，需 `load_daily` 并在 broker 窗口确认完整配置一次；保存预设也要确认后才建立 receipt。
 
-若保护目录已存在但权限/所有者不可信，broker 拒绝初始化批准存储。需管理员核查并移走不可信旧 receipt、重新创建安全目录；**不要把未知 receipt 递归改 ACL 后直接当成真实批准**。
+若保护目录已存在但权限/所有者不可信（`%ProgramData%` 下任何账户都能先建同名文件夹），broker 不再因此起不来：它以“批准不可用”方式运行（`UnavailableProfileApprovals`）。此时不应用任何 Daily、不接受 keep/adopt/preset/wall/load/save（在弹确认框之前就拒绝并给出原因），试验写入、recover、back_to_daily 的归还以及 stock/off/factory/forget 照常；`ping` 的 `profile_approvals` 和 `profile show` 的 `approvals_unavailable` 给出原因。
+
+修复放在本来就提权的 `install`（`WindowsProfileApprovals.Repair`）：缺失的目录按受保护描述符创建；已存在但不可信的目录、同名文件或链接改名为 `<原名>.untrusted-<时间>` 后重建，其中内容一律不读、不导入，可信目录原样保留。修复失败时安装继续并说明原因，服务以“批准不可用”运行。**仍然不要把未知 receipt 递归改 ACL 后直接当成真实批准**。
 
 MCP 原聊天确认码仍保留；stock 暂停每日配置仍需确认，这两项交互调整未包含在本次改动。无须新批准的临时归还可用 back_to_daily/recover；已有未批准 Daily 时 back_to_daily 会拒绝它并尝试归还原值。
 

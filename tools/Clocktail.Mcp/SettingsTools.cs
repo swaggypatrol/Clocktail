@@ -566,12 +566,18 @@ public sealed partial class SettingsTools(Card card)
     /// <param name="read">The broker answered: false when it does not, and then nothing is known of the profile.</param>
     private IReadOnlyDictionary<string, string> Daily(out object? section, out bool suspended, out IReadOnlyDictionary<string, string> adopted, out bool read)
     {
+        var r = card.Broker(BrokerRequest.OpProfile, "show");
+        read = r.Ok && r.Result != null;
+        return DailyFromShow(r, out section, out suspended, out adopted);
+    }
+
+    /// <summary>Parses a <c>profile show</c> broker answer into its kept writes and <c>daily_profile</c> section.</summary>
+    public static IReadOnlyDictionary<string, string> DailyFromShow(BrokerAnswer r, out object? section, out bool suspended, out IReadOnlyDictionary<string, string> adopted)
+    {
         var writes = new Dictionary<string, string>();
         var took = new Dictionary<string, string>();
         adopted = took;
         suspended = false;
-        var r = card.Broker(BrokerRequest.OpProfile, "show");
-        read = r.Ok && r.Result != null;
         if (!r.Ok || r.Result is not { } res) { section = new { error = r.Error ?? "the daily profile could not be read" }; return writes; }
         if (!res.TryGetProperty("profile", out var p) || p.ValueKind != JsonValueKind.Object) { section = null; return writes; }
         suspended = p.TryGetProperty("Suspended", out var sp) && sp.ValueKind == JsonValueKind.True;
@@ -589,10 +595,15 @@ public sealed partial class SettingsTools(Card card)
         string? driverNow = c.ValueKind == JsonValueKind.Object ? Text(c, "driver") : null;
         static string? Other(string? kept, string? now) =>
             kept != null && now != null && !string.Equals(kept, now, StringComparison.OrdinalIgnoreCase) ? now : null;
+        bool? approved = res.TryGetProperty("approved", out var ap) && ap.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? ap.GetBoolean() : null;
+        string? approvalsUnavailable = Text(res, "approvals_unavailable") is { Length: > 0 } ua ? ua : null;
         section = new
         {
             kept_at = p.GetProperty("KeptAt").GetDateTimeOffset(),
             suspended = p.GetProperty("Suspended").GetBoolean(),
+            approved,
+            approvals_unavailable = approvalsUnavailable,
             keeps = writes.Keys,
             last_change = last,
             kept_on_vbios = keptVbios,

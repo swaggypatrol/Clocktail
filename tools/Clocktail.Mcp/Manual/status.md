@@ -9,6 +9,7 @@ Distinguish actual measurements, firmware stock values, captured originals and u
 - `daily_*` describes only this user's saved settings. When no daily exists, report that rather than imagining a default.
 - `not_set_by_clocktail` identifies settings from another utility. They are not evidence that the card is stock.
 - `daily_differs_on_card` indicates a saved profile is not currently fully in force.
+- `daily_profile.approved = false` (and `card_report`'s waiting-for-approval state) means a daily profile is kept but not applied until approved via `load_daily` and the Windows dialog; `approvals_unavailable` explains if the protected approval folder needs `npx -y clocktail@latest setup`.
 ## Live interpretation
 Compare power with this board's own request and firmware limit; inspect rail current limits and `perf_limits`.
 Use reported temperature headroom and throttle reasons rather than assuming a universal temperature threshold.

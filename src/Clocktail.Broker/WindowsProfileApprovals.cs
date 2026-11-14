@@ -16,16 +16,84 @@ public sealed class WindowsProfileApprovals : IProfileApprovals
     private static readonly SecurityIdentifier SystemSid = new(WellKnownSidType.LocalSystemSid, null);
     private readonly string[] _directories;
 
-    public WindowsProfileApprovals()
+    public WindowsProfileApprovals() : this(DefaultRoot(), CurrentSid()) { }
+
+    /// <summary>The store under another root (the tests' scratch folder); the broker's is <see cref="DefaultRoot"/>.</summary>
+    public WindowsProfileApprovals(string root, string sid)
+    {
+        _directories = Directories(root, sid);
+        EnsureDirectories();
+    }
+
+    /// <summary>%ProgramData%\Clocktail: any account may create a folder under %ProgramData%, which is why one found
+    /// there is trusted only by its owner and ACL, never by its name.</summary>
+    public static string DefaultRoot()
     {
         string common = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
         RejectLink(common);
-        string root = Path.Combine(common, "Clocktail");
-        string approvals = Path.Combine(root, "Approvals");
+        return Path.Combine(common, "Clocktail");
+    }
+
+    private static string CurrentSid()
+    {
         using var identity = WindowsIdentity.GetCurrent();
-        string sid = identity.User?.Value ?? throw new InvalidOperationException("cannot identify the approval owner");
-        _directories = [root, approvals, Path.Combine(approvals, sid)];
-        EnsureDirectories();
+        return identity.User?.Value ?? throw new InvalidOperationException("cannot identify the approval owner");
+    }
+
+    private static string[] Directories(string root, string sid)
+    {
+        string approvals = Path.Combine(root, "Approvals");
+        return [root, approvals, Path.Combine(approvals, sid)];
+    }
+
+    /// <summary>
+    /// The install's step, where elevation is certain and a person asked for it: each folder of the store that is
+    /// missing is created protected, and one that is there but not to be trusted (another account made it first, a
+    /// link, a file of that name) is moved aside under its own name plus ".untrusted-…" and a protected one made in
+    /// its place. Nothing in a folder moved aside is read: its receipts are never taken for approvals, so every
+    /// profile is confirmed again. A trusted folder is left exactly as it is. Throws when a folder can be neither
+    /// moved nor made; the broker then starts without approvals (<see cref="UnavailableProfileApprovals"/>).
+    /// </summary>
+    public static void Repair(Action<string> say) => Repair(DefaultRoot(), CurrentSid(), say);
+
+    public static void Repair(string root, string sid, Action<string> say)
+    {
+        foreach (string path in Directories(root, sid))
+        {
+            if (Exists(path, out bool isDirectory))
+            {
+                if (isDirectory && Trusted(path)) continue;
+                string aside = $"{path}.untrusted-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("n")[..8]}";
+                if (isDirectory) Directory.Move(path, aside); else File.Move(path, aside);
+                say($"approval folder {path} was not admin-owned and protected: moved aside to {aside}; nothing in it is used, so each daily profile is confirmed once more");
+            }
+            CreateSecureDirectory(path);
+            if (!Trusted(path))
+                throw new UnauthorizedAccessException($"approval directory could not be made admin-owned and protected: {path}");
+        }
+    }
+
+    /// <summary>Whether anything bears the name, a link included (its target is never looked at).</summary>
+    private static bool Exists(string path, out bool isDirectory)
+    {
+        isDirectory = false;
+        try
+        {
+            var attributes = File.GetAttributes(path);
+            isDirectory = (attributes & FileAttributes.Directory) != 0;
+            return true;
+        }
+        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return false; }
+    }
+
+    private static bool Trusted(string path)
+    {
+        try
+        {
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0
+                && IsTrustedSecurity(new DirectoryInfo(path).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException) { return false; }
     }
 
     // Public so security descriptors can be checked without touching ProgramData or elevating tests.

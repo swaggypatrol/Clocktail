@@ -44,6 +44,14 @@ internal static class Installer
         Run("schtasks", $"/end /tn {BrokerPaths.TaskName}", ignoreFailure: true);
         WaitForBrokerExit(dst, say);
         CopyBuildOutput(dst, say, files);
+        // The protected approval folder is made (or one not to be trusted moved aside) here, elevated and asked for,
+        // before the service starts and looks for it. A failure is said and the install goes on: the service then runs
+        // without approvals and says so.
+        try { WindowsProfileApprovals.Repair(say); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            say($"the protected approval folder could not be prepared ({e.Message}): the service will run, but daily profiles stay off until this is fixed");
+        }
 
         var xml = Path.Combine(Path.GetTempPath(), $"{BrokerPaths.TaskName}-{Environment.ProcessId}.xml");
         File.WriteAllText(xml, TaskXml(exe), new UnicodeEncoding(bigEndian: false, byteOrderMark: true));

@@ -10,6 +10,10 @@ public interface IProfileApprovals
     bool Matches(string gpu, string slot, DailyProfile profile);
     void Remember(string gpu, string slot, DailyProfile profile);
     void Forget(string gpu, string slot);
+    /// <summary>Why this store cannot approve anything (its protected folder is missing or not to be trusted), or null
+    /// when it works. An unavailable store matches nothing, so no daily profile goes on; everything that needs no
+    /// approval (trials, the way back to stock) goes on working.</summary>
+    string? Unavailable => null;
 }
 
 public static class ProfileApproval
@@ -36,4 +40,15 @@ public sealed class MemoryProfileApprovals : IProfileApprovals
     public void Remember(string gpu, string slot, DailyProfile profile) =>
         _receipts[Key(gpu, slot)] = ProfileApproval.Fingerprint(gpu, slot, profile);
     public void Forget(string gpu, string slot) => _receipts.TryRemove(Key(gpu, slot), out _);
+}
+
+/// <summary>The store a host falls back to when its protected one cannot be opened: nothing is approved and nothing can
+/// be, with the reason for whoever asks. The host still starts, so trials, recovery and stock are not lost with it.</summary>
+public sealed class UnavailableProfileApprovals(string reason) : IProfileApprovals
+{
+    public string? Unavailable { get; } = reason;
+    public bool Matches(string gpu, string slot, DailyProfile profile) => false;
+    public void Remember(string gpu, string slot, DailyProfile profile) =>
+        throw new InvalidOperationException($"profile approvals are unavailable: {Unavailable}");
+    public void Forget(string gpu, string slot) { }   // nothing is approved, so nothing is left to revoke
 }

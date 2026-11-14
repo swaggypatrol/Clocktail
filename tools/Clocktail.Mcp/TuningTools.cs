@@ -1318,15 +1318,21 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
     }
 
     /// <summary>The daily profile's Core offsets (zeros when it keeps no curve, or none is kept).</summary>
-    private int[] DailyOffsets(out string note)
+    private int[] DailyOffsets(out string note) => DailyOffsetsFromShow(card.Broker(BrokerRequest.OpProfile, "show"), out note);
+
+    /// <summary>The daily profile's Core offsets and status note from a <c>profile show</c> broker answer.</summary>
+    public static int[] DailyOffsetsFromShow(BrokerAnswer r, out string note)
     {
-        var r = card.Broker(BrokerRequest.OpProfile, "show");
         if (!r.Ok || r.Result is not { } res) { note = r.Error ?? "the daily profile could not be read"; return []; }
         if (res.GetProperty("profile") is not { ValueKind: JsonValueKind.Object } p) { note = "no daily profile is kept: offsets compare against stock"; return []; }
         foreach (var w in p.GetProperty("Writes").EnumerateArray())
             if (w.GetProperty("Kind").GetString() == VfWrites.Kind)
             {
-                note = p.GetProperty("Suspended").GetBoolean() ? "the daily profile is suspended (stock on the card)" : "daily profile on";
+                bool suspended = p.GetProperty("Suspended").GetBoolean();
+                bool unapproved = res.TryGetProperty("approved", out var ap) && ap.ValueKind == JsonValueKind.False;
+                note = suspended ? "the daily profile is suspended (stock on the card)"
+                    : unapproved ? "the daily profile is waiting for approval (load_daily)"
+                    : "daily profile on";
                 return VfOffsets.Decode(w.GetProperty("Value").GetString()!);
             }
         note = "the daily profile keeps no curve: offsets compare against stock";

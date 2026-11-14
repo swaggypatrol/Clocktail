@@ -30,6 +30,9 @@ public sealed partial class BrokerDispatcher
         if (!NeedsProfileConsent(req)) return Dispatch(req);
         if (Monitor.IsEntered(_operation))
             return Fail("a nested operation cannot open a profile confirmation; send a separate client request", BrokerCode.CannotWrite);
+        // No store, no approval: said before any question is put to the person, who could only say yes to nothing.
+        if (_profileApprovals.Unavailable is { } why && !GrantsNoApproval(req.Kind))
+            return Fail(ApprovalsUnavailable(why), BrokerCode.CannotWrite);
         // Admission precedes even the preview: don't queue another dialog behind an outstanding one.
         if (Interlocked.CompareExchange(ref _confirmationPending, 1, 0) != 0)
             return Fail("another profile confirmation is pending; nothing changed", BrokerCode.CannotWrite);
