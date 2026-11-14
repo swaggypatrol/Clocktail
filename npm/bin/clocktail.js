@@ -330,9 +330,9 @@ async function uninstall(opts) {
   // another tool (MSI Afterburner, NVIDIA App's automatic tuning) had changed it first.
   let givenBack = !cardState().profile;
   if (fs.existsSync(BROKER)) {
-    say('  giving back every setting Clocktail changed');
+    say('  giving back every setting Clocktail changed (choose Yes in the Clocktail confirmation Windows shows)');
     givenBack = run(BROKER, ['stock'], { quiet: true }).status === 0;
-    if (!givenBack) say('  the service did not answer, so the settings could not be given back now: the card sheds them at the next restart');
+    if (!givenBack) say('  the settings were not given back now (the service did not answer, or the confirmation was declined or timed out): the card sheds them at the next restart');
     say('  removing the service (Windows will ask for admin rights once)');
     run(BROKER, ['uninstall']);
   }

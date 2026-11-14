@@ -46,7 +46,7 @@ It works with Claude Code, Claude Desktop, Codex, Cursor, OpenCode, VS Code, Gem
 npx -y clocktail uninstall
 ```
 
-Clocktail puts back every setting it owns, and the service and the agent connections are removed. Your profiles and tuning logs stay in `%LocalAppData%\Clocktail` unless you add `--purge`. The card won't remember any of this.
+Clocktail puts back every setting it owns (the service asks you to confirm that in a Windows dialog; say no and the card sheds them at the next restart instead), and the service and the agent connections are removed. Your profiles and tuning logs stay in `%LocalAppData%\Clocktail` unless you add `--purge`. The card won't remember any of this.
 
 </details>
 
@@ -126,7 +126,7 @@ Rather do the curve by hand? Ask your agent **"Open the V/F curve editor."** A w
 - **Drag points or enter a precise offset.** A persistent inspector shows voltage, draft and opened clocks, their difference and an editable offset in MHz. Ctrl+Z undoes, Ctrl+Y / Ctrl+Shift+Z redoes, Esc cancels a drag, right-drag pans, and Ctrl+0 fits the view. The low-voltage cliff is reshaped as a smooth band between two draggable lines, and above it the clock never falls, the driver's own rule.
 - **Start from the exact curve on the card.** Opening the window preserves the curve. Smooth is an explicit action; Restore opened restores the original offsets and band exactly. Both are undoable.
 - **Clean up the history.** Right-click a point, a crash or a stability mark to pick a past test and delete it. It asks first, and the marks are recomputed at once. Your card isn't touched, and the original journal stays for recovery.
-- **Nothing is written until you click Save as Daily.** Then the curve goes on as a trial, the readback is checked, and it becomes your daily profile. That click is your approval; the agent won't ask again. The window shows the save result; Details lets you read and copy full diagnostics and see other settings included in Daily. Closing an unsaved draft prompts before discarding it.
+- **Nothing is written until you click Save as Daily.** Then the curve goes on as a trial, the readback is checked, and it becomes your daily profile. That click is your approval; the agent won't ask again, and the service shows its own Windows confirmation before the daily profile changes. The window shows the save result; Details lets you read and copy full diagnostics and see other settings included in Daily. Closing an unsaved draft prompts before discarding it.
 
 Windows only. The window is in English.
 
@@ -153,7 +153,7 @@ If the game crashes, that's not a setback, that's data. The crash belongs to the
 
 Two things authorize a setting: you, and NVIDIA's driver and firmware. Every write is read back. Clocktail adds no tuning envelope of its own and no mandatory XBAR voltage/clock pairing. What it does keep are the checks that make a write land where it was aimed: encoding, GPU identity, concurrency and recovery. It won't guess between two GPUs, and if it doesn't recognize a driver layout it says so rather than borrowing another card's.
 
-`begin_session` asks you once for a round of trials. Trials are recorded and undone on their own. The changes that stay, a daily profile, the daily power limit, Clocktail asks you about itself, right in your agent's chat: the first call changes nothing and hands your agent the question with a one-time code, and only after your yes does it call again with that code. A model that skips the question could answer it itself, so if you want a yes no model can give, `CLOCKTAIL_CONFIRM=form` asks in an MCP form or a Windows dialog instead (`dialog` always uses the Windows dialog). `CLOCKTAIL_CONFIRM=off` no longer skips the question; it asks in chat like the default.
+`begin_session` asks you once for a round of trials. Trials are recorded and undone on their own. The changes that stay (keeping, loading, saving or deleting a daily profile, the daily power limit, going to stock) are asked about twice. First in your agent's chat: the first call changes nothing and hands your agent the question with a one-time code, and only after your yes does it call again with that code. `CLOCKTAIL_CONFIRM=form` asks in an MCP form or a Windows dialog instead (`dialog` always uses the Windows dialog); `CLOCKTAIL_CONFIRM=off` no longer skips the question. Then the Clocktail service itself, which runs elevated, shows a Windows confirmation listing the settings. No is the default, it gives up after 60 seconds, and with nobody at the desktop (a locked screen, no interactive session) the answer is no. A model, or any program running as you, can't click it for you, and the service checks that nothing changed while it waited. Going back to the daily profile you already have (`back_to_daily`, the cleanup after a job) doesn't ask.
 
 Some agents run every tool without asking (Freebuff, anything in YOLO mode). The above is why that's survivable. The other way round, Claude Code asks before every single read. `npx -y clocktail setup --allow-reads` lets the read-only tools through (card_report, gpu_status and friends); every write still asks.
 
