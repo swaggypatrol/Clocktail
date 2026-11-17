@@ -2,6 +2,8 @@ using Bwt.Workloads;
 using Clocktail.Lab;
 using Clocktail.Mcp;
 using Clocktail.Domain.Lab;
+using Clocktail.Core.Gpu;
+using Clocktail.Domain.Vf;
 using System.Text.Json;
 
 namespace Clocktail.Tests.Lab;
@@ -146,6 +148,54 @@ public sealed class SymphonySafetyTests
         var data = JsonSerializer.SerializeToElement(observations).EnumerateArray().Single();
         Assert.Equal(1, data.GetProperty("samples").GetInt32());
         Assert.Equal(900, data.GetProperty("nvvdd_mv").GetDouble());
+    }
+
+    /// <summary>Builds a phase-window report from raw poll pairs with both sensor channels independently nullable.</summary>
+    private static JsonElement Observe(VfPoint? target, params (double second, uint? uv, uint? mhz)[] polls)
+    {
+        var start = DateTimeOffset.UnixEpoch;
+        var phases = new[] { new { kind = "solo", started_utc = start, finished_utc = start.AddSeconds(10) } };
+        var samples = polls.Select(p => new Card.Sample(start.AddSeconds(p.second),
+            new TelemetrySnapshot(null, null, null, null, null, null, null, p.mhz, null, null, null, null, null, null, null, [], []),
+            p.uv, null, null, null)).ToArray();
+        return JsonSerializer.SerializeToElement(TuningTools.PhaseObservations(JsonSerializer.SerializeToElement(new { phases }), samples, target))[0];
+    }
+
+    [Fact]
+    public void Phase_reports_actual_pairs_when_independent_medians_would_invent_a_point()
+    {
+        var point = new VfPoint(4, 975_000, 3_000_000, 3_000_000, 0, 975_000);
+        var data = Observe(point, (-1, 975_000, 3000), (0, 975_000, 2800), (1, 950_000, 3000),
+            (2, 975_000, 2800), (3, 950_000, 3000), (10, 975_000, 3000));
+        Assert.Equal(975, data.GetProperty("nvvdd_mv").GetDouble());
+        Assert.Equal(3000, data.GetProperty("clock_mhz").GetDouble());
+        Assert.Equal(4, data.GetProperty("paired_samples").GetInt32());
+        Assert.Equal(0, data.GetProperty("target_samples").GetInt32());
+        var pairs = data.GetProperty("most_sampled_vf").EnumerateArray().ToArray();
+        Assert.Equal(new[] { (950_000, 3000, 2), (975_000, 2800, 2) }, pairs.Select(p =>
+            (p.GetProperty("nvvdd_uv").GetInt32(), p.GetProperty("clock_mhz").GetInt32(), p.GetProperty("samples").GetInt32())));
+    }
+
+    [Fact]
+    public void Target_count_matches_voltage_and_sub_MHz_rounding_in_the_same_poll()
+    {
+        var point = new VfPoint(4, 975_000, 2_900_000, 3_000_500, 100_500, 975_000);
+        var data = Observe(point, (0, 975_000, 3000), (1, 975_000, 3001), (2, 975_000, 2999),
+            (3, 981_250, 3000), (4, null, 3000), (5, 975_000, null));
+        Assert.Equal(6, data.GetProperty("samples").GetInt32());
+        Assert.Equal(4, data.GetProperty("paired_samples").GetInt32());
+        Assert.Equal(2, data.GetProperty("target_samples").GetInt32());
+        Assert.Equal(3, data.GetProperty("most_sampled_vf").GetArrayLength());
+    }
+
+    [Fact]
+    public void Missing_or_unrequested_target_evidence_stays_unknown()
+    {
+        var point = new VfPoint(4, 975_000, 3_000_000, 3_000_000, 0, 975_000);
+        var missing = Observe(point, (0, null, 3000), (1, 975_000, null), (2, 0, 3000), (3, 975_000, 0));
+        Assert.Empty(missing.GetProperty("most_sampled_vf").EnumerateArray());
+        Assert.Equal(JsonValueKind.Null, missing.GetProperty("target_samples").ValueKind);
+        Assert.Equal(JsonValueKind.Null, Observe(null, (1, 975_000, 3000)).GetProperty("target_samples").ValueKind);
     }
 
     [Fact]

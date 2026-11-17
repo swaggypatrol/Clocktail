@@ -2,181 +2,51 @@
 
 [English](README.md) | 简体中文
 
-**让 AI 助手给你的 RTX 50 系显卡超频，走 MCP 协议。** 你打游戏，AI 调卡，稳不稳由 NVIDIA 自家的压测工具说了算。吵不起来。
+Clocktail 通过 MCP 在 Windows x64 上测量和调校 NVIDIA GeForce RTX 50 系列显卡的电压／频率曲线。它读取驱动实际生效的曲线，用可重复的负载校验计算结果，同时记录显卡在负载下到达的电压和频率。硬件调校路径要求 CUDA 计算能力 12.0。B100、B200 和 GB200 不在这条路径的支持范围内。
 
-![3DMark Speed Way 成绩页：16 182 分，有效成绩，RTX 5090 搭配 Intel Core i9-14900K；同类系统的成绩分布图里，这个分数的柱子在最高那根的右边](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/speed-way-result.jpg)
+## 安装
 
-*Clocktail 起家的那张 RTX 5090 跑 3DMark Speed Way：16 182 分，有效成绩。灰色高柱是同类系统扎堆的地方，橙色那根是这张卡。*
+先安装 Node.js 18 或更新版本，再在 Windows 终端安装已发布版本。
 
-一张本来就很快的显卡，你还想让它再快一点。懂，不问。
-
-- **调参交给 AI。** V/F 曲线、核心和显存偏移、XBAR 等时钟域、电压加成、频率锁、功耗墙和电流墙、风扇。所有开关都给它，没有“专家模式”，在显卡自己的范围之外 Clocktail 不另加上限。
-- **也可以自己画曲线。** 让 AI 打开 V/F 曲线编辑器，窗口里有你的曲线、钉在出事点上的每次崩溃、每个点验证稳定到多高、显卡实际跑在哪里。拖好，保存。
-- **稳不稳，不由 AI 自己说。** NVIDIA 的压测工具、Clocktail 自带的实验室，还有你的游戏，拿帧数说话。
-- **你不点头，什么都不留。** 没有预设，没有默认配置。在你开口之前，Clocktail 不会往显卡写任何东西。
-
-面向整个 RTX 50 系列，不管是哪家做的板卡。需要 Windows x64 和 Node.js：
-
-```
+```powershell
 npx -y clocktail@latest setup
 ```
 
-重启 AI 助手，然后问它一句：*“我的卡现在怎么样？”*
+安装器会展示计划、备份所选 MCP 客户端的配置，并为安装后台服务请求管理员权限。重启客户端，让它运行 `card_report`。如果机器上有多张受支持的卡，在 MCP 和后台服务的环境变量 `CLOCKTAIL_GPU_PCI` 中填入同一个目标 PCI 地址（例如 `0000:01:00.0`）。重启两者后，核对报告中的 PCI 地址。
 
-> 非官方软件。超频可能导致游戏崩溃、画面出错、硬件减寿。NVIDIA 接受某个设置，不代表它稳定或安全。
+默认列出 23 个工具，覆盖读卡、V/F 与显存调试、测试和恢复。需要曲线编辑器、频率锁或自动游戏测试时，用 `--full` 再运行一次 setup。手动配置的客户端可以用 `--full` 启动 `%LocalAppData%\Programs\Clocktail\clocktail-mcp.exe`，也可以设置 `CLOCKTAIL_TOOLS=full`。已有的 `--lite` 配置继续有效。
 
-<details>
-<summary><b>安装、更新、卸载</b></summary>
+## 测一个 V/F 点
 
-把下面这段话原样发给你的编程助手（Claude Code、Codex、Cursor、Trae、Qwen Code、Kimi Code、OpenCode 都行）：
+1. 用 `card_report` 核对显卡、驱动、当前设置，以及其他工具留下的偏移。用 `limiter` 查看限制因素，再用 `curve_around` 查看实际负载电压附近的曲线，从这张卡上选一个点号。
+2. 把点号作为 `targetPoint` 传给 `lab_test`。`aria` 用 CPU 参考结果逐位核对 FP32 运算。默认的 `core` 覆盖持续负载、高频和轻重负载切换。做前后对照时，保持工作负载、适用的随机种子、功耗上限和散热条件一致。
+3. 查看计算结果和每个阶段的 `paired_samples`、`target_samples`、`most_sampled_vf`。命中数为 0 表示有效的成对采样都没有命中目标。空值表示未指定目标点或缺少成对读数。计数对应整个阶段内的轮询，包含 CPU 校验和停顿。
+4. 经用户同意，用 `begin_session` 开启试验，调用 `adjust_curve` 调整一个区段，核对驱动回读，再重复同一负载。`data_points` 可回看历史试验。选出候选配置后，在实际应用和日常工作温度下复测。
+5. 用 `back_to_daily` 恢复原设置。若要长期保留，先看 `preview_daily`，再批准 `keep_as_daily`。持久化变更还需在后台服务弹出的 Windows 窗口中确认。
 
-```
-用 npx clocktail@latest setup 安装 Clocktail，并接入你自己。先把安装计划给我看，我同意了再装，装完帮我验证一遍。
-```
+假设这张卡的 `curve_around` 返回了点号 91，下面是一次 `lab_test` 的 MCP 参数。
 
-想自己动手也行，直接运行 `npx -y clocktail@latest setup`。安装程序会先列出它在你电脑上找到的 AI 助手和要改的配置（改之前都会备份），你点头了才动手。中间 Windows 会弹一次管理员权限，同意就行。装完重启一下 AI 助手。
-
-npm 下载慢的话，先换国内镜像：`npm config set registry https://registry.npmmirror.com`
-
-支持 Claude Code、Claude Desktop、Codex、Cursor、OpenCode、VS Code、Gemini CLI、Windsurf、GitHub Copilot CLI 等十几种（名单借自 [REA](https://github.com/morluto/rea)，谢过）。其他会说 MCP 的，指向 `%LocalAppData%\Programs\Clocktail\clocktail-mcp.exe` 即可。
-
-**更新。** 它不会自己更新。出了新版，问一句“我的卡现在怎么样”，表格最后会提醒你。再跑一遍安装命令（也可以让 AI 替你跑），重启 AI 助手就好。MCP 服务器、后台服务和实验室要保持同一版本。你存的配置和日志都不会动。检查更新时它只去 npm 看一眼最新版本号，你电脑和显卡的信息一概不发。不想让它查，设 `CLOCKTAIL_NO_UPDATE_CHECK=1`。
-
-**卸载。**
-
-```
-npx -y clocktail uninstall
+```json
+{"profile": "aria", "targetPoint": 91, "seed": "5eed5eed5eed5eed"}
 ```
 
-Clocktail 持有的每一项设置都会改回去（后台服务会弹 Windows 确认框；选“否”的话，显卡下次重启时自然回到原样），后台服务和 AI 助手里的配置也会删掉。你的配置和调校记录默认留在 `%LocalAppData%\Clocktail`，加 `--purge` 一起删。显卡不会记得发生过什么。
+结果描述这张卡在本次负载下的计算正确性和采样情况。温度、后台任务和负载切换都会改变实际覆盖的 V/F 点。超频可能造成计算错误、驱动复位或硬件损伤。首次安装时，日常配置列表为空。
 
-</details>
+## 使用与维护
 
-<details>
-<summary><b>用哪个模型，以及小模型怎么办</b></summary>
+- **恢复。** 后台服务记录 Clocktail 接手的设置，驱动复位后据此恢复或重放已批准的日常配置。`stock` 还会清除其他工具留下的设置，执行前会请求确认。[后台服务的确认与恢复机制](docs/broker-approval-boundary.md)
+- **负载。** 内置实验室覆盖核心、显存和 uncore。可选的独立验证包括 NVIDIA 的 `nvgwls` 和本机安装的 Quake II RTX。帧时间采集使用 Intel PresentMon。[实验室](docs/lab.md) · [游戏测试](docs/game-test.md) · [第三方声明](THIRD_PARTY_NOTICES.md)
+- **更新。** 重新运行 setup 并重启客户端，确保 MCP、后台服务和实验室版本一致。用 `npx -y clocktail uninstall` 卸载。除非显式使用 `--purge`，配置和日志会保留在 `%LocalAppData%\Clocktail`。
+- **诊断。** `diagnostic_report` 可导出本机驱动和功能探测信息。[MCP 工具手册](tools/Clocktail.Mcp/README.md) · [V/F 历史记录](docs/vf-history.md)
 
-不一定非得用 Claude。只要模型会好好调用工具就行。下面那份体检报告，是 OpenCode 里的 DeepSeek V4.1 Flash 出的，整段对话花了一美分。本地模型也可以，哪怕就跑在它要汇报的那张显卡上：
+## 构建与测试
 
-![本地模型在 OpenCode 里回答“我的显卡超频状态”：调用 card_report，给出结论、相对出厂改了什么（打 ✅）和当前核心频率](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/local-model-card-report.jpg)
+使用 .NET 10 SDK。自动化测试使用模拟驱动。上卡调校需要 Windows x64 及受支持的 GPU。
 
-*Qwen3.8 27B 跑在 llama.cpp 里，接 OpenCode，用的正是它在汇报的这张 RTX 5090。显卡给自己写体检报告，倒也坦荡。*
-
-**模型小？上精简版。**
-
+```sh
+dotnet test tests/Clocktail.Tests -c Release
+node --test npm/test/clients.test.js
 ```
-npx -y clocktail@latest setup --lite
-```
-
-完整版有 54 个工具，外加一本手册那么多的说明。上下文只有 32k 的本地模型，塞完 AI 助手自己的提示词就装不下了，而且 Ollama 不会告诉你：它悄悄把对话开头扔掉，最先扔的就是这些说明，AI 聊着聊着就忘了自己在干什么。`--lite` 只给 22 个工具和一页纸的简报。就算用了 lite，也照样给 Ollama 开到显存撑得住的最大上下文（`OLLAMA_CONTEXT_LENGTH`，64k 就很宽裕）。
-
-**用哪个模型，比用哪个软件要紧。** 同一个 Clocktail，在 Cursor 里接顶级模型一路顺畅，换成免费的小模型就开始原地转圈。挑你用得起的最好的模型；预算紧的话，OpenCode 里的 DeepSeek V4.1 Flash 就很划算。
-
-</details>
-
-<details>
-<summary><b>它会告诉你什么</b></summary>
-
-问一句“我的卡现在怎么样”，它会列一张表：每项设置出厂是多少、现在是多少，在 NVIDIA 自家限值以内的打 ✅，超出的打 ⚠️。
-
-![OpenCode 里 DeepSeek V4.1 Flash 调用 card_report：功耗墙、V/F 曲线、显存、两路电压轨、XBAR、风扇，每项都列出原值、现值、改动、✅ 或 ⚠️ 和备注](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/card-report-vs-stock.jpg)
-
-*相对出厂改了五项，四项打 ✅。唯一的 ⚠️ 是 XBAR +560 MHz，超出了它备注里敢担保的范围，它就直说。*
-
-下面再像 btop 那样，用盲文点阵在终端里画出 V/F 曲线，● 标出显卡此刻跑在哪。再往下，是显卡这会儿在干什么。
-
-![盲文点阵画的 V/F 曲线：调过的压在出厂的上面，● 在 3060 MHz、1030 mV；下面是实时读数：16-pin 输入、驱动超时、温度、功耗、PCIe 链路、核心、是什么压着频率、日常设置](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/card-report-curve-now.jpg)
-
-*调过的曲线压在出厂的上面，● 停在 3060 MHz、1030 mV。45 °C，96 W，PCIe 5.0 x16，没有什么压着它。闲着呢。暂时。*
-
-最后是一段大白话结论。
-
-![结论：两处要留意，一是 XBAR 超出了实测范围，二是驱动自己报的 api_triggered；✅ 担保什么、不担保什么；以后要是闪屏或灰屏，先怀疑哪一项](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/card-report-verdict.jpg)
-
-*✅ 的意思是在 NVIDIA 自家限值以内，不是保证不崩，这话它自己会说。哪天真灰屏了先怪谁，它也替你想好了。总得有人背锅。*
-
-别的软件不太给你看的，它也读：显存温度、16-pin 接口上走了多少瓦、PCIe 链路有没有在重传数据、驱动到底是拿哪条限制压住了频率、频率锁到底有没有锁住（锁只是一个请求，驱动照样会在它下面降频）、核心旁边的 XBAR、SYS 和视频时钟，还有 Windows 要等多久才会重置卡死的显卡。
-
-可以这样问：
-
-```
-我的卡卡在 2970 MHz，加电压也上不去，是被什么限制住了？你打算怎么改？
-```
-
-```
-今晚用新曲线打赛博朋克，你全程盯着显卡。要是崩了，就记下来当调参数据。
-```
-
-```
-帮我比较这些试验，先展示最终会保存哪些参数，我确认后再设为日常配置。
-```
-
-</details>
-
-<details>
-<summary><b>V/F 曲线编辑器：自己动手画</b></summary>
-
-想亲手调曲线？跟 AI 说一句 **“打开 V/F 曲线编辑器”**，桌面上就会弹出一个窗口，画着这张卡的曲线，Clocktail 攒下的测试结果都标在上面：
-
-- **每次崩溃都钉在它出事的那个点上。** 实心叉表示是在调曲线的试验里崩的。
-- **每个点验证稳定到多高**，来自你标记为稳定或扛过去的测试。
-- **显卡实际跑在哪里**，用负载下的采样画成一片点云。你的游戏到底用的是曲线哪一段，一眼就看出来。
-- **用鼠标拖点。** Ctrl+Z 撤销，右键拖动平移，任何缩放比例下都清晰。低电压那段断崖被改成两条可拖动的线之间的平滑过渡带，过渡带以上频率只升不降，这是驱动自己的规则。剩下的一键就能抹平。
-- **清理历史记录。** 右键点曲线点、崩溃标记或稳定标记，选中一条过去的测试就能删掉。删之前会先问你，删完标记立刻重算。显卡不会被改动，原始日志留着以备恢复。
-- **不点 Confirm & Save as Daily，什么都不写。** 点了之后，曲线作为一次试验写入，核对读回，然后设为你的日常配置。这一下就算你同意了，AI 不会再问一遍；后台服务在改日常配置前还会弹出自己的 Windows 确认框。
-
-仅限 Windows，窗口是英文的。
-
-</details>
-
-<details>
-<summary><b>裁判：压测、实验室、游戏</b></summary>
-
-- **NVIDIA 自家的压测工具。** `stress_test` 调用显卡驱动自带的 `nvgwls.exe`（NVIDIA App 的自动超频用的就是它），每个结果都逐位比对。铁面无私，收买不了。
-- **游戏测不出来的，交给实验室。** `lab_test` 跑 Clocktail 自己的负载引擎，核心、显存、crossbar 各有各的乐器，所有结果都严格核对。曲线顶端交给独奏者，专门盯高频点；频率没真落在你要测的那个点上，它就直说，不算通过。游戏也不会老老实实停在一个点上：重场景一变轻，频率就一下冲上曲线顶端。所以还有一个“跳跃”测试：先满载、再轻载，反复来回。你可以让 AI 自己去扫显存偏移（`tune_memory`），或者找 XBAR、比例和电压加成的最佳组合（`tune_uncore`），每个候选都按 A B B A 比一遍；测到一半被打扰的那轮，会重测。你不点头，什么都不留。
-- **你睡觉，它替你打游戏。** 装了 Quake II RTX（Steam 上免费）的话，`game_test` 会按带种子的脚本自己玩，键盘前不用有人；同一个种子能把同一局原样重放，修完可以拿当初挂掉的那串动作再验一遍。它是可选的，是证据，不是保证：你本来就在电脑前的话，直接玩你自己的游戏、让 AI 盯着更好。详见 [game test 说明](docs/game-test.md)。
-- **帧数它自己会看。** 你打游戏时，`watch` 和实时观察工具每秒看四次显卡，平均帧、1% 和 0.1% 低帧、帧生成时间都看得到，用的是 Intel 的 PresentMon，不往游戏里注入任何东西。“调了有没有用”，拿帧数说话，不凭感觉。
-
-游戏崩了也不白崩：这次崩溃记在当时那个试验头上，崩在什么频率、什么电压、多少瓦、多少度，都有记录。
-
-![问它拿什么测稳定，它把工具箱摊开：两个裁判 stress_test 和 lab_test，盯真实游戏的 watch 和 live_start，崩溃怎么记，两个常用组合，那条规矩“游戏稳定 = 压测能过的最高频率减 30–60 MHz”，再往下是调 V/F 曲线的工具](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/stability-toolbox.jpg)
-
-*问它拿什么测稳定，它把家底摊开：两个裁判、两种盯游戏的办法、调曲线的工具。在 Clocktail 起家的那张卡上，游戏要比压测的边界退 30–60 MHz 才不崩。那是一颗芯片的数。你的卡有它自己的数，只有你的游戏知道。*
-
-</details>
-
-<details>
-<summary><b>谁说了算</b></summary>
-
-能放行一个设置的只有两方：你，和 NVIDIA 的驱动与固件。每次写入都会回读核对。Clocktail 不另设调参上限，也不强制 XBAR 电压/频率配对；保留的只是让写入落到该落的地方的那些校验：参数编码、显卡身份、并发和恢复。两张显卡分不清，它不猜；驱动结构认不出，它直说，不拿别的卡的数据凑数。
-
-`begin_session` 先问你一次，批准这一轮试验。试验都有记录，到点自己会撤回。真正会留下来的改动（保存、加载、另存或删除日常配置，日常功耗墙，恢复默认）会问你两次。第一次在 AI 助手的对话里：第一次调用什么都不改，只把问题和一个一次性确认码交给 AI 助手，等你说“好”，它才能带着这个码再调用一次。设 `CLOCKTAIL_CONFIRM=form` 改在 MCP 表单或 Windows 对话框里问（`dialog` 则始终用 Windows 对话框）；`CLOCKTAIL_CONFIRM=off` 已经跳不过这一步了。第二次由以管理员权限运行的 Clocktail 后台服务亲自弹出 Windows 确认框，列出要改的设置。默认按钮是“否”，60 秒没人点就算拒绝；桌面没人（锁屏、没有交互会话）也算拒绝。模型、以及任何以你的身份运行的程序都替你点不了；服务在等待期间还会核对配置有没有变。回到你已有的日常配置（`back_to_daily`、任务结束后的清理）不需要再确认。
-
-有些 AI 助手调用工具从来不问你（比如 Freebuff，或者任何开了 YOLO 模式的），上面这套就是它出不了大事的原因。Claude Code 正好反过来，哪怕只是读一下都要先问你。`npx -y clocktail setup --allow-reads` 会放行只读的工具（card_report、gpu_status 这些），写入照样要问。
-
-stress_test 和 lab_test 离 NVIDIA 自己的降频点只剩 2 °C 时会停，你用 `maxTempC` 定了线就按你的；game_test 只按你的 `maxTempC` 停，显存和 uncore 扫描不看温度。NVIDIA 自己的保护一直都在。显卡看着像卡死了，就不写新的试验。夜里没人看着跑，崩到你定的次数（默认两次）就不再写新试验。
-
-</details>
-
-<details>
-<summary><b>你的配置，和别的软件留下的东西</b></summary>
-
-出厂设置以当前显卡自己的固件为准。日常配置只在你挑好要留的设置之后才存在。配置和日志是你的，升级不会拿什么内置参数替换它们。
-
-- `preview_daily` 展示实际会保留什么、哪些临时控制项会被排除；你点头后 `keep_as_daily` 才保留。
-- 想存几套就存几套：`save_profile`，“安静”一套、“游戏”一套，一句话就能切。（`list_presets`、`load_preset` 是旧名字，列出和加载的都是你自己存的配置，内置列表是空的。）
-- 后台服务记着你的日常配置，每次开机、睡眠唤醒、驱动重置后都会自动恢复，包括你自己作出来的那几次。换了 VBIOS 保存的配置，它会等你点头。没有日常配置时，它只把 Clocktail 自己改过的还原。
-- `stock` 清掉所有已知的非出厂设置并暂停日常配置。它会先问你，因为别的软件留下的东西它不留备份。
-
-**已经在 MSI Afterburner 里调过了？** Clocktail 看得出来。别的软件留在卡上的东西（降压曲线、显存偏移、功耗墙、固定风速），问一句“我的卡现在怎么样”，都会标成 **Not set by Clocktail**，这样 AI 就不会把你的降压曲线当成 NVIDIA 的原厂曲线。接下来你说了算：在它的基础上接着调；用 `stock` 清掉；或者交给 Clocktail 接管（`keep_as_daily` 加上 `adopt`，功耗墙用 `set_daily_power_limit` 另设），让 Afterburner 光荣退休。Afterburner 要是还开着，它会直说：两个程序抢着写同一张卡，这架谁也打不赢。NVIDIA App 的自动超频住在驱动里，每次重启都会回来，想让出厂设置一直是出厂设置，就去 NVIDIA App 里把它关掉。
-
-</details>
-
-<details>
-<summary><b>支持哪些卡</b></summary>
-
-RTX 50 全系列，不分型号和板卡厂商，Windows x64，装好 NVIDIA 驱动。每张卡能调什么，都从这张卡、这块板和这个驱动上现读；不是每个型号都有全部传感器和开关。面向全系列，不等于每个开关在每块板、每个驱动上都试过。盒子里没有通用的功耗墙、电压、偏移、风扇曲线或“稳定曲线”。你的卡不一样，每张卡都不一样。
-
-</details>
 
 <details>
 <summary><b>在我们这张卡上测到的</b></summary>
@@ -202,44 +72,5 @@ crossbar 一松开，显存也跟着有了余地：同样的偏移，带宽多�
 ![3DMark Steel Nomad 成绩页：15 757 分，有效成绩，RTX 5090 搭配 Intel Core i9-14900K，平均频率 2,878 MHz](https://raw.githubusercontent.com/swaggypatrol/Clocktail/main/docs/images/steel-nomad-result.jpg)
 
 *用 Clocktail 调过的 RTX 5090 跑 3DMark Steel Nomad：15 757 分，有效成绩，平均频率 2,878 MHz。参考卡之前用 founders 预设跑过 15 177 分。*
-
-</details>
-
-<details>
-<summary><b>手动安装，以及盒子里有什么</b></summary>
-
-任何 stdio MCP 客户端都可以连 `clocktail-mcp.exe`（加 `--lite`，或设 `CLOCKTAIL_TOOLS=lite`，用精简工具集）。用 `Clocktail.Broker.exe install` 装上配套的后台服务；懒得弄也行，AI 助手第一次要写显卡时会自己调用 `install_service`。默认目录是 `%LocalAppData%\Programs\Clocktail`。
-
-当然，你也可以把安装那段话贴给 AI 助手，然后去泡杯茶。机器人的活，还是交给机器人干。
-
-从源码构建（Windows，.NET 10 SDK）：
-
-```
-dotnet test tests/Clocktail.Tests/Clocktail.Tests.csproj
-dotnet build Clocktail.slnx -c Release
-```
-
-测试跑的是模拟驱动，从不碰真显卡。
-
-| 目录 | 是什么 |
-|---|---|
-| `src/Clocktail.Hw` | 唯一跟驱动打交道的代码（NVAPI、NVML），外加它碰到的每个驱动结构的校验。 |
-| `src/Clocktail.Domain` | 事务、所有权日志、恢复和你的配置。 |
-| `src/Clocktail.Broker` | 后台服务：所有写入都经它手，崩溃和驱动重置后把日常配置放回去。 |
-| `src/Clocktail.Cli` | 命令行，给喜欢亲手把东西弄坏的人。 |
-| `tools/Clocktail.Mcp` | AI 助手连的 MCP 服务器，以及[它的手册](tools/Clocktail.Mcp/README.md)。 |
-| `tools/Clocktail.Lab` | 实验室的负载引擎和游戏测试的导演。 |
-| `npm/` | `npx clocktail` 背后的安装精灵。 |
-
-</details>
-
-<details>
-<summary><b>你的卡读出来对不上的话</b></summary>
-
-让 AI 助手生成一份诊断报告（`diagnostic_report`），附在 [GitHub issue](https://github.com/swaggypatrol/Clocktail/issues) 里。里面是版本号、能力，以及驱动对每次读取是怎么回答的。生成它不会往显卡写任何东西，你不发，它哪儿也不去。
-
-帧统计用的是 Intel 的 [PresentMon](https://github.com/GameTechDev/PresentMon)，见[第三方声明](THIRD_PARTY_NOTICES.md)。
-
-非官方软件，风险自负。真出了事，调校日志会一五一十告诉你发生了什么，但不会跟你道歉。
 
 </details>

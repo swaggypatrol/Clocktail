@@ -101,6 +101,7 @@ public sealed partial class TuningTools
         return c.Ok || c.Result is { } res && res.TryGetProperty("point", out var p) && p.ValueKind == JsonValueKind.Object;
     }
 
+    /// <summary>Runs the selected workload and compares phase-window observations with an optional starting curve point.</summary>
     [McpServerTool(Name = "lab_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
         "Validate current settings by goal: core (default: burn, high-point solo and heavy/light leap), memory, uncore, all, aria or symphony. Each profile gives its key phases their own time. Advanced callers can choose custom phases instead. Verify the intended operating point actually ran; interrupted/shared or inconclusive measurements do not establish stability. It stops within 2 °C of NVIDIA's slowdown point, and at maxTempC when one is given.")]
     public string LabTest(
@@ -112,7 +113,8 @@ public sealed partial class TuningTools
         [Description("Also stop the run if the GPU reaches this temperature, °C. Omitted: it stops only within 2 °C of NVIDIA's slowdown point.")] int? maxTempC = null,
         [Description("Test goal: core (default), memory, uncore, all, aria (C01) or symphony (Aria followed by core). Omit when giving custom phases.")] string? profile = null,
         [Description("Aria only: fraction of CUDA grid, 0.01..1 (default 1).")] double? intensity = null,
-        [Description("Aria only: unsigned 64-bit hexadecimal input seed.")] string? seed = null) => Guard(() =>
+        [Description("Aria only: unsigned 64-bit hexadecimal input seed.")] string? seed = null,
+        [Description("Optional index from curve_around. Count samples matching its starting NVVDD and frequency in each phase.")] int? targetPoint = null) => Guard(() =>
     {
         var plan = LabTestPlan.Create(profile, phases, seconds);
         bool containsAria = plan.Stages.Any(s => s.Phase == "c01");
@@ -120,7 +122,7 @@ public sealed partial class TuningTools
         if (containsAria && targetW != null) throw new ArgumentException("targetW is not supported with aria");
         bool ariaOnly = containsAria && plan.Stages.Count == 1;
         return RunLabTest(plan, targetW, lightDiv, note, ariaOnly ? maxTempC ?? 85 : maxTempC,
-            containsAria ? intensity ?? 1 : null, containsAria ? seed ?? "5eed5eed5eed5eed" : null);
+            containsAria ? intensity ?? 1 : null, containsAria ? seed ?? "5eed5eed5eed5eed" : null, targetPoint);
     });
 
     [McpServerTool(Name = "c01_test", ReadOnly = false, Destructive = false, Idempotent = false, OpenWorld = false), Description(
@@ -147,8 +149,9 @@ public sealed partial class TuningTools
             throw new ArgumentException("seed must be an unsigned 64-bit hexadecimal number");
     }
 
+    /// <summary>Holds the selected GPU while the workers run and reports their checks alongside the sampled V/F evidence.</summary>
     private string RunLabTest(LabTestPlan plan, double? targetW, int lightDiv, string? note, int? maxTempC,
-        double? c01Intensity = null, string? seed = null)
+        double? c01Intensity = null, string? seed = null, int? targetPoint = null)
     {
         string exe = LabExe() ?? throw new InvalidOperationException("clocktail-lab.exe is not beside this server: run npx -y clocktail@latest setup");
         int duration = plan.Seconds;
@@ -176,10 +179,12 @@ public sealed partial class TuningTools
         JsonElement? lab = null;
         var hold = HoldCard(aria ? "c01_test" : "lab_test", olderToo: true);
         Card.Look before;
+        VfPoint? target;
         var started = DateTime.UtcNow;
         try
         {
             before = card.Read();
+            target = ResolveTargetPoint(before.Curve.Points, targetPoint);
             started = DateTime.UtcNow;
             residency.StressUntil(DateTimeOffset.Now.AddSeconds(duration + grace + (symphony ? 240 : aria ? 120 : 30)));
 
@@ -283,14 +288,11 @@ public sealed partial class TuningTools
 
         IReadOnlyList<Card.Sample> held = samples.Count > 4 ? samples.Skip(4).ToList() : samples;
         if (failed) held = WithoutFrozenTail(held);
-        static double? P50(IEnumerable<double?> xs)
-        {
-            var o = xs.Where(x => x != null).Select(x => x!.Value).Order().ToList();
-            return o.Count == 0 ? null : Math.Round(o[o.Count / 2], 1);
-        }
-        double? mv = P50(held.Select(s => s.NvvddUv / 1000.0)), mhz = P50(held.Select(s => (double?)s.Telemetry?.GraphicsClockMhz));
-        // A composite's medians span movements and preparation; they cannot name an individual curve point.
-        int? pointIndex = !symphony && mv is { } m && Nearest(before.Curve, (uint)(m * 1000)) is { } pt ? pt.Index : null;
+        double? medianUv = P50(held.Select(s => (double?)s.NvvddUv));
+        double? mv = medianUv / 1000.0, mhz = P50(held.Select(s => (double?)s.Telemetry?.GraphicsClockMhz));
+        int? pointIndex = !symphony && medianUv is { } uv && Nearest(before.Curve, (uint)uv) is { } point
+            && point.VoltageUv == uv && held.Any(s => s.Telemetry?.GraphicsClockMhz == mhz && MatchesPoint(s, point))
+            ? point.Index : null;
         double? xbarMhz = P50(held.Select(s => s.Mhz(Clocktail.Domain.Power.AllClocksLayout.Xbar)));
 
         // ST02: each memory run that passed clean is kept by its setup (SameMemorySetup), and compared with the last one like it.
@@ -302,7 +304,7 @@ public sealed partial class TuningTools
 
         bool trial = hold.Trial != null;   // in force when the run began: the trial it measured
         string summary = string.Create(CultureInfo.InvariantCulture,
-            $"Lab {plan.Profile}: {string.Join(",", list)}, {duration} s: {verdict}{(reasons.Count > 0 ? $" ({string.Join("; ", reasons)})" : "")}. P50 {mhz} MHz @ NVVDD {mv} mV (curve point {pointIndex}); max {held.Max(s => s.Telemetry?.TemperatureC)} °C")
+            $"Lab {plan.Profile}: {string.Join(",", list)}, {duration} s: {verdict}{(reasons.Count > 0 ? $" ({string.Join("; ", reasons)})" : "")}. Median clock {mhz} MHz, median NVVDD {mv} mV, max {held.Max(s => s.Telemetry?.TemperatureC)} °C")
             + (shared ? $"; other work shared the GPU ({others:0} MiB, {busy:0} %)" : "") + (note != null ? $". Purpose: {note}" : "");
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
         bool crashRecorded = failed && RecordCrash(hold, resets, $"lab {string.Join(",", list)} {duration} s: {verdict}");
@@ -319,12 +321,13 @@ public sealed partial class TuningTools
             shared = shared ? $"other programs held {others:0} MiB of video memory and kept the GPU {busy:0} % busy before the run and {busyAfter:0} % after (a local AI model, a game, a screen saver drawing): speeds are not the card's alone; bits are judged all the same" : null,
             phases = lab is { } l4 && l4.TryGetProperty("phases", out var ph) ? ph : (JsonElement?)null,
             movements = lab is { } lm && lm.TryGetProperty("movements", out var mov) ? mov : (JsonElement?)null,
-            phase_observations = PhaseObservations(lab, samples),
+            target_point = target == null ? null : new { index = target.Index, nvvdd_uv = target.VoltageUv, effective_khz = target.EffectiveKhz },
+            phase_observations = PhaseObservations(lab, samples, target),
             target_vf_qualified = (bool?)null,
             buffer_mib = lab is { } l5 && l5.TryGetProperty("buffer_mib", out var bmb) ? bmb.GetInt64() : (long?)null,
             card = new
             {
-                scope = symphony ? "whole score, including preparation; not a single curve point" : "whole run, including preparation",
+                scope = "whole-run marginal medians including preparation; paired readings are in phase_observations",
                 clock_mhz = mhz, nvvdd_mv = mv, curve_point = pointIndex,
                 msvdd_mv = P50(held.Select(s => s.MsvddUv / 1000.0)),
                 board_w = P50(held.Select(s => s.Telemetry?.PowerWatts)),
@@ -342,7 +345,7 @@ public sealed partial class TuningTools
                     ? "the soloist did not hold the point, so its pass is no evidence: close other GPU work, or lower the power the share draws (a lower point, or set_clock_lock lockMv on the point to test), and run it again"
                 : lab is { } l10 && Phase(l10, "leap") is { } lp && lp.TryGetProperty("held", out var lh) && lh.ValueKind == JsonValueKind.False
                     ? "the clock did not leap, so the leap's pass is no evidence: the whole chip did not hold the clock under the curve's top (a flat curve from the wall's voltage, or a high wall); run it at the daily wall with nothing else on the GPU"
-                : hasAria && labVerdict == "pass" ? "correctness passed; check observed voltage and frequency for each movement before using it as V/F evidence"
+                : hasAria && labVerdict == "pass" ? "correctness passed; inspect paired V/F samples for each phase"
                 : null,
         });
     }
@@ -368,9 +371,24 @@ public sealed partial class TuningTools
         return JsonSerializer.SerializeToElement(json);
     }
 
-    /// <summary>Observations within each worker-reported phase window, including its CPU checks and pauses.
-    /// These medians describe sampled values; they do not establish continuous residency at a curve point.</summary>
-    public static object[] PhaseObservations(JsonElement? report, IReadOnlyList<Card.Sample> samples)
+    /// <summary>Looks up the requested point on the selected GPU before launching a workload.</summary>
+    private static VfPoint? ResolveTargetPoint(IReadOnlyList<VfPoint> points, int? index) => index == null ? null :
+        points.FirstOrDefault(p => p.Index == index) ?? throw new ArgumentException($"targetPoint {index} is absent from the current curve");
+
+    /// <summary>Matches a single poll to the starting curve with exact rail voltage and the clock sensor's 1 MHz resolution.</summary>
+    private static bool MatchesPoint(Card.Sample sample, VfPoint point) =>
+        sample.NvvddUv == point.VoltageUv && sample.Telemetry?.GraphicsClockMhz is > 0 and var mhz &&
+        Math.Abs(mhz * 1000L - point.EffectiveKhz) < 1000;
+
+    /// <summary>Upper median of available readings, rounded to one decimal for reporting.</summary>
+    private static double? P50(IEnumerable<double?> values)
+    {
+        var ordered = values.OfType<double>().Order().ToArray();
+        return ordered.Length == 0 ? null : Math.Round(ordered[ordered.Length / 2], 1);
+    }
+
+    /// <summary>Summarizes the most frequent V/F pairs read in each worker phase, including its CPU checks and pauses.</summary>
+    public static object[] PhaseObservations(JsonElement? report, IReadOnlyList<Card.Sample> samples, VfPoint? target = null)
     {
         if (report is not { ValueKind: JsonValueKind.Object } r || !r.TryGetProperty("phases", out var phases)
             || phases.ValueKind != JsonValueKind.Array) return [];
@@ -378,18 +396,19 @@ public sealed partial class TuningTools
         foreach (var phase in phases.EnumerateArray())
         {
             if (!phase.TryGetProperty("started_utc", out var start) || start.ValueKind != JsonValueKind.String || !start.TryGetDateTimeOffset(out var from)
-                || !phase.TryGetProperty("finished_utc", out var finish) || finish.ValueKind != JsonValueKind.String || !finish.TryGetDateTimeOffset(out var to) || to < from) continue;
-            var window = samples.Where(s => s.At >= from && s.At <= to).ToArray();
-            static double? Median(IEnumerable<double?> values)
-            {
-                var ordered = values.Where(v => v.HasValue).Select(v => v!.Value).Order().ToArray();
-                return ordered.Length == 0 ? null : Math.Round(ordered[ordered.Length / 2], 1);
-            }
+                || !phase.TryGetProperty("finished_utc", out var finish) || finish.ValueKind != JsonValueKind.String || !finish.TryGetDateTimeOffset(out var to) || to <= from) continue;
+            var window = samples.Where(s => s.At >= from && s.At < to).ToArray();
+            var paired = window.Where(s => s.NvvddUv is > 0 && s.Telemetry?.GraphicsClockMhz is > 0).ToArray();
+            var common = paired.GroupBy(s => (nvvdd_uv: s.NvvddUv!.Value, clock_mhz: s.Telemetry!.GraphicsClockMhz!.Value))
+                .OrderByDescending(g => g.Count()).ThenBy(g => g.Key).Take(3)
+                .Select(g => new { g.Key.nvvdd_uv, g.Key.clock_mhz, samples = g.Count() }).ToArray();
             result.Add(new { phase = phase.TryGetProperty("kind", out var kind) ? kind.GetString() : null,
                 started_utc = from, finished_utc = to, samples = window.Length,
-                clock_mhz = Median(window.Select(s => (double?)s.Telemetry?.GraphicsClockMhz)),
-                nvvdd_mv = Median(window.Select(s => s.NvvddUv / 1000.0)),
-                scope = "sampled phase window including CPU checks and pauses; not proof of a held V/F point" });
+                clock_mhz = P50(window.Select(s => (double?)s.Telemetry?.GraphicsClockMhz)),
+                nvvdd_mv = P50(window.Select(s => s.NvvddUv / 1000.0)),
+                paired_samples = paired.Length, most_sampled_vf = common,
+                target_samples = target == null || paired.Length == 0 ? (int?)null : paired.Count(s => MatchesPoint(s, target)),
+                scope = "phase-window polls including CPU checks and pauses; counts describe sampled visits" });
         }
         return result.ToArray();
     }
