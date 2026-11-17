@@ -302,10 +302,12 @@ public sealed partial class TuningTools
                 ? KeepMemoryRun(mem, Phase(r, "latency"), r.TryGetProperty("buffer_mib", out var bm) ? bm.GetInt64() : 0, memoryOffset, xbarMhz)
                 : new { kept = false, note = "not kept or compared: only a run that passed, whole and with the GPU to itself, is a reference for later runs" };
 
+        var observations = PhaseObservations(lab, samples, target);
         bool trial = hold.Trial != null;   // in force when the run began: the trial it measured
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"Lab {plan.Profile}: {string.Join(",", list)}, {duration} s: {verdict}{(reasons.Count > 0 ? $" ({string.Join("; ", reasons)})" : "")}. Median clock {mhz} MHz, median NVVDD {mv} mV, max {held.Max(s => s.Telemetry?.TemperatureC)} °C")
             + (shared ? $"; other work shared the GPU ({others:0} MiB, {busy:0} %)" : "") + (note != null ? $". Purpose: {note}" : "");
+        if (target != null) summary += " " + TargetCoverageNote(target, observations);
         card.Broker(BrokerRequest.OpExperiment, "note", summary);
         bool crashRecorded = failed && RecordCrash(hold, resets, $"lab {string.Join(",", list)} {duration} s: {verdict}");
         return Out(new
@@ -322,7 +324,7 @@ public sealed partial class TuningTools
             phases = lab is { } l4 && l4.TryGetProperty("phases", out var ph) ? ph : (JsonElement?)null,
             movements = lab is { } lm && lm.TryGetProperty("movements", out var mov) ? mov : (JsonElement?)null,
             target_point = target == null ? null : new { index = target.Index, nvvdd_uv = target.VoltageUv, effective_khz = target.EffectiveKhz },
-            phase_observations = PhaseObservations(lab, samples, target),
+            phase_observations = observations,
             target_vf_qualified = (bool?)null,
             buffer_mib = lab is { } l5 && l5.TryGetProperty("buffer_mib", out var bmb) ? bmb.GetInt64() : (long?)null,
             card = new
@@ -387,28 +389,44 @@ public sealed partial class TuningTools
         return ordered.Length == 0 ? null : Math.Round(ordered[ordered.Length / 2], 1);
     }
 
+    /// <summary>One observed voltage and graphics clock, with its frequency in a phase's polls.</summary>
+    public sealed record SampledVf(uint nvvdd_uv, uint clock_mhz, int samples);
+
+    /// <summary>Per-phase observations in the MCP response and the persistent tuning note.</summary>
+    public sealed record PhaseObservation(string? phase, DateTimeOffset started_utc, DateTimeOffset finished_utc, int samples,
+        double? clock_mhz, double? nvvdd_mv, int paired_samples, SampledVf[] most_sampled_vf, int? target_samples)
+    {
+        public string scope => "phase-window polls including CPU checks and pauses; counts describe sampled visits";
+    }
+
+    /// <summary>Records how often the requested point was seen so later trials can be compared from the log.</summary>
+    public static string TargetCoverageNote(VfPoint target, IReadOnlyList<PhaseObservation> observations)
+    {
+        var counts = observations.Select(p => p.target_samples is { } hits
+            ? $"{p.phase} {hits}/{p.paired_samples}" : $"{p.phase} unavailable");
+        return $"Target {target.Index} ({target.VoltageUv} uV, {target.EffectiveKhz} kHz), matching/paired polls: "
+            + (observations.Count == 0 ? "no measured phases" : string.Join(", ", counts)) + ".";
+    }
+
     /// <summary>Summarizes the most frequent V/F pairs read in each worker phase, including its CPU checks and pauses.</summary>
-    public static object[] PhaseObservations(JsonElement? report, IReadOnlyList<Card.Sample> samples, VfPoint? target = null)
+    public static PhaseObservation[] PhaseObservations(JsonElement? report, IReadOnlyList<Card.Sample> samples, VfPoint? target = null)
     {
         if (report is not { ValueKind: JsonValueKind.Object } r || !r.TryGetProperty("phases", out var phases)
             || phases.ValueKind != JsonValueKind.Array) return [];
-        var result = new List<object>();
+        var result = new List<PhaseObservation>();
         foreach (var phase in phases.EnumerateArray())
         {
-            if (!phase.TryGetProperty("started_utc", out var start) || start.ValueKind != JsonValueKind.String || !start.TryGetDateTimeOffset(out var from)
+            if (phase.ValueKind != JsonValueKind.Object || !phase.TryGetProperty("started_utc", out var start) || start.ValueKind != JsonValueKind.String || !start.TryGetDateTimeOffset(out var from)
                 || !phase.TryGetProperty("finished_utc", out var finish) || finish.ValueKind != JsonValueKind.String || !finish.TryGetDateTimeOffset(out var to) || to <= from) continue;
             var window = samples.Where(s => s.At >= from && s.At < to).ToArray();
             var paired = window.Where(s => s.NvvddUv is > 0 && s.Telemetry?.GraphicsClockMhz is > 0).ToArray();
             var common = paired.GroupBy(s => (nvvdd_uv: s.NvvddUv!.Value, clock_mhz: s.Telemetry!.GraphicsClockMhz!.Value))
                 .OrderByDescending(g => g.Count()).ThenBy(g => g.Key).Take(3)
-                .Select(g => new { g.Key.nvvdd_uv, g.Key.clock_mhz, samples = g.Count() }).ToArray();
-            result.Add(new { phase = phase.TryGetProperty("kind", out var kind) ? kind.GetString() : null,
-                started_utc = from, finished_utc = to, samples = window.Length,
-                clock_mhz = P50(window.Select(s => (double?)s.Telemetry?.GraphicsClockMhz)),
-                nvvdd_mv = P50(window.Select(s => s.NvvddUv / 1000.0)),
-                paired_samples = paired.Length, most_sampled_vf = common,
-                target_samples = target == null || paired.Length == 0 ? (int?)null : paired.Count(s => MatchesPoint(s, target)),
-                scope = "phase-window polls including CPU checks and pauses; counts describe sampled visits" });
+                .Select(g => new SampledVf(g.Key.nvvdd_uv, g.Key.clock_mhz, g.Count())).ToArray();
+            result.Add(new PhaseObservation(phase.TryGetProperty("kind", out var kind) ? kind.GetString() : null,
+                from, to, window.Length, P50(window.Select(s => (double?)s.Telemetry?.GraphicsClockMhz)),
+                P50(window.Select(s => s.NvvddUv / 1000.0)), paired.Length, common,
+                target == null || paired.Length == 0 ? null : paired.Count(s => MatchesPoint(s, target))));
         }
         return result.ToArray();
     }

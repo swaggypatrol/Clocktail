@@ -10,6 +10,7 @@ public static class BwtJson
 {
     public static readonly JsonSerializerOptions Indented = Create();
 
+    /// <summary>Builds the CLI report format with snake-case fields and explicit unknown values.</summary>
     private static JsonSerializerOptions Create()
     {
         var o = new JsonSerializerOptions

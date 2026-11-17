@@ -2,8 +2,10 @@ using Clocktail.Hw;
 
 namespace Clocktail.Lab;
 
+/// <summary>Resolves a CUDA or NVML device from its physical identity before a lab run.</summary>
 internal static class GpuSelection
 {
+    /// <summary>Selects the unique device matching all supplied identifiers, or the sole visible device when none are given.</summary>
     internal static T Select<T>(IEnumerable<T> devices, string api, string? pci, Func<T, string> pciFor,
         string? uuid = null, Func<T, string>? uuidFor = null)
     {

@@ -19,6 +19,7 @@ namespace Clocktail.Mcp;
 /// </summary>
 public sealed partial class Card : IDisposable
 {
+    /// <summary>Driver handles opened and published together for the selected GPU.</summary>
     private sealed record Connection(GpuManager Manager, GpuDevice Gpu, NvClient Client, GpuSession Session);
 
     private Connection? _connection;

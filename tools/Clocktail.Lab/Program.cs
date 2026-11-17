@@ -188,5 +188,6 @@ catch (Exception e) when (e is CudaException or DllNotFoundException or EntryPoi
     return 2;
 }
 
+// Resolve the lab’s target to a CUDA ordinal for this process.
 static int Ordinal(CudaApi cu, string? pci) =>
     GpuSelection.Select(Enumerable.Range(0, cu.DeviceCount()), "CUDA", pci, i => cu.DevicePciBusId(cu.Device(i)));

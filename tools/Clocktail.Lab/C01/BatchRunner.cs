@@ -20,6 +20,7 @@ public static class BatchRunner
         return x ^ (x >> 31);
     }
 
+    /// <summary>Runs checked batches until the time or work budget is met and returns the accumulated oracle evidence.</summary>
     public static RunResult Run(IWorkload w, ulong seed, StartRequest start, CancellationToken cancel,
         Action<BatchResult>? onBatch = null)
     {

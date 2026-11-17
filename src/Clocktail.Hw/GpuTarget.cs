@@ -7,6 +7,7 @@ namespace Clocktail.Hw;
 public readonly record struct PciAddress(uint Domain, uint Bus, uint Device, uint Function)
 {
     public override string ToString() => $"{Domain:x4}:{Bus:x2}:{Device:x2}.{Function:x}";
+    /// <summary>Parses the full PCI address used to cross-check Windows, NVML and CUDA devices.</summary>
     public static PciAddress? Parse(string? text)
     {
         var p = (text ?? "").Trim().Split(':');

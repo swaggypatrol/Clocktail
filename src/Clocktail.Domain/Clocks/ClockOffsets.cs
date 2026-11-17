@@ -141,6 +141,7 @@ public sealed class ClockOffsets(NvClient hw, OwnershipJournal journal, ApplySen
         return new ClockApplyResult(domain, deltaKhz, before?.DeltaKhz, after?.DeltaKhz, before?.FreqKhz, after?.FreqKhz, r.Tx, r.Ownership, r.SentinelCleared);
     }
 
+    /// <summary>Restores and verifies the curve side effects of a failed P0 transaction before releasing its original.</summary>
     private TxResult SettleFailedControls(GpuSession gpu, TxResult tx, VfControlSnapshot original)
     {
         // An abort / NoChange did not reach a setter. Successful ordinary writes may legitimately generate

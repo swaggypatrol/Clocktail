@@ -149,6 +149,7 @@ public sealed class OwnedWriter(NvClient hw, OwnershipJournal journal, ApplySent
         return record.Items.FirstOrDefault(i => string.Equals(i.Kind, kind, StringComparison.OrdinalIgnoreCase) && string.Equals(i.Key, key, StringComparison.OrdinalIgnoreCase))?.Original;
     }
 
+    /// <summary>Applies a transaction under the ownership journal and settles its original according to the verified result.</summary>
     private OwnedWriteResult Run(GpuSession gpu, OwnedCell cell, Func<ReadOnlyMemory<byte>, Mutation> plan, string? original,
         bool retainOriginal = false, Action? beforeWrite = null, Func<TxResult, TxResult>? settle = null)
     {

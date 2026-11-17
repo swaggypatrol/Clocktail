@@ -199,6 +199,17 @@ public sealed class SymphonySafetyTests
     }
 
     [Fact]
+    public void The_persistent_target_note_distinguishes_misses_from_missing_evidence()
+    {
+        var point = new VfPoint(4, 975_000, 3_000_000, 3_000_000, 0, 975_000);
+        var phase = new TuningTools.PhaseObservation("burn", default, default, 5, 2950, 975, 5, [], 0);
+        var note = TuningTools.TargetCoverageNote(point, [phase, phase with { phase = "solo", paired_samples = 0, target_samples = null }]);
+        Assert.Contains("Target 4 (975000 uV, 3000000 kHz)", note);
+        Assert.Contains("burn 0/5, solo unavailable", note);
+        Assert.Contains("no measured phases", TuningTools.TargetCoverageNote(point, []));
+    }
+
+    [Fact]
     public void Interrupted_aria_has_no_phase_window()
     {
         var report = JsonSerializer.SerializeToElement(new { phases = new[] { new { kind = "c01", started_utc = (DateTime?)null, finished_utc = (DateTime?)null } } });

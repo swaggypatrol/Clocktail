@@ -3,8 +3,10 @@ namespace Clocktail.Domain.Vf;
 /// <summary>Effective-frequency proofs for coupled P0/V/F writes, independent of any additive control model.</summary>
 public static class VfEffectiveCurve
 {
+    /// <summary>Returns the effective clock shift in kHz relative to the base at this point.</summary>
     public static long Displacement(VfPoint p) => (long)p.EffectiveKhz - p.BaseKhz;
 
+    /// <summary>Checks that both snapshots refer to the same point mask and voltage axis before comparing clocks.</summary>
     public static void RequireSameCurve(VfCurveSnapshot before, VfCurveSnapshot after)
     {
         if (before.Layout != after.Layout || before.EditableCount != after.EditableCount || !before.Mask.AsSpan().SequenceEqual(after.Mask)
