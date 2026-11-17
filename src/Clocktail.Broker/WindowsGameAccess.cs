@@ -65,7 +65,8 @@ internal sealed class WindowsGameAccess(GpuManager manager, GpuDevice device, IG
             throw new InvalidOperationException("other work occupies the selected GPU; close it before the game test");
     }
 
-    public GameSnapshot Read()
+    /// <summary>Reads the restorable settings and, at the start of a run, the voltage-limited V/F top.</summary>
+    public GameSnapshot Read(bool measureCoverage = false)
     {
         // This is the only process that reads the game test's curve. NvClient supplies declared shapes, canaries and the loss latch.
         var curve = VfReader.Read(_hw, target.Session); // unsupported layouts are refused by the parser
@@ -89,7 +90,23 @@ internal sealed class WindowsGameAccess(GpuManager manager, GpuDevice device, IG
         cells["power/f8"] = new("power", "f8", power.Additional.Mw?.ToString(CultureInfo.InvariantCulture) ?? "absent");
         string encoded = VfOffsets.Encode(curve.Offsets());
         if (cells["vf/core"].Value != encoded) throw new InvalidDataException("the curve changed during its baseline read");
-        return new(Identity, encoded, power.CapMw ?? wall, power.Board.MinMw, (int)(curve.Points.Max(p => p.EffectiveKhz) / 1000),
-            manager.Nvml!.Memory(device.NvmlHandle).Total, cells.Values.OrderBy(GameSnapshot.Id).ToList());
+        uint? maxUv = measureCoverage ? ReadNvvddMax() : null;
+        var top = maxUv is > 0 ? Limiter.CurveTop(curve.Points, maxUv) : null;
+        return new(Identity, encoded, power.CapMw ?? wall, power.Board.MinMw, (int?)(top?.EffectiveKhz / 1000),
+            manager.Nvml!.Memory(device.NvmlHandle).Total, cells.Values.OrderBy(GameSnapshot.Id).ToList(), maxUv, top?.VoltageUv,
+            curve.Mode == VfMode.Regional ? curve.Points.Select(VfEffectiveCurve.Displacement).ToArray() : null);
+    }
+
+    /// <summary>Reads the optional coverage reference while preserving a latched handle loss.</summary>
+    private uint? ReadNvvddMax()
+    {
+        var session = target.Session;
+        try
+        {
+            uint maxUv = VfWrites.FirmwareMaxUv(_hw, session);
+            if (session.Faulted) throw new InvalidOperationException("the GPU handle was lost during the voltage limit read");
+            return maxUv;
+        }
+        catch (Exception e) when (!session.Faulted && e is (InvalidDataException or InvalidOperationException)) { return null; }
     }
 }

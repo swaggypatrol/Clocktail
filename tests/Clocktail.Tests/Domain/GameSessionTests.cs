@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Clocktail.Core.Gpu;
 using Clocktail.Domain.Broker;
 using Clocktail.Domain.Game;
@@ -26,7 +27,7 @@ public class GameSessionTests
         public DailyProfile? Daily;
         public bool Held = true, RejectIdentity, LoseWorkerAfterWrite, LieOnWrite, LieOnRestore, ChangeUnrelated, GameAlive, ResetSeen,
             LoseWorkerAfterRestore, LoseWorkerAfterMetadata;
-        public int Reads, Writes, Proofs;
+        public int Reads, CoverageReads, Writes, Proofs;
         public DateTimeOffset? RecordedTrial;
         public string? RecordedChange;
         public readonly List<BrokerRequest> Requests = [];
@@ -44,7 +45,13 @@ public class GameSessionTests
             var key = c.Key.Split('/'); return new ProfileWrite(key[0], key[1], c.Value);
         }).ToList();
         public void Verify() { Proofs++; Identity.Validate(); if (RejectIdentity) throw new NotSupportedException("identity disagreement"); }
-        public GameSnapshot Read() { Reads++; return new(Identity, Cells["vf/core"], uint.Parse(Cells["power/fe"]), 400_000, 3120, 32UL << 30, ToWrites(Cells)); }
+        public GameSnapshot Read(bool measureCoverage = false)
+        {
+            Reads++;
+            if (measureCoverage) CoverageReads++;
+            return new(Identity, Cells["vf/core"], uint.Parse(Cells["power/fe"]), 400_000, measureCoverage ? 3120 : null, 32UL << 30,
+                ToWrites(Cells), measureCoverage ? 1_020_000u : null, measureCoverage ? 1_015_000u : null);
+        }
         public GameSession Service() => new("card", Path, this, Perform, () => Session, e =>
             {
                 Session = e;
@@ -101,9 +108,34 @@ public class GameSessionTests
         Assert.True(w.Begin().Ok);
         var state = JsonSerializer.Deserialize<GameRecord>(File.ReadAllText(w.Path))!;
         Assert.Equal(475_000u, state.Baseline.PowerMw);
+        Assert.Equal(1_020_000u, state.Baseline.NvvddMaxUv);
+        Assert.Equal(1_015_000u, state.Baseline.TopUv);
         Assert.False(w.Lever("power", 500_000).Ok);
         Assert.Equal(0, w.Writes);
         Assert.True(w.Proofs > 0);
+    }
+
+    [Fact]
+    public void Recovery_still_restores_legacy_snapshots_without_voltage_reference()
+    {
+        using var w = new World();
+        Assert.True(w.Begin().Ok);
+        Assert.True(w.Lever("power", 400_000).Ok);
+
+        var json = JsonNode.Parse(File.ReadAllText(w.Path))!.AsObject();
+        foreach (string name in new[] { "Baseline", "Expected" })
+        {
+            var snapshot = json[name]!.AsObject();
+            snapshot["TopMhz"] = 3562;
+            snapshot.Remove("NvvddMaxUv");
+            snapshot.Remove("TopUv");
+        }
+        File.WriteAllText(w.Path, json.ToJsonString());
+
+        Assert.True(w.Finish().Ok);
+        Assert.Equal(1, w.CoverageReads);
+        Assert.Equal("600000", w.Cells["power/fe"]);
+        Assert.False(File.Exists(w.Path));
     }
 
     [Fact]

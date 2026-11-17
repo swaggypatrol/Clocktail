@@ -130,8 +130,16 @@ Job directory: `spec.json`, `baseline.json`, `plan.json`, `status.json`, `sweep.
 `samples.jsonl`, `events.jsonl`, and `q2home/baseq2` configs/logs. The host's recovery record/completion receipt live beside
 its per-card ownership journal. Do not delete a pending recovery record to bypass a refusal.
 
-Near-top seconds are sampled telemetry estimates, not foreground-credited play time. Transition windows are clipped to
-step boundaries. A centre-pixel sample is not image validation; another engine, finite pixel corruption or an unobserved
+When recovery returns to a daily profile with a P0 core offset and no saved V/F curve, the card host verifies the P0
+setting and every effective curve point before clearing the recovery record.
+
+Near-top coverage uses the highest effective V/F point at or below NVVDD MAX at the start of the run. The baseline records
+the clock, the point voltage and NVVDD MAX. Temperature changes, existing clock limits and the optional Boost Lock can
+affect the observed clocks. The coverage reference stays fixed through those changes. Near-top seconds sum sampled
+intervals capped at 0.5 s when the GPU is at least 30% utilized and its clock reaches the initial top minus 60 MHz. These
+seconds are separate from foreground-credited play time. If the initial voltage-limited top is unavailable, near-top time
+is null and the transition and peak-clock statistics are still reported. Transition windows are clipped to step boundaries.
+A centre-pixel sample is not image validation; another engine, finite pixel corruption or an unobserved
 external setting change can still defeat this test. Consult [the review record](game-test-review.md) for code/validation.
 
 ## Hardware runs (2026-10-28, reference RTX 5090 at `0000:01:00.0`)

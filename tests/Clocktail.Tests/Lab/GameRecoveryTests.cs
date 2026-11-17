@@ -98,9 +98,9 @@ public class GameRecoveryTests
             to - from, 100, 100, 100, 100, "demo2", null, null, null);
         var steps = new[] { Step(0, GameStep.Heavy, 0, 1), Step(1, GameStep.Light, 1, 1.25), Step(2, GameStep.Heavy, 1.25, 3) };
         GameSample Sample(double at, uint mhz) => new(start.AddSeconds(at), mhz, 14000, 500, 600, 65, 99, 0);
-        var result = GameTest.Cover(steps, [Sample(0.8, 2800), Sample(1.1, 2800), Sample(1.5, 3200)], 3200);
+        var result = GameTest.Cover(steps, [Sample(0.8, 2800), Sample(1.1, 2800), Sample(1.5, 3200)], 3200, 1_020_000);
         Assert.Equal((1, 0), (result.Transitions, result.Leapt));
-        Assert.Equal(0, GameTest.Cover([], [], 3200).SecondsNearTop);
+        Assert.Equal(0d, GameTest.Cover([], [], 3200, 1_020_000).SecondsNearTop);
     }
 
     [Fact]
