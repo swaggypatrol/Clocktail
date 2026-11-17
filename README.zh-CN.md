@@ -16,6 +16,14 @@ npx -y clocktail@latest setup
 
 默认列出 23 个工具，覆盖读卡、V/F 与显存调试、测试和恢复。需要曲线编辑器、频率锁或自动游戏测试时，用 `--full` 再运行一次 setup。手动配置的客户端可以用 `--full` 启动 `%LocalAppData%\Programs\Clocktail\clocktail-mcp.exe`，也可以设置 `CLOCKTAIL_TOOLS=full`。已有的 `--lite` 配置继续有效。
 
+若要安装某个 PR 中的代码，从该 PR 的 Windows CI 下载并解压 `clocktail-pr-windows-setup`。在解压目录打开 PowerShell，用同一个安装包完成安装和校验。
+
+```powershell
+$package = (Get-ChildItem clocktail-*.tgz).FullName
+npx --yes --package "$package" clocktail setup
+npx --yes --package "$package" clocktail verify
+```
+
 ## 测一个 V/F 点
 
 1. 用 `card_report` 核对显卡、驱动、当前设置，以及其他工具留下的偏移。用 `limiter` 查看限制因素，再用 `curve_around` 查看实际负载电压附近的曲线，从这张卡上选一个点号。

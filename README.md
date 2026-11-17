@@ -16,6 +16,14 @@ Setup shows its plan, backs up the selected clients' configurations and requests
 
 The default list contains 23 tools for inspection, V/F and memory trials, testing and recovery. For the full catalogue, including the curve editor, clock locks and game automation, run setup with `--full`. Manual stdio clients can launch `%LocalAppData%\Programs\Clocktail\clocktail-mcp.exe` with `--full`, or set `CLOCKTAIL_TOOLS=full`. Existing `--lite` setups continue to work.
 
+To install the code from a pull request, download the `clocktail-pr-windows-setup` artifact from its Windows CI run and extract it. From that directory in PowerShell, use the enclosed package for both setup and verification.
+
+```powershell
+$package = (Get-ChildItem clocktail-*.tgz).FullName
+npx --yes --package "$package" clocktail setup
+npx --yes --package "$package" clocktail verify
+```
+
 ## Measure a curve point
 
 1. Run `card_report` to identify the GPU, driver, current settings and any offsets left by other utilities. Use `limiter` and `curve_around` at the voltage reached by your workload. Choose a point index from this card's curve.
