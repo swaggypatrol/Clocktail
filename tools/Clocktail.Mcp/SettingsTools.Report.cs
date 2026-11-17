@@ -32,9 +32,10 @@ public sealed partial class SettingsTools
     private sealed record ReportRow(string Icon, string Name, string Original, string Now, string Change, string Mark, string Note);
 
     [McpServerTool(Name = "card_report", ReadOnly = true, OpenWorld = true), Description(
-        "Summarize this RTX 50 GPU's actual settings, known stock values and user-kept daily profile when present, plus live readings and a V/F chart. Show the returned table and chart, then explain uncertainty. Report marks are advisory, not hardware-safety guarantees or extra tuning vetoes. Missing capabilities are not zero; another utility's settings are not stock.")]
+        "Summarize this RTX 50 GPU's PCI address, actual settings, known stock values and user-kept daily profile when present, plus live readings and a V/F chart. Show the returned table and chart, then explain uncertainty. Report marks are advisory, not hardware-safety guarantees or extra tuning vetoes. Missing capabilities are not zero; another utility's settings are not stock.")]
     public string CardReport() => Guard(() =>
     {
+        string pciBusId = card.PciBusId;
         var updateTask = Task.Run(UpdateCheck.Latest);
         using var settingsDoc = JsonDocument.Parse(CardSettings());
         using var limiterDoc = JsonDocument.Parse(WhatLimits());
@@ -64,6 +65,7 @@ public sealed partial class SettingsTools
         return Out(new
         {
             gpu = Str(s, "gpu"),
+            pci_bus_id = pciBusId,
             verdict,
             not_stock = Arr(s, "not_set_by_clocktail").Any() ? true : (bool?)null,
             update_available = newer,

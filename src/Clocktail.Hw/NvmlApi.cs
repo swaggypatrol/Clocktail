@@ -138,14 +138,23 @@ public sealed unsafe class NvmlApi : IDisposable
         _lost = true;
     }
 
+    /// <summary>Open and initialize NVML, releasing the library if initialization fails.</summary>
     public static NvmlApi Load()
     {
         string path = Path.Combine(Environment.SystemDirectory, "nvml.dll");
         if (!NativeLibrary.TryLoad(File.Exists(path) ? path : "nvml.dll", out var lib))
             throw new DllNotFoundException("nvml.dll could not be loaded (is the NVIDIA driver installed?).");
-        var api = FromExports(name => NativeLibrary.TryGetExport(lib, name, out var p) ? p : 0);
-        api._lib = lib;
-        return api;
+        try
+        {
+            var api = FromExports(name => NativeLibrary.TryGetExport(lib, name, out var p) ? p : 0);
+            api._lib = lib;
+            return api;
+        }
+        catch
+        {
+            NativeLibrary.Free(lib);
+            throw;
+        }
     }
 
     /// <summary>Bind the entry points <paramref name="export"/> resolves (0 for one that is missing) and initialise. The

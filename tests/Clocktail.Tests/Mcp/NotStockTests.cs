@@ -80,8 +80,11 @@ public class NotStockTests
         var names = Tools.Select(t => t.Name!).ToHashSet();
         Assert.Subset(names, LiteMode.Tools.ToHashSet());
         Assert.InRange(LiteMode.Tools.Count, 15, 25);
-        foreach (var t in new[] { "card_report", "stock", "keep_as_daily", "stress_test", "begin_session" })
+        foreach (var t in new[] { "card_report", "curve_around", "data_points", "lab_test", "stock", "keep_as_daily", "stress_test", "begin_session" })
             Assert.Contains(t, LiteMode.Tools);
+        foreach (string tool in LiteMode.Tools)
+            Assert.Matches($@"\b{tool}\b", ManualTools.LiteInstructions);
+        Assert.Contains("CLOCKTAIL_GPU_PCI", ManualTools.LiteInstructions);
         foreach (Match m in Regex.Matches(ManualTools.LiteInstructions, @"\b[a-z]+_[a-z_]+\b"))
             if (names.Contains(m.Value)) Assert.Contains(m.Value, LiteMode.Tools);   // it names no tool it does not list
         Assert.Contains("NOT at stock", ManualTools.LiteInstructions);
@@ -100,11 +103,23 @@ public class NotStockTests
         Assert.DoesNotMatch(@"(?<!\\)\\u[dD][89abAB]", json.Replace(@"\\", ""));   // no escaped surrogate left
     }
 
-    [Fact]
-    public void Lite_is_an_argument_or_the_variable()
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("lite", true)]
+    [InlineData("FULL", false)]
+    [InlineData("unknown", true)]
+    public void Without_flags_the_environment_can_opt_into_full(string? mode, bool lite)
     {
-        Assert.True(LiteMode.On(["--lite"]));
-        Assert.False(LiteMode.On(["--worker"]));
+        Assert.Equal(lite, LiteMode.On([], mode));
+        Assert.Equal(lite, LiteMode.On(["--worker"], mode));
+    }
+
+    [Fact]
+    public void Explicit_mode_flags_override_the_environment()
+    {
+        Assert.False(LiteMode.On(["--full"], "lite"));
+        Assert.True(LiteMode.On(["--lite"], "full"));
+        Assert.False(LiteMode.On(["--lite", "--full"], null));
     }
 
     private static Func<CancellationToken, Task<bool?>> Form(bool? answer) => _ => Task.FromResult(answer);

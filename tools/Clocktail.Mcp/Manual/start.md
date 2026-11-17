@@ -6,6 +6,8 @@ There is no built-in tuning preset and no default daily profile. A fresh install
 Read this GPU's current settings, reported capabilities, stock values and limits before proposing changes. Do not substitute another card's clocks, voltages, power limits, fan settings or stability margins.
 Support for each control is discovered at runtime; an unavailable sensor or unrecognized driver layout is reported, not guessed. Series-wide scope is not a claim that every control has been hardware-validated on every card.
 
+If more than one supported GPU is present, set the Windows user environment variable `CLOCKTAIL_GPU_PCI` to the chosen GPU's exact PCI address so the MCP server and the broker task inherit the same value when they start. Find PCI addresses with `nvidia-smi --query-gpu=name,pci.bus_id --format=csv`. Restart the Clocktail service and MCP client after changing the address. Confirm the target's `pci_bus_id` with `card_report` before tuning.
+
 ## Baseline and daily
 "Stock" means this GPU's NVIDIA/board firmware settings, not a bundled set of numbers. Existing settings from another utility are not stock: report them and ask whether to tune from them, adopt them, or explicitly clear them.
 "Daily" means only the profile this user chose to keep for this GPU. When none exists, say so; do not recommend or manufacture a starter profile.
@@ -20,6 +22,8 @@ No extra software tuning envelope, mandatory clock/voltage pairing or model-spec
 A confirmation code is not consent: present the returned question, wait for the person's yes, then use that one-time code. Legacy `CLOCKTAIL_CONFIRM=off` does not bypass consent.
 
 ## Tools
+
+The default tool list covers the V/F tuning workflow. Launch with `--full` or `CLOCKTAIL_TOOLS=full` to have the client discover every tool below.
 Choose the goal first: `lab_test` for V/F verification (default core profile, 150 s), `tune_memory` for memory search, `tune_uncore` for XBAR/ratio/boost search, and `game_test` or the user's game for graphics confirmation. Explicit phase lists remain available for advanced diagnosis. Use `lab_status` / `lab_stop` for background jobs; a memory scan boundary (`edge_mhz`) is separate from a confirmed recommendation (`best_mhz`).
 
 | Area | Tools |

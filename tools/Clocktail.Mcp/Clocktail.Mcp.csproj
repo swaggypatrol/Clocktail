@@ -12,7 +12,7 @@
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
   </ItemGroup>
 
-  <!-- The agent's manual (ManualTools): one topic per file, instructions.md is what every agent gets on connecting. -->
+  <!-- The agent's manual (ManualTools): one topic per file, the server sends instructions for the selected tool mode. -->
   <ItemGroup>
     <EmbeddedResource Include="Manual\*.md" LogicalName="manual.%(Filename).md" />
   </ItemGroup>

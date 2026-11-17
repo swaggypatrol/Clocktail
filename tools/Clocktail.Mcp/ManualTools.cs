@@ -26,10 +26,10 @@ public sealed class ManualTools
             }, StringComparer.OrdinalIgnoreCase);
     });
 
-    /// <summary>The server instructions: Manual/instructions.md, sent to every agent when it connects.</summary>
+    /// <summary>The full tool set’s server instructions: Manual/instructions.md.</summary>
     public static string Instructions => Topics.Value.TryGetValue("instructions", out var t) ? t : "";
 
-    /// <summary>The lite tool set's (<see cref="LiteMode"/>): Manual/instructions-lite.md.</summary>
+    /// <summary>The default tool set’s server instructions: Manual/instructions-lite.md.</summary>
     public static string LiteInstructions => Topics.Value.TryGetValue("instructions-lite", out var t) ? t : Instructions;
 
     private static bool IsInstructions(string topic) => topic.StartsWith("instructions", StringComparison.OrdinalIgnoreCase);
