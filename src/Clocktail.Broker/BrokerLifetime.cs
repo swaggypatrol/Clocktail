@@ -205,41 +205,24 @@ public sealed class BrokerLifetime : IDisposable
         drained?.TrySetResult();
     }
 
-    /// <summary>
-    /// Signals shutdown, cancels <see cref="Token"/>, and waits up to <paramref name="timeout"/> for all tracked
-    /// tasks and active callbacks to complete. Returns true only when quiescent.
-    /// </summary>
+    /// <summary>Captures the work admitted before BeginShutdown closed the gate, including callbacks already in flight.</summary>
+    private Task PendingWork()
+    {
+        lock (_gate)
+        {
+            if (_disposed) return Task.CompletedTask;
+            if (_activeCallbacks == 0) return Task.WhenAll(_activeTasks);
+            _callbacksDrainedTcs ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            return Task.WhenAll(_activeTasks.Append(_callbacksDrainedTcs.Task));
+        }
+    }
+
+    /// <summary>Cancels work and asynchronously waits up to the supplied timeout for workers and callbacks to drain.</summary>
     public async Task<bool> ShutdownAsync(TimeSpan timeout)
     {
         if (timeout < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
-
-        Task[] pendingTasks;
-        Task? pendingCallbacks = null;
-        lock (_gate)
-        {
-            if (_disposed) return _activeTasks.Count == 0 && _activeCallbacks == 0;
-            _shuttingDown = true;
-            pendingTasks = [.. _activeTasks];
-            if (_activeCallbacks > 0)
-            {
-                _callbacksDrainedTcs ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                pendingCallbacks = _callbacksDrainedTcs.Task;
-            }
-        }
-
-        CancelTokenSafe();
-
-        if (pendingTasks.Length == 0 && pendingCallbacks == null)
-            return IsQuiescent;
-
-        var waitList = new List<Task>(pendingTasks.Length + 1);
-        waitList.AddRange(pendingTasks);
-        if (pendingCallbacks != null) waitList.Add(pendingCallbacks);
-
-        var all = Task.WhenAll(waitList);
-        if (timeout == TimeSpan.Zero)
-            return all.IsCompleted && IsQuiescent;
-
+        BeginShutdown();
+        var all = PendingWork();
         try
         {
             await all.WaitAsync(timeout).ConfigureAwait(false);
@@ -289,7 +272,8 @@ public sealed class BrokerLifetime : IDisposable
             }
         }
 
-        bool quiescent = ShutdownAsync(drainWait).GetAwaiter().GetResult();
+        // A blocked native worker can starve the pool that dispatches async timeouts. Bound this wait on the closing thread.
+        bool quiescent = PendingWork().Wait(drainWait) && IsQuiescent;
 
         if (flushVfHistory != null)
         {

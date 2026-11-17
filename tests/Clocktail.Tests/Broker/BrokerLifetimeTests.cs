@@ -73,8 +73,11 @@ public sealed class BrokerLifetimeTests
         Assert.True(Array.IndexOf(list, "vf-flushed") < disposeIndex);
     }
 
-    [Fact]
-    public async Task Blocked_task_timeout_retains_resource_and_completes_boundedly()
+    /// <summary>A blocked native worker keeps its resources for both a zero budget and a short shutdown wait.</summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(80)]
+    public async Task Blocked_task_timeout_retains_resource_and_completes_boundedly(int drainMs)
     {
         var logs = new ConcurrentQueue<string>();
         var lifetime = new BrokerLifetime(logs.Enqueue);
@@ -100,7 +103,7 @@ public sealed class BrokerLifetimeTests
             var sw = Stopwatch.StartNew();
             bool released = lifetime.ShutdownAndRelease(
                 TimeSpan.FromMilliseconds(50),
-                TimeSpan.FromMilliseconds(80),
+                TimeSpan.FromMilliseconds(drainMs),
                 stopWatchers: () => watchersStopped = true,
                 closeDispatcher: _ => { dispatcherClosed = true; return true; },
                 flushVfHistory: () => vfFlushed = true,
