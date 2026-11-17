@@ -1,17 +1,25 @@
+using System.Globalization;
 using System.Text.Json;
 using Clocktail.Hw;
 using Clocktail.Domain.Broker;
 using Clocktail.Domain.Platform;
 using Clocktail.Domain.Profiles;
+using Clocktail.Domain.Vf;
 
 namespace Clocktail.Domain.Game;
 
-public sealed record GameSnapshot(GpuTarget Target, string Curve, uint PowerMw, uint MinPowerMw, int TopMhz,
-    ulong? VramBytes, IReadOnlyList<ProfileWrite> Cells)
+/// <summary>The settings to restore, independent regional curve displacement, and the starting V/F ceiling.</summary>
+public sealed record GameSnapshot(GpuTarget Target, string Curve, uint PowerMw, uint MinPowerMw, int? TopMhz,
+    ulong? VramBytes, IReadOnlyList<ProfileWrite> Cells, uint? NvvddMaxUv = null, uint? TopUv = null,
+    IReadOnlyList<long>? EffectiveCoreOffsetsKhz = null)
 {
     public static string Id(ProfileWrite w) => w.Kind + "/" + w.Key;
+
+    /// <summary>Compares settings and effective displacement while allowing the observed ceiling to change.</summary>
     public bool Same(GameSnapshot other) => Target == other.Target && Curve == other.Curve && PowerMw == other.PowerMw && MinPowerMw == other.MinPowerMw
-        && Cells.OrderBy(Id).SequenceEqual(other.Cells.OrderBy(Id));
+        && Cells.OrderBy(Id).SequenceEqual(other.Cells.OrderBy(Id))
+        && (EffectiveCoreOffsetsKhz == null ? other.EffectiveCoreOffsetsKhz == null
+            : other.EffectiveCoreOffsetsKhz != null && EffectiveCoreOffsetsKhz.SequenceEqual(other.EffectiveCoreOffsetsKhz));
 }
 
 /// <summary>Implemented only inside the card host. Verification precedes every snapshot; tests supply fake transports.</summary>
@@ -20,7 +28,7 @@ public interface IGameAccess
     GpuTarget Identity { get; }
     void Verify(); // fresh PnP/NVML/NVAPI identity, context-free CUDA and Vulkan device proof
     void BeforeStart() { }
-    GameSnapshot Read();
+    GameSnapshot Read(bool measureCoverage = false);
 }
 
 public sealed record GameCommand(string? Pci = null, DateTimeOffset? SessionAt = null, DateTimeOffset? TrialAt = null,
@@ -45,7 +53,7 @@ public sealed class GameSession(string stableId, string path, IGameAccess access
     Func<BrokerRequest, BrokerResponse> perform, Func<Experiment?> session, Action<Experiment> saveSession,
     Func<DailyProfile?> daily, Func<string, string, string?> original, Func<string, bool> holdsLease, Func<DateTimeOffset, bool>? crashRecorded = null, Func<DateTimeOffset, bool>? resetPending = null, Func<int, DateTimeOffset, bool>? processAlive = null, Func<string, string, DateTimeOffset?>? crashByChange = null)
 {
-    public const int Protocol = 1;
+    public const int Protocol = 2;
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
     public static string PathBeside(string journal) => Path.Combine(Path.GetDirectoryName(journal)!, "game-recovery.json");
     private GameRecord? Load()
@@ -70,10 +78,11 @@ public sealed class GameSession(string stableId, string path, IGameAccess access
     private void Save(GameRecord state) => AtomicFile.Write(path, JsonSerializer.SerializeToUtf8Bytes(state, Json));
     private static BrokerResponse Ok(object value) => new(true, Result: JsonSerializer.SerializeToElement(value));
     private static BrokerResponse No(string why) => new(false, why, Code: BrokerCode.CannotWrite);
-    private GameSnapshot Read()
+    /// <summary>Verifies the settings twice and measures coverage only when capturing the starting baseline.</summary>
+    private GameSnapshot Read(bool measureCoverage = false)
     {
         access.Verify();
-        var first = access.Read();
+        var first = access.Read(measureCoverage);
         first.Target.Validate();
         if (!first.Same(access.Read())) throw new InvalidOperationException("settings moved during the card-host snapshot; nothing is judged");
         return first;
@@ -118,13 +127,15 @@ public sealed class GameSession(string stableId, string path, IGameAccess access
                 return No("the requested session/trial changed or ended before the lease was acquired");
             var levers = command.Levers ?? [];
             if (levers.Any(l => !GameCatalog.AllLevers.Contains(l))) return No("unknown game lever");
-            var fresh = Read();
+            var fresh = Read(measureCoverage: true);
             access.BeforeStart();
             if (e.Trial != null && e.Trial.Curve != fresh.Curve) return No("the curve on the card is not the trial's curve");
             var profile = daily();
             if (e.Trial == null && profile is { Suspended: false } && profile.Writes.Any(w =>
                 fresh.Cells.FirstOrDefault(c => GameSnapshot.Id(c) == GameSnapshot.Id(w)) is not { } actual || actual.Value != w.Value))
                 return No("the daily profile and the card disagree; reconcile the card before testing");
+            if (e.Trial == null && ImplicitCore(profile) is { } core && !MatchesImplicitCore(core, fresh))
+                return No("the daily effective Core curve could not be verified; reconcile the card before testing");
             if (levers.Contains(GameCatalog.Boost) && fresh.Cells.Any(c => c.Kind == "clocklimit" && c.Key is "min" or "voltage" && c.Value != "0"))
                 return No("an existing clock floor/point lock must not be replaced by the game test");
             var wanted = fresh.Cells.Select(c => new ProfileWrite(c.Kind, c.Key,
@@ -272,8 +283,11 @@ public sealed class GameSession(string stableId, string path, IGameAccess access
         if (!allowPendingReset && state.TrialAt is { } at && resetPending?.Invoke(at) == true && crashRecorded?.Invoke(at) != true)
             return "a target reset awaits its crash record; recovery preserved that evidence";
         var current = Read();
+        var core = ImplicitCore(daily());
         var permitted = state.Expected.Cells.Concat(state.Baseline.Cells).Concat(state.Daily).Concat(state.PendingWrites ?? []).Concat(state.Originals ?? []).ToList();
-        return state.Expected.Cells.Any(c => !current.Cells.Any(n => GameSnapshot.Id(n) == GameSnapshot.Id(c))) || current.Cells.Any(c => !permitted.Contains(c))
+        return state.Expected.Cells.Any(c => !current.Cells.Any(n => GameSnapshot.Id(n) == GameSnapshot.Id(c)))
+            || current.Cells.Any(c => !permitted.Contains(c)
+                && !(c.Kind == VfWrites.Kind && c.Key == "core" && core != null && MatchesImplicitCore(core, current)))
             ? "settings changed outside the recorded transaction; no recovery overwrite was attempted" : null;
     }
 
@@ -283,15 +297,35 @@ public sealed class GameSession(string stableId, string path, IGameAccess access
         var r = perform(new(BrokerRequest.OpProfile, stableId, Kind: "apply", Value: reason, Lease: run));
         return r.Ok ? VerifyDaily(state) : r;
     }
+    /// <summary>Verifies saved daily settings and the independently measured curve generated by an implicit Core target.</summary>
     private BrokerResponse VerifyDaily(GameRecord state, bool recorded = false)
     {
         var actual = Read();
         var profile = daily();
         var expected = (profile is { Suspended: false } ? state.Daily : state.Originals ?? state.Daily).ToDictionary(GameSnapshot.Id);
         if (profile is { Suspended: false }) foreach (var cell in profile.Writes) expected[GameSnapshot.Id(cell)] = cell;
+        if (ImplicitCore(profile) is { } core)
+        {
+            if (!MatchesImplicitCore(core, actual)) return No("daily effective Core curve did not read back; recovery record preserved");
+            expected.Remove("vf/core");
+        }
         if (expected.Values.Any(c => !actual.Cells.Contains(c))) return No("daily settings did not read back; recovery record preserved");
         return Complete(state, actual, "daily", recorded);
     }
+
+    /// <summary>Finds a daily P0 Core target whose profile leaves the V/F controls to the driver and broker.</summary>
+    private static ProfileWrite? ImplicitCore(DailyProfile? profile) => profile is { Suspended: false }
+        && !profile.Writes.Any(w => w.Kind == VfWrites.Kind)
+        ? profile.Writes.FirstOrDefault(w => w.Kind == "pstates20" && w.Key == "core") : null;
+
+    /// <summary>Requires the raw P0 target and independent proof of every editable point within one MHz.</summary>
+    private static bool MatchesImplicitCore(ProfileWrite core, GameSnapshot snapshot) =>
+        int.TryParse(core.Value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int target)
+        && snapshot.Cells.Contains(core)
+        && snapshot.EffectiveCoreOffsetsKhz is { Count: > 0 } offsets
+        && snapshot.Cells.Contains(new ProfileWrite(VfWrites.Kind, "core", snapshot.Curve))
+        && offsets.Count == VfOffsets.Decode(snapshot.Curve).Length
+        && offsets.All(value => value > (long)target - 1_000 && value < (long)target + 1_000);
 
     private bool GameGone(GameRecord state) => state.ProcessId is not int pid
         || state.ProcessStartedAt is { } began && processAlive?.Invoke(pid, began) == false;

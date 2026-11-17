@@ -33,9 +33,9 @@ const ENV = process.env;
 const XDG = ENV.XDG_CONFIG_HOME || path.join(HOME, '.config');
 const inHome = (...p) => path.join(HOME, ...p);
 
-/** The stdio entry each config dialect expects; `lite` starts the server with its small tool set (--lite, 0.4.0). */
-function entry(dialect, lite) {
-  const args = lite ? ['--lite'] : [];
+/** The stdio entry each config dialect expects. No argument uses the server's default tool set. */
+function entry(dialect, mode) {
+  const args = mode ? [mode] : [];
   switch (dialect) {
     case 'opencode': return { type: 'local', command: [SERVER, ...args], enabled: true };
     case 'opencode_v2': return { type: 'local', command: [SERVER, ...args] };   // V2 connects a server unless it says disabled
@@ -63,11 +63,11 @@ function jsonClient(id, label, file, o = {}) {
     id, label, file, note: o.note,
     present: () => fs.existsSync(o.marker || path.dirname(file)),
     connected() { const d = readJson(file); return !!(d && (dig(d, locate(d).keys) || {})[NAME]); },
-    add({ lite } = {}) {
+    add({ mode } = {}) {
       const d = readJson(file, true) || {};
       const { keys, dialect } = locate(d);
       const table = digCreate(d, keys);
-      table[NAME] = { ...entry(dialect, lite || wasLite(table[NAME])), ...keptEnv(table[NAME]) };
+      table[NAME] = { ...entry(dialect, mode || configuredMode(table[NAME])), ...keptEnv(table[NAME]) };
       writeJson(file, d);
     },
     remove() {
@@ -88,18 +88,20 @@ function tomlClient(id, label, file) {
     id, label, file,
     present: () => fs.existsSync(path.dirname(file)),
     connected: () => readText(file).includes(header),
-    add({ lite } = {}) {
+    add({ mode } = {}) {
       const text = readText(file);
       const kept = withoutTomlTable(text, `mcp_servers.${NAME}`).trimEnd();
       // The person's own variables (the CLOCKTAIL_MCP_* caps) survive an update: an env line, or the env subtable.
-      // So does --lite, chosen once.
+      // An explicit tool mode survives a setup without mode flags.
       const lines = tomlTableLines(text, `mcp_servers.${NAME}`).slice(1);
       const envLine = lines.filter(l => /^\s*env\s*=/.test(l));
       const envTable = tomlTableLines(text, `mcp_servers.${NAME}.env`);
-      lite = lite || lines.some(l => /^\s*args\s*=.*["']--lite["']/.test(l));
+      const args = lines.join('\n').replace(/#.*$/gm, '').match(/^\s*args\s*=\s*\[([^\]]*)\]/m)?.[1] || '';
+      const flags = [...args.matchAll(/(["'])(--(?:full|lite))\1/g)].map(m => m[2]);
+      mode = mode || modeFlag(flags);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       backup(file);
-      fs.writeFileSync(file, `${kept}${kept ? '\n\n' : ''}${header}\ncommand = '${SERVER}'\nargs = [${lite ? "'--lite'" : ''}]\n`
+      fs.writeFileSync(file, `${kept}${kept ? '\n\n' : ''}${header}\ncommand = '${SERVER}'\nargs = [${mode ? `'${mode}'` : ''}]\n`
         + envLine.map(l => l.trim() + '\n').join('')
         + (envTable.length ? `\n${envTable.join('\n').trimEnd()}\n` : ''));
     },
@@ -155,16 +157,18 @@ const CLIENTS = [
     id: 'claude-code', label: 'Claude Code', file: 'claude mcp (user scope)',
     present: () => !!which('claude') || fs.existsSync(claudeDir()),
     connected: () => run('claude', ['mcp', 'get', NAME], { quiet: true }).status === 0,
-    add({ lite } = {}) {
-      if (!which('claude')) throw new Error(`the claude command is not on PATH; run: claude mcp add ${NAME} -s user -- "${SERVER}"${lite ? ' --lite' : ''}`);
-      // Already pointing at the server, with --lite when it is wanted: left as it is, with any -e variables the person
-      // gave it (an update replaces the exe in place, so the entry needs no change). An entry started with --lite keeps it.
+    add({ mode } = {}) {
+      if (!which('claude')) throw new Error(`the claude command is not on PATH; run: claude mcp add ${NAME} -s user -- "${SERVER}"${mode ? ` ${mode}` : ''}`);
+      // Leave a matching entry in place, including any environment variables the person set.
       const now = run('claude', ['mcp', 'get', NAME], { quiet: true });
       const out = now.status === 0 ? now.stdout || '' : '';
-      const wasLite = /^\s*Args:.*--lite/m.test(out);
-      if (out.toLowerCase().includes(SERVER.toLowerCase()) && (wasLite || !lite)) return;
+      const args = out.match(/^\s*Args:([^\r\n]*)/m)?.[1].trim().split(/\s+/) || [];
+      const envMode = out.match(/^[ \t]+CLOCKTAIL_TOOLS=(full|lite)[ \t]*$/im)?.[1].toLowerCase();
+      const currentMode = modeFlag(args) || (envMode && `--${envMode}`);
+      if (out.toLowerCase().includes(SERVER.toLowerCase()) && (!mode || currentMode === mode)) return;
+      mode = mode || currentMode;
       run('claude', ['mcp', 'remove', NAME, '-s', 'user'], { quiet: true });
-      const r = run('claude', ['mcp', 'add', NAME, '-s', 'user', '--', SERVER, ...(lite || wasLite ? ['--lite'] : [])], { quiet: true });
+      const r = run('claude', ['mcp', 'add', NAME, '-s', 'user', '--', SERVER, ...(mode ? [mode] : [])], { quiet: true });
       if (r.status !== 0) throw new Error(`claude mcp add failed: ${(r.stderr || r.stdout || '').trim()}`);
     },
     remove: () => !!which('claude') && run('claude', ['mcp', 'remove', NAME, '-s', 'user'], { quiet: true }).status === 0,
@@ -228,6 +232,12 @@ function disallowReads() {
 
 // ---- commands ----------------------------------------------------------------------------------------------------
 
+/** Format a PowerShell command for the very installer that produced the plan, including a local npm tarball. */
+function setupApprovalCommand(ids, flags, node = process.execPath, script = __filename) {
+  const quote = text => `'${text.replace(/'/g, "''")}'`;
+  return `& ${quote(node)} ${quote(script)} setup --yes --client ${quote(ids)}${flags.map(f => ` ${f}`).join('')}`;
+}
+
 async function setup(opts) {
   say(`\nClocktail ${VERSION} setup\n`);
   if (process.platform !== 'win32') return fail('Clocktail runs on Windows only. Your card has our sympathies.');
@@ -242,7 +252,7 @@ async function setup(opts) {
     say(`    - add Clocktail to ${c.label}  (${c.file}${c.id === 'claude-code' ? '' : ', backed up first'})`);
     if (c.note) say(`      ${c.note}`);
   }
-  if (opts.lite) say('    - start Clocktail with the lite tool set (for small local models)');
+  if (opts.mode) say(`    - start Clocktail with the ${opts.mode.slice(2)} tool set`);
   // The reads are a Claude Code setting: without Claude Code in the list there is nothing to allow them in.
   const allowing = opts.allowReads && chosen.some(c => c.id === 'claude-code');
   if (allowing) say(`    - let Claude Code read the card without asking; every change still asks  (${claudeSettings()}, backed up first)`);
@@ -255,10 +265,10 @@ async function setup(opts) {
   if (opts.plan || (!opts.yes && !process.stdin.isTTY)) {
     const found = CLIENTS.filter(c => safe(() => c.present()));
     const ids = chosen.length ? chosen.map(c => c.id).join(',') : 'none';
-    const flags = [opts.noService && '--no-service', opts.lite && '--lite', opts.allowReads && '--allow-reads'].filter(Boolean);
+    const flags = [opts.noService && '--no-service', opts.mode, opts.allowReads && '--allow-reads'].filter(Boolean);
     say(`
-  Nothing has been changed. To approve this plan, run:
-    npx -y clocktail@latest setup --yes --client ${ids}${flags.map(f => ` ${f}`).join('')}
+  Nothing has been changed. To approve this plan, run in PowerShell:
+    ${setupApprovalCommand(ids, flags)}
 
   Agents found: ${found.map(c => `${c.id} (${c.label})`).join(', ') || 'none'}.
   To connect only some of them, list their ids after --client.
@@ -293,10 +303,10 @@ async function setup(opts) {
 
   // 2. The agents.
   for (const c of chosen) {
-    try { c.add({ lite: opts.lite }); say(`  connected ${c.label}  (${c.file})`); }
+    try { c.add({ mode: opts.mode }); say(`  connected ${c.label}  (${c.file})`); }
     catch (e) { say(`  could not connect ${c.label}: ${e.message}`); }
   }
-  if (chosen.length === 0) say(`  no agent connected. Point any MCP client at:\n    ${SERVER}${opts.lite ? '  (argument: --lite)' : ''}`);
+  if (chosen.length === 0) say(`  no agent connected. Point any MCP client at:\n    ${SERVER}${opts.mode ? `  (argument: ${opts.mode})` : ''}`);
   if (allowing) {
     try { say(`  ${allowReads() ? 'allowed' : 'already allowed'} Clocktail's read-only tools in Claude Code  (${claudeSettings()})`); }
     catch (e) { say(`  could not allow the reads in Claude Code: ${e.message}`); }
@@ -362,7 +372,10 @@ async function verify() {
   say(`\nClocktail ${VERSION} verify\n`);
   let all = true;
   const check = (name, ok, detail) => { all = all && ok; say(`  ${ok ? 'ok  ' : 'FAIL'}  ${name}: ${detail}`); };
-  check('files', fs.existsSync(SERVER) && fs.existsSync(BROKER), fs.existsSync(SERVER) ? INSTALL_DIR : 'not installed: run setup');
+  const different = FILES.filter(f => !sameFile(path.join(DIST, f), path.join(INSTALL_DIR, f)));
+  check('files', different.length === 0, different.length
+    ? `missing or different from package ${VERSION}: ${different.join(', ')}; run setup from this package`
+    : `${INSTALL_DIR} matches package ${VERSION}`);
   // A service just (re)started takes a few seconds to open its pipe: ask again for up to 15 s before calling it down.
   let s = { status: 1, stdout: '' }, gpus = [];
   for (const until = Date.now() + 15000; fs.existsSync(BROKER);) {
@@ -423,7 +436,9 @@ Clocktail ${VERSION}: agent-assisted overclocking for NVIDIA RTX 50, served over
   npx -y clocktail setup        install, connect your agents, install the service
       --client a,b              connect these without asking (${CLIENTS.map(c => c.id).join(', ')}, or none)
       --no-service              skip the service (your agent can install it later)
-      --lite                    a smaller tool set and short instructions, for small local models (updates keep it)
+      --full                    list all MCP tools
+      --lite                    explicitly select the compact default tool list
+                                Setup without either flag keeps an explicitly configured mode
       --allow-reads             let Claude Code run Clocktail's read-only tools without asking (every change still asks)
       --yes                     do not ask before making the changes
       --plan                    show what setup would change and change nothing (what an agent shows you first)
@@ -564,10 +579,16 @@ function tomlTableLines(text, name) {
   return out;
 }
 
-/** True when an existing entry starts the server with --lite (in args, or in OpenCode's command array): an update without
- * the flag keeps that choice. */
-function wasLite(old) {
-  return !!old && typeof old === 'object' && [old.args, old.command].some(a => Array.isArray(a) && a.includes('--lite'));
+/** Match the server's flag precedence when an entry supplies both flags. */
+function modeFlag(args) {
+  return ['--full', '--lite'].find(flag => args.includes(flag));
+}
+
+/** OpenCode embeds its flags in the command array. Other JSON clients have a separate args array. */
+function configuredMode(old) {
+  const args = Array.isArray(old?.args) ? old.args : [];
+  const commandArgs = Array.isArray(old?.command) ? old.command.slice(1) : [];
+  return modeFlag([...args, ...commandArgs]);
 }
 
 /** What of an existing entry the person set themselves and an update keeps: its environment ("environment" in
@@ -611,13 +632,13 @@ function fail(msg) { say(`\n  ${msg}\n`); process.exit(1); }
 // ---- entry --------------------------------------------------------------------------------------------------------
 
 // Loaded by the tests as a module: hand them the agents and run nothing.
-if (require.main !== module) { module.exports = { CLIENTS, SERVER, withoutTomlTable, sameFile, agentName, agentList, serversByAgent, allowReads, disallowReads }; return; }
+if (require.main !== module) { module.exports = { CLIENTS, SERVER, withoutTomlTable, sameFile, setupApprovalCommand, agentName, agentList, serversByAgent, allowReads, disallowReads }; return; }
 
 const argv = process.argv.slice(2);
 const opts = {
   client: (() => { const i = argv.indexOf('--client'); return i >= 0 ? argv[i + 1] : null; })(),
   noService: argv.includes('--no-service'),
-  lite: argv.includes('--lite'),
+  mode: modeFlag(argv),
   allowReads: argv.includes('--allow-reads'),
   purge: argv.includes('--purge'),
   yes: argv.includes('--yes') || argv.includes('-y'),

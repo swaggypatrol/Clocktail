@@ -3,7 +3,9 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using Clocktail.Domain;
 using Clocktail.Domain.Game;
+using Clocktail.Domain.Vf;
 using Clocktail.Lab;
 using Clocktail.Lab.Game;
 using Clocktail.Mcp;
@@ -835,10 +837,38 @@ public class GameTests
             uint mhz = t is >= 3 and < 5 ? 3100u : t >= 8 ? 2900u : 2850u;   // the first light step leaps, the capped one does not
             samples.Add(new GameSample(t0.AddSeconds(t), mhz, 14000, 500, 600, 65, 99, 0));
         }
-        var c = GameTest.Cover(steps, samples, 3120);
+        var c = GameTest.Cover(steps, samples, 3120, 1_020_000);
         Assert.Equal((2, 1), (c.Transitions, c.Leapt));
-        Assert.InRange(c.SecondsNearTop, 1.5, 2.25);
+        Assert.InRange(c.SecondsNearTop!.Value, 1.5, 2.25);
         Assert.Equal(3100u, c.PeakMhz);
+    }
+
+    [Fact]
+    public void Coverage_uses_the_voltage_limited_baseline_and_needs_a_readable_MAX()
+    {
+        const uint maxUv = 1_020_000;
+        var top = Limiter.CurveTop([
+            new VfPoint(91, maxUv, 3_195_000, 3_195_000, 0, maxUv),
+            new VfPoint(126, 1_240_000, 3_562_000, 3_562_000, 0, 1_240_000),
+        ], maxUv);
+        int? topMhz = (int?)(top?.EffectiveKhz / 1000);
+        var start = new DateTime(2026, 10, 30, 12, 0, 0, DateTimeKind.Utc);
+        var samples = new GameSample[]
+        {
+            new(start, 3100, null, null, null, null, 99, 0),
+            new(start.AddSeconds(1), 3172, null, null, null, null, 30, 0),
+            new(start.AddSeconds(1.5), 3172, null, null, null, null, 29, 0),
+        };
+        var coverage = GameTest.Cover([], samples, topMhz, maxUv);
+        Assert.Equal(3195, coverage.TopMhz);
+        Assert.Equal(maxUv, coverage.NvvddMaxUv);
+        Assert.Equal(0.5, coverage.SecondsNearTop);
+
+        var legacy = GameTest.Cover([], samples, 3562, null);
+        Assert.Null(legacy.TopMhz);
+        Assert.Null(legacy.SecondsNearTop);
+        Assert.Equal(3172u, legacy.PeakMhz);
+        Assert.Null(GameTest.Cover([], samples, null, maxUv).SecondsNearTop);
     }
 
     [Fact]

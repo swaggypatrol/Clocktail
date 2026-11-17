@@ -77,7 +77,7 @@ internal static class C01Command
                     Sample();
                     measurementStarted = DateTime.UtcNow;
                     result = BatchRunner.Run(workload, seed,
-                        new StartRequest(1, (long)seconds * 1000, 0, launchBudgetMs, 1, "none", 1000, true),
+                        new StartRequest(1, (long)seconds * 1000, 0, launchBudgetMs, 1, "none", true),
                         cancel.Token, onBatch: batch =>
                         {
                             Sample(measuring: true);

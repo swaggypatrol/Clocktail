@@ -188,12 +188,6 @@ catch (Exception e) when (e is CudaException or DllNotFoundException or EntryPoi
     return 2;
 }
 
-// The CUDA device at the PCI address the MCP server gave (its card); the first one when none is given.
-static int Ordinal(CudaApi cu, string? pci)
-{
-    if (pci == null) return 0;
-    var want = NvmlSampler.Pci(pci);
-    for (int i = 0; i < cu.DeviceCount(); i++)
-        if (NvmlSampler.Pci(cu.DevicePciBusId(cu.Device(i))) == want) return i;
-    throw new InvalidOperationException($"CUDA has no GPU at PCI {pci}");
-}
+// Resolve the lab’s target to a CUDA ordinal for this process.
+static int Ordinal(CudaApi cu, string? pci) =>
+    GpuSelection.Select(Enumerable.Range(0, cu.DeviceCount()), "CUDA", pci, i => cu.DevicePciBusId(cu.Device(i)));

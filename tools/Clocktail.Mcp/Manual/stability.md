@@ -9,7 +9,7 @@ Aria names the existing C01 FP32 FMA workload; `c01_test` remains compatible. Sy
 
 Burn, light and pulse are modes of the FP32 load family. Solo isolates high curve points; leap exercises heavy-to-light transitions. Memory, latency and l2 preserve their different access paths and results.
 Use targeted screening first, paired comparisons of a few candidates next, then graphics/application validation. NVIDIA nvgwls and custom light/pulse loads are optional cross-checks, not a mandatory suite for every step.
-Verify that the intended clock/voltage point actually ran. An inconclusive test is not a pass.
+Pass a point index from `curve_around` as `lab_test.targetPoint`. In each phase compare `target_samples` to `paired_samples` and inspect `most_sampled_vf`. Counts cover sampled visits, including CPU checks and pauses. An inconclusive test is not a pass.
 `watch` and `live_start` / `live_read` / `live_stop` measure the user's workload and frame times without injecting into the game. The live watch's whole-run frame rate (`fps_under_load`) covers only its windows under load; `fps_whole_capture` includes menus and loading screens.
 `game_test` is optional automation for Quake II RTX. It needs matching supported devices, an open session and the required local game installation. Its seed allows repeatable comparisons.
 ## Failure handling

@@ -370,7 +370,7 @@ public sealed class GameTest(GameSpec spec, string jobDir, string lab, Action<st
                 temp_max_c = w.Max(x => x.TempC),
             };
         });
-        var coverage = Cover(steps, samples, _baseline?.TopMhz);
+        var coverage = Cover(steps, samples, _baseline?.TopMhz, _baseline?.NvvddMaxUv);
         object card = new
         {
             clock_max_mhz = samples.Max(x => x.Mhz), board_w_max = samples.Max(x => x.BoardW), temp_max_c = samples.Max(x => x.TempC),
@@ -379,12 +379,11 @@ public sealed class GameTest(GameSpec spec, string jobDir, string lab, Action<st
         return (perPattern, coverage, card);
     }
 
-    /// <summary>The jump onto the top as it happened: heavy → light/capped/idle transitions, how many leapt (the clock in the
-    /// light step's first 1.5 s at least 90 MHz over the heavy step's last second, as the lab's leap counts it), and the seconds
-    /// observed within 60 MHz of the curve's top. This telemetry estimate is not foreground-credited play time.</summary>
-    public sealed record Coverage(int Transitions, int Leapt, int? TopMhz, double SecondsNearTop, uint? PeakMhz);
+    /// <summary>Clock jumps and sampled time near the initial voltage-limited V/F top.</summary>
+    public sealed record Coverage(int Transitions, int Leapt, int? TopMhz, double? SecondsNearTop, uint? PeakMhz, uint? NvvddMaxUv);
 
-    public static Coverage Cover(IReadOnlyList<StepResult> steps, IReadOnlyList<GameSample> samples, int? topMhz)
+    /// <summary>Uses one baseline ceiling throughout the run. Legacy baselines without NVVDD MAX cannot measure near-top time.</summary>
+    public static Coverage Cover(IReadOnlyList<StepResult> steps, IReadOnlyList<GameSample> samples, int? topMhz, uint? nvvddMaxUv)
     {
         int transitions = 0, leapt = 0;
         for (int i = 1; i < steps.Count; i++)
@@ -398,16 +397,26 @@ public sealed class GameTest(GameSpec spec, string jobDir, string lab, Action<st
             transitions++;
             if (light.Max() >= heavy[heavy.Count / 2] + 90) leapt++;
         }
-        double near = 0;
+        if (topMhz is not > 0 || nvvddMaxUv is not > 0) topMhz = null;
+        double? near = null;
         if (topMhz is int top)
+        {
+            double seconds = 0;
             for (int i = 1; i < samples.Count; i++)
                 if (samples[i].Mhz >= top - 60 && samples[i].UtilPct >= 30)
-                    near += Math.Clamp((samples[i].At - samples[i - 1].At).TotalSeconds, 0, 0.5);
-        return new Coverage(transitions, leapt, topMhz, Math.Round(near, 1), samples.Max(x => x.Mhz));
+                    seconds += Math.Clamp((samples[i].At - samples[i - 1].At).TotalSeconds, 0, 0.5);
+            near = Math.Round(seconds, 1);
+        }
+        return new Coverage(transitions, leapt, topMhz, near, samples.Max(x => x.Mhz), nvvddMaxUv);
     }
 
+    /// <summary>Names the fixed reference and reports unavailable coverage explicitly.</summary>
     private static string CoverageWords(Coverage? c) => c == null ? ""
-        : Inv($"; heavy → light jumps {c.Transitions}, {c.Leapt} leapt (90 MHz or more)") + (c.TopMhz is int t ? Inv($", {c.SecondsNearTop:0} sampled s within 60 MHz of the curve's top ({t} MHz)") : "") + (c.PeakMhz is uint p ? Inv($", peak {p} MHz") : "");
+        : Inv($"; heavy → light jumps {c.Transitions}, {c.Leapt} leapt (90 MHz or more)")
+            + (c.SecondsNearTop is { } seconds
+                ? Inv($", {seconds:0.0} sampled s near the initial V/F top ({c.TopMhz} MHz at or below NVVDD MAX {c.NvvddMaxUv / 1000.0:0.###} mV)")
+                : ", near-top coverage unavailable (no initial voltage-limited V/F top)")
+            + (c.PeakMhz is uint p ? Inv($", peak {p} MHz") : "");
 
     private void Log(string line) => log?.Invoke(line);
 

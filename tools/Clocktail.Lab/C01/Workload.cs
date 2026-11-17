@@ -28,10 +28,7 @@ public enum FaultKind
 
 public enum BatchStatus { Ok, Mismatch, DeviceLost, InfrastructureError, Unsupported, Cancelled }
 
-public sealed record WorkloadParams(ulong Seed, double Intensity, IReadOnlyDictionary<string, string> Extra)
-{
-    public static WorkloadParams Default(ulong seed) => new(seed, 1.0, new Dictionary<string, string>());
-}
+public sealed record WorkloadParams(ulong Seed, double Intensity, IReadOnlyDictionary<string, string> Extra);
 
 /// <summary>
 /// One batch request. <see cref="Epoch"/> increases by one per batch within a run and <see cref="Nonce"/> is fresh per
@@ -70,7 +67,6 @@ public sealed record BatchResult(
     long? MaxLaunchNs,
     string? Detail = null)
 {
-    public IReadOnlyDictionary<string, double>? Metrics { get; init; }
     public bool Clean => Status == BatchStatus.Ok && Mismatches == 0 && NonFinite == 0 && StaleOrMissing == 0;
 }
 
@@ -93,19 +89,6 @@ public interface IWorkload : IDisposable
     /// <summary>Submit one batch of launches (each ≤ <see cref="BatchRequest.LaunchBudgetMs"/>), wait for completion,
     /// validate, and report. A context-fatal CUDA error returns <see cref="BatchStatus.DeviceLost"/>.</summary>
     BatchResult RunBatch(BatchRequest req);
-}
-
-/// <summary>Optional run-level coverage contract. A fresh tracker is created by BatchRunner for every invocation;
-/// direct Prepare warmup batches and previous invocations cannot satisfy a formal run's requirements.</summary>
-public interface IWorkloadRunCoverage
-{
-    IWorkloadCoverage? CreateRunCoverage();
-}
-
-public interface IWorkloadCoverage
-{
-    void Observe(BatchDiagnostic batch);
-    (Outcome Outcome, string Detail) Finish();
 }
 
 public static class FaultNames

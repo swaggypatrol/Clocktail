@@ -186,19 +186,53 @@ public sealed partial class BrokerDispatcher
     private static JsonElement[] AppliedOf(BrokerResponse r) =>
         r.Result is { } res && res.TryGetProperty("applied", out var a) && a.ValueKind == JsonValueKind.Array ? [.. a.EnumerateArray()] : [];
 
-    /// <summary>Each write that landed, put back to the value it replaced, last first: a write that changed nothing is
-    /// skipped. Every put-back is an ordinary write, so the journal releases a cell that is back at its original.</summary>
-    private List<BrokerResponse> PutBackLanded(IGpuTarget target, IReadOnlyList<BrokerResponse> written)
+    /// <summary>Restore the earliest value of each landed cell. Restore P0 before the curve it can reset.</summary>
+    private List<BrokerResponse> PutBackLanded(IGpuTarget target, IReadOnlyList<BrokerResponse> written,
+        VfCurveSnapshot? curveBefore, Pstates20Snapshot? p0Before)
     {
+        var cells = new Dictionary<(string Kind, string Key), string>();
+        foreach (var item in written.Where(w => w.Ok).SelectMany(AppliedOf))
+        {
+            string? Get(string name) => item.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            if (Get("outcome") == nameof(TxOutcome.Applied) && Get("kind") is { } kind &&
+                Get("key") is { } key && Get("before") is { } before && before != Get("after"))
+                cells.TryAdd((kind, key), before);
+        }
+
         var undone = new List<BrokerResponse>();
-        foreach (var w in written.Where(x => x.Ok).Reverse())
-            foreach (var item in AppliedOf(w).Reverse())
+        bool p0Changed = cells.Keys.Any(cell => cell.Kind == ClockOffsets.Kind);
+        var curveKey = (VfWrites.Kind, VfWrites.CoreKey);
+        if (p0Changed && curveBefore != null)
+            cells[curveKey] = VfOffsets.Encode(curveBefore.Offsets());
+        var order = cells.Reverse().OrderBy(c => p0Changed && c.Key.Kind == VfWrites.Kind ? 1 : 0);
+        foreach (var (cell, before) in order)
+        {
+            if (cell.Kind == ClockOffsets.Kind && curveBefore != null && CurveAside(target, cell.Key, before, curveFollows: true) is { } aside)
             {
-                string? Get(string name) => item.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-                if (Get("outcome") != nameof(TxOutcome.Applied) || Get("kind") is not { } kind || Get("key") is not { } key || Get("before") is not { } before || before == Get("after"))
-                    continue;
-                undone.Add(Dispatch(WriteOf(target, kind, key, before)));
+                undone.Add(aside);
+                if (!aside.Ok) return undone;
             }
+            var restored = Dispatch(WriteOf(target, cell.Kind, cell.Key, before));
+            undone.Add(restored);
+            if (!restored.Ok) return undone;
+        }
+        if (p0Changed && curveBefore != null && p0Before != null)
+        {
+            try
+            {
+                var curveNow = VfReader.Read(_hw, target.Session);
+                if (!curveBefore.Offsets().SequenceEqual(curveNow.Offsets()) || VfEffectiveCurve.Mismatch(curveBefore, curveNow) != null ||
+                    Transaction.FirstDifference(p0Before.Raw, Pstates20Reader.Read(_hw, target.Session).Raw, Pstates20Layout.StatusRanges) != null)
+                    throw new InvalidOperationException("the previous P0 controls and effective curve did not return");
+            }
+            catch (Exception e) when (e is InvalidOperationException or InvalidDataException)
+            {
+                target.Sentinel.Begin("trial rollback unverified", takeOver: true, e.Message);
+                undone.Add(new BrokerResponse(false, e.Message + "; run recovery before tuning",
+                    Element(new { applied = new[] { new { kind = VfWrites.Kind, key = VfWrites.CoreKey,
+                        outcome = nameof(TxOutcome.Failed), restore = nameof(RestoreState.RestoreFailed), state_known = false } } }), BrokerCode.Failed));
+            }
+        }
         return undone;
     }
 
@@ -207,9 +241,11 @@ public sealed partial class BrokerDispatcher
     /// the memory offset, XBAR, MSVDD), so the card is the profile and stock everywhere else. Part of it (the wall alone,
     /// right after a driver reset or at a keep): only the trial-only cells, a wall and MSVDD's offsets the profile does
     /// not hold, nothing that needs an idle GPU.</summary>
-    private static IEnumerable<OwnedItem> CellsToPutBack(IGpuTarget target, DailyProfile? profile, bool whole)
+    private static IEnumerable<OwnedItem> CellsToPutBack(IGpuTarget target, DailyProfile? profile, bool whole, bool implicitCore)
     {
-        bool Written(OwnedItem i) => profile is { Suspended: false } p && p.Writes.Any(w => w.Kind == i.Kind && w.Key == i.Key);
+        // A P0-only Core daily owns its generated curve even without a vf/core entry in the file.
+        bool Written(OwnedItem i) => (implicitCore && i.Kind == VfWrites.Kind) ||
+            profile is { Suspended: false } p && p.Writes.Any(w => w.Kind == i.Kind && w.Key == i.Key);
         // Only a record this broker may act on: one from before the boot (Settle drops it) or another GPU's is not a debt.
         var plan = target.Journal.Inspect();
         if (plan.Reason is not (RecoveryReason.OwnedByThisProcess or RecoveryReason.OwnerDied)) return [];
@@ -231,8 +267,9 @@ public sealed partial class BrokerDispatcher
     /// </summary>
     private BrokerResponse? CurveAside(IGpuTarget target, string key, string value, bool curveFollows = false)
     {
+        if (_hw.Api.Resolve(Slot.ClockClientClkVfPointsGetInfo) == 0) return null;
         if (!int.TryParse(value, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var khz)) return null;
-        var domain = key == ClockOffsets.Key(ClockDomain.Memory) ? ClockDomain.Memory : ClockDomain.Core;
+        if (!Enum.TryParse<ClockDomain>(key, true, out var domain) || !Enum.IsDefined(domain)) return null;
         if (Pstates20Reader.Read(_hw, target.Session).P0(domain)?.DeltaKhz == khz) return null;   // no change: nothing is reset
         var offsets = VfReader.Read(_hw, target.Session).Offsets();
         if (offsets.All(o => o == 0)) return null;

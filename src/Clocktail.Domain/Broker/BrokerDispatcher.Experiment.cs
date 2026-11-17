@@ -103,8 +103,7 @@ public sealed partial class BrokerDispatcher
                         if (w.TryGetProperty("create", out var cr) && cr.ValueKind == JsonValueKind.True) creates.Add($"{kind}/{key}");
                         extra.Add(new ProfileWrite(kind, key, Text(w, "value") ?? throw new ArgumentException("a trial write names its value")));
                     }
-                bool keepCurve = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("keep_curve", out var kc) && kc.ValueKind == JsonValueKind.True
-                    && memoryKhz == null && !extra.Any(w => w.Kind == ClockOffsets.Kind);
+                bool keepCurve = a.ValueKind == JsonValueKind.Object && a.TryGetProperty("keep_curve", out var kc) && kc.ValueKind == JsonValueKind.True;
                 lock (_experiment)
                 {
                     var exp = Experiment.Load(path) ?? throw new InvalidOperationException("no experiment session is open; begin one first");
@@ -160,9 +159,21 @@ public sealed partial class BrokerDispatcher
                         queue.Add((DailyProfile.Rank(ClockDomainOffsets.Kind), WriteOf(target, ClockDomainOffsets.Kind, ClockDomainOffsets.Key(ClockDomainId.Xbar), Num(xk))));
                     foreach (var w in extra)
                         queue.Add((DailyProfile.Rank(w.Kind), WriteOf(target, w.Kind, w.Key, w.Value) with { AllowCreate = creates.Contains($"{w.Kind}/{w.Key}") }));
+                    // Capture the coupled controls before any trial writes so a later failure can restore both.
+                    var curveBefore = queue.Any(q => q.Request.Kind == ClockOffsets.Kind) &&
+                        _hw.Api.Resolve(Slot.ClockClientClkVfPointsGetInfo) != 0
+                        ? VfReader.Read(_hw, target.Session) : null;
+                    var p0Before = curveBefore == null ? null : Pstates20Reader.Read(_hw, target.Session);
                     foreach (var (_, request) in queue.OrderBy(q => q.Rank))
                     {
                         if (!written.All(x => x.Ok)) break;
+                        if (request.Kind == ClockOffsets.Kind && keepCurve && curveBefore != null)
+                        {
+                            var result = Dispatch(request with { P0Curve = P0CurvePolicy.KeepDisplacement });
+                            written.Add(result);
+                            if (result.Ok) curve = result.Result!.Value.GetProperty("curve").GetString()!;
+                            continue;
+                        }
                         // The trial writes its curve right after (unless it keeps the one on the card): a curve this broker does
                         // not hold (adopted, or another tool's the person tunes from) is set aside too, and comes back with it.
                         if (request.Kind == ClockOffsets.Kind && CurveAside(target, request.Key!, request.Value!, curveFollows: !keepCurve) is { } aside)
@@ -177,10 +188,21 @@ public sealed partial class BrokerDispatcher
                             EnableSlots: [nameof(Slot.ClockClientClkVfPointsSetControl)])));
                     if (written.FirstOrDefault(x => !x.Ok) is { } failed)
                     {
+                        if (UnverifiedWrite(failed) || target.Sentinel.IsBlocked(out _))
+                        {
+                            string error = $"{failed.Error ?? "a trial write did not verify"}; run recovery before further trials";
+                            Log(target, $"Trial write outcome could not be verified · {exp.Game}", [$"Change: {change}", .. context,
+                                .. written.SelectMany(Writes), "Run recovery before further trials"]);
+                            return new BrokerResponse(false, error, Element(new
+                            {
+                                success = false,
+                                applied = written.SelectMany(AppliedOf),
+                            }), failed.Code);
+                        }
                         // The items before the one that failed landed: they go back to what they were, last first (the
                         // order they went on in respects every write's constraint, so the reverse does too: a curve set
                         // aside for a memory write comes back after the memory offset), and the trial before stays in force.
-                        var undone = PutBackLanded(target, written);
+                        var undone = PutBackLanded(target, written, curveBefore, p0Before);
                         bool clean = undone.All(x => x.Ok);
                         Log(target, $"Trial did not land · {exp.Game}", [$"Change: {change}", .. context, .. written.SelectMany(Writes),
                             undone.Count == 0 ? "The previous trial (if any) is still on the card"
@@ -220,6 +242,7 @@ public sealed partial class BrokerDispatcher
                         $"Limits: {Limits(trial)}",
                         .. context,
                         replaced != null ? $"The previous trial ({replaced.Change}) ran {replaced.Minutes} min without a crash: recorded as survived" : null,
+                        keepCurve && curveBefore != null ? "Effective V/F curve verified after the P0 write" :
                         keepCurve ? "Curve unchanged (recorded only)" : null,
                         .. written.SelectMany(Writes)]);
                     return Ok(new { success = true, trial, writes = written.Select(x => x.Result) });

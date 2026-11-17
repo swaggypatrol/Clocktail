@@ -362,6 +362,7 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         "Install or update the service that performs writes, owns recovery records and reapplies only the user's existing daily profile. Obtain approval; Windows may request elevation. Installing does not create a tuning profile or write tuning defaults.")]
     public string InstallService() => Guard(() =>
     {
+        if (!OperatingSystem.IsWindows()) throw new InvalidOperationException("the Clocktail service requires Windows");
         var exe = Path.Combine(AppContext.BaseDirectory, "Clocktail.Broker.exe");
         if (!File.Exists(exe)) throw new FileNotFoundException($"the service is not beside this server ({exe}): reinstall Clocktail");
         var psi = new System.Diagnostics.ProcessStartInfo(exe, "install") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
@@ -528,11 +529,10 @@ public sealed partial class TuningTools(Card card, Residency residency, LiveWatc
         string? error = !r.Ok && notBack.Count > 0 && (r.Error is null or "failed") ? $"not everything went back: {string.Join("; ", notBack)}" : r.Error;
         // Nothing written on purpose (a daily profile kept on another VBIOS, a trial in force) says why.
         string? skipped = r.Result is { } sr ? Str(sr, "skipped") : null;
-        // A daily profile that went on without a group of it (a cell the driver refused or dropped took the cells tuned with
-        // it along): which group stays at stock and why, for the person.
+        // Report omitted daily settings with their current readback for the person.
         var notApplied = r.Result is { } nr && nr.TryGetProperty("not_applied", out var na) && na.ValueKind == JsonValueKind.Array ? na : (JsonElement?)null;
         string? next = written == WriteOutcome.Unknown ? WriteOutcome.ReadFirst
-            : notApplied != null ? "tell the person which part of the daily profile stays at stock and why (not_applied); the rest of it is on the card" : null;
+            : notApplied != null ? "tell the person which settings were omitted, why, and what the card reads now (not_applied)" : null;
         return Out(new { success = r.Ok, error, code = r.Ok ? null : r.Code, written, next, skipped, not_applied = notApplied, data_point = point, writes = lines });
     }
 

@@ -31,7 +31,7 @@ for (const d of [h('.codeium', 'windsurf'), h('.gemini', 'config'), h('.commandc
   h('.workbuddy'), h('.grok'), h('.omp', 'agent'), h('.pi', 'agent'), h('.qoder'), h('.factory'), path.join(appdata, 'devin'), path.join(appdata, 'Claude')])
   fs.mkdirSync(d, { recursive: true });
 
-const { CLIENTS, SERVER, sameFile } = require('../bin/clocktail.js');
+const { CLIENTS, SERVER, sameFile, setupApprovalCommand } = require('../bin/clocktail.js');
 const byId = id => CLIENTS.find(c => c.id === id);
 const read = f => JSON.parse(fs.readFileSync(f, 'utf8'));
 
@@ -107,6 +107,13 @@ test('an installed file with the same bytes counts as the same; a changed or mis
   assert.strictEqual(sameFile(a, h('missing.exe')), false);
 });
 
+test('a setup plan approves the same cached installer, with PowerShell quoting and the selected options', () => {
+  const node = String.raw`C:\Program Files\nodejs\node.exe`;
+  const script = String.raw`C:\Users\Pat O'Neil\npm-cache\_npx\123\node_modules\clocktail\bin\clocktail.js`;
+  const approval = setupApprovalCommand('codex,vscode', ['--no-service', '--full', '--allow-reads'], node, script);
+  assert.strictEqual(approval, String.raw`& 'C:\Program Files\nodejs\node.exe' 'C:\Users\Pat O''Neil\npm-cache\_npx\123\node_modules\clocktail\bin\clocktail.js' setup --yes --client 'codex,vscode' --no-service --full --allow-reads`);
+});
+
 test.after(() => fs.rmSync(home, { recursive: true, force: true }));
 
 test('a running server is named by the agent that started it', () => {
@@ -141,7 +148,7 @@ test('--lite reaches the server in every dialect, and an update without it keeps
   for (const [id, want] of Object.entries(json)) {
     const c = byId(id), key = id === 'vscode' ? 'servers' : 'mcpServers';
     fs.writeFileSync(c.file, JSON.stringify({ [key]: { theirs: { command: 'x' } } }));
-    c.add({ lite: true });
+    c.add({ mode: '--lite' });
     assert.deepStrictEqual(read(c.file)[key], { theirs: { command: 'x' }, clocktail: want }, id);
     c.add();
     assert.deepStrictEqual(read(c.file)[key].clocktail, want, `${id}: an update keeps --lite`);
@@ -154,17 +161,17 @@ test('--lite reaches the server in every dialect, and an update without it keeps
 
   const oc = byId('opencode');
   fs.writeFileSync(oc.file, JSON.stringify({ mcp: { servers: { theirs: { type: 'local', command: ['x'] } } } }));
-  oc.add({ lite: true });
+  oc.add({ mode: '--lite' });
   oc.add();
   assert.deepStrictEqual(read(oc.file).mcp.servers.clocktail, { type: 'local', command: [SERVER, '--lite'] });   // V2
   fs.writeFileSync(oc.file, JSON.stringify({ mcp: { rea: { type: 'local', command: ['x'], enabled: true } } }));
-  oc.add({ lite: true });
+  oc.add({ mode: '--lite' });
   oc.add();
   assert.deepStrictEqual(read(oc.file).mcp.clocktail, { type: 'local', command: [SERVER, '--lite'], enabled: true });   // V1
 
   const t = byId('codex').file;
   fs.writeFileSync(t, 'model = "o"\n');
-  byId('codex').add({ lite: true });
+  byId('codex').add({ mode: '--lite' });
   byId('codex').add();
   assert.ok(fs.readFileSync(t, 'utf8').includes(`[mcp_servers.clocktail]\ncommand = '${SERVER}'\nargs = ['--lite']\n`));
   fs.writeFileSync(t, '[mcp_servers.clocktail]\ncommand = "old"\nargs = ["--lite"]\n\n[mcp_servers.clocktail.env]\nA = "1"\n');
@@ -173,6 +180,67 @@ test('--lite reaches the server in every dialect, and an update without it keeps
   assert.ok(toml.includes("args = ['--lite']"), 'a hand-written --lite is kept');
   assert.match(toml, /\[mcp_servers\.clocktail\.env\]\nA = "1"/);
   assert.strictEqual(toml.split('--lite').length, 2, 'once');
+});
+
+test('setup can select full mode and preserves explicit full settings on update', () => {
+  const cursor = byId('cursor');
+  const env = { CLOCKTAIL_TOOLS: 'full', A: '1' };
+  put(cursor.file, JSON.stringify({ mcpServers: { clocktail: { command: 'old.exe', env } } }));
+  cursor.add();
+  assert.deepStrictEqual(read(cursor.file).mcpServers.clocktail, { command: SERVER, args: [], env });
+  cursor.add({ mode: '--full' });
+  cursor.add();
+  assert.deepStrictEqual(read(cursor.file).mcpServers.clocktail, { command: SERVER, args: ['--full'], env });
+  cursor.add({ mode: '--lite' });
+  assert.deepStrictEqual(read(cursor.file).mcpServers.clocktail, { command: SERVER, args: ['--lite'], env });
+
+  const oc = byId('opencode');
+  put(oc.file, JSON.stringify({ mcp: { servers: { clocktail: { type: 'local', command: ['old.exe', '--full'], environment: env } } } }));
+  oc.add();
+  assert.deepStrictEqual(read(oc.file).mcp.servers.clocktail, { type: 'local', command: [SERVER, '--full'], environment: env });
+
+  const codex = byId('codex');
+  put(codex.file, `[mcp_servers.clocktail]
+command = "old"
+args = [
+  "--full",
+]
+[mcp_servers.clocktail.env]
+CLOCKTAIL_TOOLS = "lite"
+`);
+  codex.add();
+  const toml = fs.readFileSync(codex.file, 'utf8');
+  assert.match(toml, /args = \['--full'\]/);
+  assert.match(toml, /CLOCKTAIL_TOOLS = "lite"/);
+});
+
+test('Claude Code uses the default and retains an explicit mode on update', () => {
+  const claude = byId('claude-code');
+  const cp = require('node:child_process');
+  const original = cp.spawnSync;
+  const calls = [];
+  let current = '';
+  cp.spawnSync = command => {
+    calls.push(command);
+    if (command === 'where claude') return { status: 0, stdout: 'claude' };
+    if (command === 'claude mcp get clocktail') return { status: current ? 0 : 1, stdout: current };
+    return { status: 0 };
+  };
+  try {
+    claude.add();
+    assert.match(calls.at(-1), /claude mcp add clocktail -s user -- .*clocktail-mcp\.exe"?$/);
+    current = `Command: ${SERVER}\nArgs: --full\nEnvironment:\n  A=1\n`;
+    calls.length = 0;
+    claude.add();
+    assert.equal(calls.length, 2, 'a matching entry stays in place');
+    claude.add({ mode: '--lite' });
+    assert.match(calls.at(-1), /clocktail-mcp\.exe"? --lite$/);
+    current = 'Command: old.exe\nArgs: \nEnvironment:\n  CLOCKTAIL_TOOLS=FULL\n';
+    claude.add();
+    assert.match(calls.at(-1), /clocktail-mcp\.exe"? --full$/);
+  } finally {
+    cp.spawnSync = original;
+  }
 });
 
 // --allow-reads: Claude Code stops asking before each read and still asks before every write.

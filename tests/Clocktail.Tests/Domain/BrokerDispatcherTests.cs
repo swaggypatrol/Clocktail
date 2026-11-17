@@ -2094,13 +2094,281 @@ public class BrokerDispatcherTests : IDisposable
         Assert.Equal(VfOffsets.Decode(daily), FakeVf.Offsets());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void P0_only_daily_restores_effective_core_even_after_memory_resets_the_points(bool shared)
+    {
+        var (broker, _, coreAt, memoryAt) = CoupledP0(shared);
+        string path = DailyProfile.PathBeside(_journal.Path);
+        new DailyProfile([new(ClockOffsets.Kind, "core", "240000"), new(ClockOffsets.Kind, "memory", "3000000")],
+            _host.Now).Save(path);
+        ApproveFixtureDaily();
+        byte[] profile = File.ReadAllBytes(path);
+
+        var applied = broker.Dispatch(new(BrokerRequest.OpProfile, Kind: "apply"));
+        Assert.True(applied.Ok, applied.Error);
+        Assert.Equal(240_000u, U(FakeDriver.State[FakeVf.PstatesWord], coreAt));
+        Assert.Equal(3_000_000u, U(FakeDriver.State[FakeVf.PstatesWord], memoryAt));
+        Assert.All(FakeVf.Offsets(), offset => Assert.Equal(shared ? 240_000 : 0, offset));
+        Assert.Contains(_journal.Inspect().Items, item => item.Kind == VfWrites.Kind && item.Original == "0*127");
+
+        // The next startup sees the same raw P0 target, but still needs to reconstruct a lost effective curve.
+        if (shared)
+            for (int i = 0; i < 127; i++) W(FakeDriver.State[FakeVf.ControlWord], VfLayout.OffsetField(i), 0);
+        var appliedAgain = broker.Dispatch(new(BrokerRequest.OpProfile, Kind: "apply"));
+        Assert.True(appliedAgain.Ok, appliedAgain.Error);
+        Assert.All(FakeVf.Offsets(), offset => Assert.Equal(shared ? 240_000 : 0, offset));
+        Assert.Equal(profile, File.ReadAllBytes(path));
+
+        Assert.True(broker.Dispatch(new(BrokerRequest.OpRecover)).Ok);
+        Assert.Equal(0u, U(FakeDriver.State[FakeVf.PstatesWord], coreAt));
+        Assert.Equal(0u, U(FakeDriver.State[FakeVf.PstatesWord], memoryAt));
+        Assert.All(FakeVf.Offsets(), offset => Assert.Equal(0, offset));
+        Assert.Empty(_journal.Inspect().Items);
+    }
+
+    [Fact]
+    public void A_refused_daily_memory_offset_puts_back_the_effective_daily_core()
+    {
+        var (broker, hw, coreAt, memoryAt) = CoupledP0(shared: true, refuseMemory: true);
+        new DailyProfile([new(ClockOffsets.Kind, "core", "240000"), new(ClockOffsets.Kind, "memory", "3000000")],
+            _host.Now).Save(DailyProfile.PathBeside(_journal.Path));
+        ApproveFixtureDaily();
+
+        var result = broker.Dispatch(new(BrokerRequest.OpProfile, Kind: "apply"));
+        Assert.False(result.Ok);
+        Assert.True(result.Result!.Value.GetProperty("partial").GetBoolean());
+        Assert.Equal("memory", Assert.Single(result.Result.Value.GetProperty("not_applied").EnumerateArray())
+            .GetProperty("group").GetString());
+        Assert.Equal(240_000u, U(FakeDriver.State[FakeVf.PstatesWord], coreAt));
+        Assert.Equal(0u, U(FakeDriver.State[FakeVf.PstatesWord], memoryAt));
+        Assert.All(VfReader.Read(hw, _gpu).Points, point => Assert.Equal(240_000, VfEffectiveCurve.Displacement(point)));
+        Assert.False(_sentinel.IsBlocked(out _));
+    }
+
+    [Fact]
+    public void A_refused_explicit_daily_curve_gives_back_core_and_keeps_memory()
+    {
+        var (broker, hw, coreAt, memoryAt) = CoupledP0(shared: true, refuseNonzeroCurve: true);
+        new DailyProfile([new(ClockOffsets.Kind, "core", "240000"), new(ClockOffsets.Kind, "memory", "3000000"),
+            new(VfWrites.Kind, VfWrites.CoreKey, "240000*127")], _host.Now)
+            .Save(DailyProfile.PathBeside(_journal.Path));
+        ApproveFixtureDaily();
+
+        var result = broker.Dispatch(new(BrokerRequest.OpProfile, Kind: "apply"));
+        Assert.False(result.Ok);
+        Assert.True(result.Result!.Value.GetProperty("partial").GetBoolean());
+        Assert.Equal("core", Assert.Single(result.Result.Value.GetProperty("not_applied").EnumerateArray())
+            .GetProperty("group").GetString());
+        Assert.Equal(0u, U(FakeDriver.State[FakeVf.PstatesWord], coreAt));
+        Assert.Equal(3_000_000u, U(FakeDriver.State[FakeVf.PstatesWord], memoryAt));
+        Assert.All(VfReader.Read(hw, _gpu).Points, point => Assert.Equal(0, VfEffectiveCurve.Displacement(point)));
+        Assert.False(_sentinel.IsBlocked(out _));
+    }
+
+    [Fact]
+    public void Partial_daily_reports_the_actual_external_original_for_a_refused_memory_offset()
+    {
+        var (broker, hw, _, memoryAt) = CoupledP0(shared: true, refuseMemory: true);
+        W(FakeDriver.State[FakeVf.PstatesWord], memoryAt, 750_000);
+        for (int i = 0; i < 127; i++) W(FakeDriver.State[FakeVf.ControlWord], VfLayout.OffsetField(i), 90_000);
+        new DailyProfile([new(ClockOffsets.Kind, "core", "240000"), new(ClockOffsets.Kind, "memory", "3000000")],
+            _host.Now).Save(DailyProfile.PathBeside(_journal.Path));
+        ApproveFixtureDaily();
+
+        var result = broker.Dispatch(new(BrokerRequest.OpProfile, Kind: "apply"));
+        Assert.False(result.Ok);
+        Assert.True(result.Result!.Value.GetProperty("partial").GetBoolean());
+        var omitted = Assert.Single(result.Result.Value.GetProperty("not_applied").EnumerateArray());
+        var readback = Assert.Single(omitted.GetProperty("readback").EnumerateArray());
+        Assert.Equal("3000000", readback.GetProperty("requested").GetString());
+        Assert.Equal("750000", readback.GetProperty("current").GetString());
+        Assert.DoesNotContain("stays at stock", result.Error);
+        Assert.All(VfReader.Read(hw, _gpu).Points, point => Assert.Equal(240_000, VfEffectiveCurve.Displacement(point)));
+        Assert.True(broker.Dispatch(new(BrokerRequest.OpRecover)).Ok);
+        Assert.Equal(750_000u, U(FakeDriver.State[FakeVf.PstatesWord], memoryAt));
+        Assert.All(VfReader.Read(hw, _gpu).Points, point => Assert.Equal(90_000, VfEffectiveCurve.Displacement(point)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Ordinary_P0_write_records_a_native_curve_change_before_the_setter(bool clockOp)
+    {
+        var (broker, _, _, _) = CoupledP0(shared: true);
+        var write = clockOp ? new BrokerRequest(BrokerRequest.OpClock, Domain: "core", Khz: 240_000)
+            : Write(ClockOffsets.Kind, "core", "240000");
+
+        Assert.True(broker.Dispatch(write).Ok);
+        Assert.All(FakeVf.Offsets(), offset => Assert.Equal(240_000, offset));
+        Assert.Contains(_journal.Inspect().Items, item => item.Kind == VfWrites.Kind && item.Original == "0*127");
+        Assert.True(broker.Dispatch(new(BrokerRequest.OpRecover)).Ok);
+        Assert.All(FakeVf.Offsets(), offset => Assert.Equal(0, offset));
+        Assert.Empty(_journal.Inspect().Items);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Ordinary_P0_readback_failure_rolls_back_its_native_curve_change(bool clockOp)
+    {
+        var (broker, _, coreAt, _) = CoupledP0(shared: true, refuseCore: true);
+        var write = clockOp ? new BrokerRequest(BrokerRequest.OpClock, Domain: "core", Khz: 240_000)
+            : Write(ClockOffsets.Kind, "core", "240000");
+
+        Assert.False(broker.Dispatch(write).Ok);
+        Assert.Equal(0u, U(FakeDriver.State[FakeVf.PstatesWord], coreAt));
+        Assert.All(FakeVf.Offsets(), offset => Assert.Equal(0, offset));
+        Assert.Empty(_journal.Inspect().Items);
+        Assert.False(_sentinel.IsBlocked(out _));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Keep_curve_trials_verify_effective_Core_shift_and_preserve_it_across_memory(bool shared)
+    {
+        var (broker, hw, _, _) = CoupledP0(shared);
+        Assert.True(broker.Dispatch(Exp("begin", """{"game":"P0 regression"}""")).Ok);
+        var core = broker.Dispatch(Exp("try", """
+            {"curve":"0*127","keep_curve":true,"change":"Core +240 MHz",
+             "writes":[{"kind":"pstates20","key":"core","value":"240000"}]}
+            """));
+        Assert.True(core.Ok, core.Error);
+        var memory = broker.Dispatch(Exp("try", """
+            {"curve":"0*127","keep_curve":true,"change":"Memory +3000 MHz","memory_khz":3000000}
+            """));
+        Assert.True(memory.Ok, memory.Error);
+        Assert.All(VfReader.Read(hw, _gpu).Points, point => Assert.Equal(240_000, VfEffectiveCurve.Displacement(point)));
+        var trial = Experiment.Load(Experiment.PathBeside(_journal.Path))!.Trial;
+        Assert.Equal(shared ? "240000*127" : "0*127", trial!.Curve);
+    }
+
+    [Fact]
+    public void Later_trial_failure_restores_the_coupled_pre_trial_P0_and_curve()
+    {
+        var (broker, hw, coreAt, _) = CoupledP0(shared: true);
+        Assert.True(broker.Dispatch(Exp("begin", """{"game":"P0 regression"}""")).Ok);
+        Assert.True(broker.Dispatch(Curve("90000*127")).Ok);
+        var result = broker.Dispatch(Exp("try", JsonSerializer.Serialize(new
+        {
+            curve = "90000*127", keep_curve = true, change = "Core shift followed by an unavailable clock domain",
+            writes = new[] {
+                new { kind = ClockOffsets.Kind, key = "core", value = "240000" },
+                new { kind = ClockDomainOffsets.Kind, key = "xbar", value = "15000" },
+            },
+        })));
+
+        Assert.False(result.Ok);
+        Assert.Equal(0u, U(FakeDriver.State[FakeVf.PstatesWord], coreAt));
+        Assert.All(VfReader.Read(hw, _gpu).Points, point => Assert.Equal(90_000, VfEffectiveCurve.Displacement(point)));
+        Assert.False(_sentinel.IsBlocked(out _));
+        Assert.Equal(VfWrites.Kind, Assert.Single(_journal.Inspect().Items).Kind);
+    }
+
+    [Fact]
+    public void Changed_topology_blocks_a_stale_mask_VF_rollback_and_requires_trial_recovery()
+    {
+        var (broker, _, _, _) = CoupledP0(shared: true, changeMask: true);
+        Assert.True(broker.Dispatch(Exp("begin", """{"game":"P0 topology regression"}""")).Ok);
+        for (int i = 0; i < 127; i++) W(FakeDriver.State[FakeVf.ControlWord], VfLayout.OffsetField(i), 90_000);
+        var result = broker.Dispatch(Exp("try", """
+            {"curve":"90000*127","keep_curve":true,"change":"Core +240 MHz",
+             "writes":[{"kind":"pstates20","key":"core","value":"240000"}]}
+            """));
+
+        Assert.False(result.Ok);
+        Assert.Contains("run recovery", result.Error);
+        Assert.False(Assert.Single(result.Result!.Value.GetProperty("applied").EnumerateArray()).GetProperty("state_known").GetBoolean());
+        // The initial curve clear and both P0 writes run. The nonzero original is never sent to the new topology.
+        Assert.Equal(3, FakeDriver.Sets);
+        Assert.Contains(_journal.Inspect().Items, item => item.Kind == VfWrites.Kind && item.Original == "90000*127");
+        Assert.True(_sentinel.IsBlocked(out _));
+        Assert.DoesNotContain("previous trial (if any) is still on the card", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+    }
+
+    [Fact]
+    public void A_P0_daily_without_VF_slots_reports_raw_only_verification()
+    {
+        var (broker, _, coreAt, _) = CoupledP0(shared: false, hasVf: false);
+        new DailyProfile([new(ClockOffsets.Kind, "core", "240000")], _host.Now)
+            .Save(DailyProfile.PathBeside(_journal.Path));
+        ApproveFixtureDaily();
+
+        var result = broker.Dispatch(new(BrokerRequest.OpProfile, Kind: "apply"));
+        Assert.True(result.Ok, result.Error);
+        Assert.Equal(240_000u, U(FakeDriver.State[FakeVf.PstatesWord], coreAt));
+        Assert.False(Assert.Single(result.Result!.Value.GetProperty("applied").EnumerateArray())
+            .GetProperty("effective_curve_verified").GetBoolean());
+    }
+
+    /// <summary>Fake P0 mirroring for Core with a Memory setter that independently clears V/F controls.</summary>
+    private (BrokerDispatcher Broker, NvClient Hw, int CoreAt, int MemoryAt) CoupledP0(
+        bool shared, bool refuseCore = false, bool refuseMemory = false, bool refuseNonzeroCurve = false,
+        bool changeMask = false, bool hasVf = true)
+    {
+        var vf = new FakeVf();
+        vf.Install();
+        var table = FakeDriver.State[FakeVf.PstatesWord];
+        int core = Pstates20Layout.Clock(0, 0), memory = Pstates20Layout.Clock(0, 1);
+        W(table, 0xc, 2);
+        W(table, memory, (uint)ClockDomain.Memory);
+        W(table, memory + 8, 1);
+        W(table, memory + 0x14, 3_000_000);
+        vf.Effective = (i, offset) => checked((uint)(vf.Base(i) + (long)offset +
+            (shared ? 0 : U(FakeDriver.State[FakeVf.PstatesWord], core + 0xc))));
+
+        if (changeMask)
+        {
+            // The control query echoes even a stale request mask, independently of the advertised Info mask.
+            var query = FakeDriver.QueryResponder!;
+            FakeDriver.QueryResponder = request =>
+            {
+                var response = query(request);
+                if (response != null && U(request, 0) == FakeVf.ControlWord)
+                    VfLayout.WriteMask(response, VfLayout.ReadMask(request));
+                return response;
+            };
+        }
+        var applyVf = FakeDriver.RequestApplier!;
+        FakeDriver.RequestApplier = (state, request) =>
+        {
+            if (U(request, 0) == FakeVf.ControlWord && refuseNonzeroCurve &&
+                Enumerable.Range(0, 127).Any(i => VfLayout.Has(request.AsSpan(VfLayout.MaskOffset, VfLayout.MaskBytes), i) && FakeVf.Off(request, i) != 0))
+                return state;
+            if (U(request, 0) != FakeVf.PstatesWord) return applyVf(state, request);
+            bool isCore = U(request, 0x1c) == (uint)ClockDomain.Core;
+            uint value = U(request, 0x28);
+            var next = (byte[])state.Clone();
+            if (!(isCore ? refuseCore : refuseMemory)) W(next, (isCore ? core : memory) + 0xc, value);
+            for (int i = 0; i < 127; i++)
+                W(FakeDriver.State[FakeVf.ControlWord], VfLayout.OffsetField(i), shared && isCore ? value : 0);
+            if (changeMask)
+            {
+                var mask = VfLayout.FirstPoints(131);
+                VfLayout.WriteMask(FakeDriver.State[FakeVf.InfoWord], mask);
+                VfLayout.WriteMask(FakeDriver.State[FakeVf.ControlWord], mask);
+            }
+            return next;
+        };
+        Slot[] gets = hasVf
+            ? [Slot.ClockClientClkVfPointsGetInfo, Slot.ClockClientClkVfPointsGetStatus, Slot.ClockClientClkVfPointsGetControl, Slot.GetPstates20]
+            : [Slot.GetPstates20];
+        var hw = new NvClient(FakeDriver.ApiFor(gets, [Slot.ClockClientClkVfPointsSetControl, Slot.SetPstates20]));
+        return (new(hw, new Target(_journal, _sentinel, _gpu), _host, canWrite: true, profileApprovals: _approvals), hw, core + 0xc, memory + 0xc);
+    }
+
     /// <summary>The core P0 offset as a trial write (set_core_offset): the held curve is set aside for it and written back,
     /// keep takes it from the card even with a profile kept, and back_to_daily puts the kept one back.</summary>
     [Fact]
     public void A_core_offset_trial_writes_the_curve_back_and_keep_takes_it_from_the_card()
     {
-        new FakeVf().Install();
+        var vf = new FakeVf();
+        vf.Install();
         int core = Clocktail.Domain.Clocks.Pstates20Layout.Clock(0, 0);
+        vf.Effective = (i, offset) => checked((uint)(vf.Base(i) + (long)offset +
+            U(FakeDriver.State[FakeVf.PstatesWord], core + 0xc)));
         var vfApplier = FakeDriver.RequestApplier!;
         FakeDriver.RequestApplier = (state, req) =>
         {
@@ -2304,9 +2572,9 @@ public class BrokerDispatcherTests : IDisposable
         Assert.True(res.GetProperty("partial").GetBoolean());
         var left = Assert.Single(res.GetProperty("not_applied").EnumerateArray());
         Assert.Equal("uncore", left.GetProperty("group").GetString());
-        Assert.StartsWith("the daily profile is on, but the uncore (rails/msvdd) stays at stock: rails/msvdd did not apply: readback differs", r.Error);
+        Assert.StartsWith("the daily profile was partly applied; the uncore (rails/msvdd) did not apply: rails/msvdd did not apply: readback differs", r.Error);
         Assert.StartsWith("partly applied, ", DriverResetResponder.ProfileSummary(r));
-        Assert.Contains("Failed: the daily profile is on, but the uncore", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
+        Assert.Contains("Failed: the daily profile was partly applied; the uncore", File.ReadAllText(TuningLog.PathBeside(_journal.Path)));
     }
 
     /// <summary>NVVDD's offsets go with the curve (a REL cut is part of it): when they do not go on, neither does the curve,

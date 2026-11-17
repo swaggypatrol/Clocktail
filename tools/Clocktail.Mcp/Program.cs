@@ -7,14 +7,16 @@ using Clocktail.Mcp;
 // worker that dies in the driver (or leaves because the driver went away) is started again and the agent keeps its
 // tools (Relay). CLOCKTAIL_MCP_DIRECT=1 runs the server in this process instead.
 bool worker = args.Contains("--worker");
-// The lite tool set (LiteMode): --lite on the relay reaches the worker through its environment.
-bool lite = LiteMode.On(args);
-if (lite) Environment.SetEnvironmentVariable(LiteMode.Variable, "lite");
+bool lite = LiteMode.On(args, Environment.GetEnvironmentVariable(LiteMode.Variable));
 if (!worker && OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("CLOCKTAIL_MCP_DIRECT") != "1" && Environment.ProcessPath is { } self)
+{
+    // Every worker inherits the resolved mode, including replacements after a driver restart.
+    Environment.SetEnvironmentVariable(LiteMode.Variable, lite ? "lite" : "full");
     return Relay.Run(self);
+}
 
 // stdio is the protocol: every log line goes to stderr, never to stdout.
-var builder = Host.CreateApplicationBuilder(args);
+var builder = Host.CreateApplicationBuilder(args.Where(a => a is not ("--worker" or "--lite" or "--full")).ToArray());
 builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
 builder.Services.AddSingleton<Card>();
 builder.Services.AddSingleton<Residency>();

@@ -44,20 +44,29 @@ public sealed unsafe class NvApi : INvApi, IDisposable
     /// written from two threads at once can lose entries or corrupt itself (0.3.7).</summary>
     private readonly Dictionary<uint, nint> _cache = new();
 
+    /// <summary>Open and initialize NVAPI, releasing the library if initialization fails.</summary>
     public static NvApi Load()
     {
         var api = new NvApi();
         api._lib = LoadLibraryExW("nvapi64.dll", 0, LoadLibrarySearchSystem32);
         if (api._lib == 0) throw new DllNotFoundException("Could not load the system nvapi64.dll.");
-        nint q = GetProcAddress(api._lib, "nvapi_QueryInterface");
-        if (q == 0) throw new EntryPointNotFoundException("nvapi_QueryInterface is missing from nvapi64.dll.");
-        api._query = (delegate* unmanaged[Cdecl]<uint, nint>)q;
+        try
+        {
+            nint q = GetProcAddress(api._lib, "nvapi_QueryInterface");
+            if (q == 0) throw new EntryPointNotFoundException("nvapi_QueryInterface is missing from nvapi64.dll.");
+            api._query = (delegate* unmanaged[Cdecl]<uint, nint>)q;
 
-        nint init = api.Query(NvApiIds.Initialize);
-        if (init == 0) throw new EntryPointNotFoundException("NvAPI_Initialize interface is unavailable.");
-        int rc = ((delegate* unmanaged[Cdecl]<int>)init)();
-        if (rc != 0) throw new NvApiException("NvAPI_Initialize", rc);
-        return api;
+            nint init = api.Query(NvApiIds.Initialize);
+            if (init == 0) throw new EntryPointNotFoundException("NvAPI_Initialize interface is unavailable.");
+            int rc = ((delegate* unmanaged[Cdecl]<int>)init)();
+            if (rc != 0) throw new NvApiException("NvAPI_Initialize", rc);
+            return api;
+        }
+        catch
+        {
+            api.Dispose();
+            throw;
+        }
     }
 
     /// <summary>NVAPI bound to a stand-in nvapi_QueryInterface, so the interface cache is tested without a driver.</summary>

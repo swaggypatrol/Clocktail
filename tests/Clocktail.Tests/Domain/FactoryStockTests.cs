@@ -254,10 +254,10 @@ public class FactoryStockTests : IDisposable
         OtherTool(d, Undervolt, 0);
         Assert.True(d.Dispatch(Profile("adopt")).Ok);
         Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "begin", Value: """{"game":"drill"}""")).Ok);
-        // A memory trial: the curve goes aside and comes back, so the journal ends up holding nothing of it.
+        // The curve comes back now, but restoring the held memory offset can wipe it again.
         Assert.True(d.Dispatch(new BrokerRequest(BrokerRequest.OpExperiment, Kind: "try",
             Value: JsonSerializer.Serialize(new { curve = Undervolt, change = "memory +200", memory_khz = 200_000, at_uv = 950_000u, at_mhz = 2880u }))).Ok);
-        Assert.DoesNotContain(_journal.Inspect().Items, i => i.Kind == VfWrites.Kind);
+        Assert.Contains(_journal.Inspect().Items, i => i.Kind == VfWrites.Kind && i.Original == Undervolt);
         Assert.True(d.Dispatch(Profile("keep")).Ok);
         Assert.Contains(Daily().Writes, w => w.Kind == VfWrites.Kind && w.Value == Undervolt);   // on the card still, so still kept
     }
