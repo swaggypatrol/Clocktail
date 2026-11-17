@@ -29,11 +29,25 @@ jobs:
         with:
           node-version: 22
       - name: .NET tests
+        if: runner.os != 'Windows' || github.event_name != 'pull_request'
         run: dotnet test tests/Clocktail.Tests -c Release -nologo
       - name: Installer tests
+        if: runner.os != 'Windows' || github.event_name != 'pull_request'
         # Quoted: node expands the pattern itself (Node 21 on), the same under PowerShell and bash; a directory
         # argument is not searched for tests on every Node version.
         run: node --test "npm/test/*.test.js"
+      - name: Test and package Windows PR setup
+        id: pr-setup
+        if: runner.os == 'Windows' && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          base="$(node -p "require('./npm/package.json').version.split('-')[0].split('+')[0]")"
+          commit="$(git rev-parse --short=12 HEAD)"
+          version="$base-pr.$PR_NUMBER.g$commit"
+          bash build/release.sh "$version"
+          echo "package=out/clocktail-$version.tgz" >> "$GITHUB_OUTPUT"
       - name: Windows editor smoke checks and previews (synthetic data, no GPU)
         if: runner.os == 'Windows' && !cancelled()
         timeout-minutes: 3
@@ -45,3 +59,10 @@ jobs:
           name: curve-editor-preview
           path: out/ui-preview/*.png
           if-no-files-found: warn
+      - name: Windows PR setup bundle
+        if: runner.os == 'Windows' && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: clocktail-pr-windows-setup
+          path: ${{ steps.pr-setup.outputs.package }}
+          if-no-files-found: error
