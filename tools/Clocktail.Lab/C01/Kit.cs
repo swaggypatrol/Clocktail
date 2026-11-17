@@ -11,7 +11,7 @@ internal static class Hash
 {
     public static uint Mix64To32(ulong z) => (uint)BatchRunner.SplitMix64(z);
 
-    /// <summary>Completion tag of block <paramref name="block"/>; salt separates launches of one batch. Salt 0 is C03's tag.
+    /// <summary>Completion tag of block <paramref name="block"/>; salt separates launches of one batch.
     /// Always odd, so it never equals a zero sentinel.</summary>
     public static uint Tag(uint epoch, ulong nonce, uint block, uint salt)
         => Mix64To32(nonce ^ ((ulong)epoch << 32) ^ (ulong)block * 0x632BE59BD9B4E019UL ^ (ulong)salt * 0xD1B54A32D192ED03UL) | 1u;
@@ -261,9 +261,6 @@ internal static class Evidence
 
     public static long ParamL(WorkloadParams p, string key, long dflt)
         => p.Extra.TryGetValue(key, out var s) ? long.Parse(s, CultureInfo.InvariantCulture) : dflt;
-
-    public static string ParamS(WorkloadParams p, string key, string dflt)
-        => p.Extra.TryGetValue(key, out var s) ? s : dflt;
 
     /// <summary>A BatchResult for a batch that launched nothing yet still read back/checked (fault paths fill in counts).</summary>
     public static BatchResult Result(BatchRequest req, long launches, long work, Tally t, long total, CheckScope scope,

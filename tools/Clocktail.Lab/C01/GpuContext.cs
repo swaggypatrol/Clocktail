@@ -1,6 +1,6 @@
 using System.Reflection;
 using System.Security.Cryptography;
-using Bwt.Contracts;
+using Clocktail.Lab;
 
 namespace Bwt.Gpu;
 
@@ -58,22 +58,19 @@ public sealed class GpuContext : IDisposable
     public static GpuContext Open(string? uuid = null, string? pciBusId = null)
     {
         var cuda = CudaApi.Load();
-        int count = cuda.DeviceCount();
-        if (count == 0) throw new InvalidOperationException("no CUDA device");
-        int? chosen = null;
-        for (int i = 0; i < count; i++)
+        int chosen;
+        try
         {
-            int d = cuda.Device(i);
-            bool match = (uuid == null || string.Equals(cuda.DeviceUuid(d), uuid, StringComparison.OrdinalIgnoreCase))
-                && (pciBusId == null || PciEquals(cuda.DevicePciBusId(d), pciBusId));
-            if (!match) continue;
-            if (chosen != null) throw new InvalidOperationException("more than one CUDA device matches: name the target by uuid or PCI bus id");
-            chosen = i;
+            chosen = GpuSelection.Select(Enumerable.Range(0, cuda.DeviceCount()), "CUDA", pciBusId,
+                i => cuda.DevicePciBusId(cuda.Device(i)), uuid, i => cuda.DeviceUuid(cuda.Device(i)));
         }
-        if (chosen == null) throw new InvalidOperationException($"no CUDA device matches uuid={uuid} pci={pciBusId}");
-        if (uuid == null && pciBusId == null && count > 1) throw new InvalidOperationException("several CUDA devices: name the target by uuid or PCI bus id");
+        catch
+        {
+            cuda.Dispose();
+            throw;
+        }
 
-        int dev = cuda.Device(chosen.Value);
+        int dev = cuda.Device(chosen);
         nint ctx = cuda.PrimaryCtxRetain(dev);
         cuda.CtxSetCurrent(ctx);
         nint stream = cuda.StreamCreate();
@@ -82,7 +79,7 @@ public sealed class GpuContext : IDisposable
             Uuid: cuda.DeviceUuid(dev),
             PciBusId: cuda.DevicePciBusId(dev),
             Luid: cuda.DeviceLuid(dev),
-            Ordinal: chosen.Value,
+            Ordinal: chosen,
             CcMajor: cuda.Attribute(dev, CudaApi.AttrCcMajor),
             CcMinor: cuda.Attribute(dev, CudaApi.AttrCcMinor),
             SmCount: cuda.Attribute(dev, CudaApi.AttrSmCount),
@@ -102,15 +99,6 @@ public sealed class GpuContext : IDisposable
             CudaDriverApiVersion: cuda.DriverVersion());
         return new GpuContext(cuda, dev, ctx, stream, info);
     }
-
-    private static bool PciEquals(string a, string b)
-    {
-        static string N(string s) { s = s.Trim().ToLowerInvariant(); int c = s.IndexOf(':'); return c >= 0 && s[..c].TrimStart('0').Length == 0 ? s[(c + 1)..] : s; }
-        return N(a).EndsWith(N(b), StringComparison.Ordinal) || N(b).EndsWith(N(a), StringComparison.Ordinal);
-    }
-
-    public GpuIdentity Identity(string? vbios = null, string? driver = null, int? nvmlIndex = null)
-        => new(Info.Name, Info.Uuid, Info.PciBusId, Info.Luid, vbios, driver, Info.Ordinal, nvmlIndex, Info.CcMajor, Info.CcMinor);
 
     /// <summary>
     /// Loads kernel image <paramref name="baseName"/> embedded in <paramref name="assembly"/>: "{baseName}.cubin"

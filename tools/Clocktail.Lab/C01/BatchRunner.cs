@@ -20,16 +20,14 @@ public static class BatchRunner
         return x ^ (x >> 31);
     }
 
-    public static RunResult Run(IWorkload w, ulong seed, StartRequest start, CancellationToken cancel, Action<WorkerProgress>? progress = null,
-        Action<BatchResult>? onBatch = null, Action<BatchDiagnostic>? onDiagnostic = null)
+    public static RunResult Run(IWorkload w, ulong seed, StartRequest start, CancellationToken cancel,
+        Action<BatchResult>? onBatch = null)
     {
         var fault = FaultNames.Parse(start.Fault);
-        var coverage = (w as IWorkloadRunCoverage)?.CreateRunCoverage();
         long t0 = Mono.NowNs();
         long deadline = start.DurationMs > 0 ? t0 + start.DurationMs * 1_000_000 : long.MaxValue;
         long maxBatches = start.MaxBatches > 0 ? start.MaxBatches : long.MaxValue;
         if (fault != FaultKind.None && maxBatches < 2) maxBatches = 2;
-        long lastProgress = t0;
 
         long batches = 0, launches = 0, work = 0, checkedEl = 0, totalEl = 0, mism = 0, nonFinite = 0, stale = 0, completedEpochs = 0;
         double? maxAbs = null, maxRel = null;
@@ -61,13 +59,6 @@ public static class BatchRunner
                 worst = Max(worst, BatchStatus.InfrastructureError); detail = e.Message; break;
             }
             batches++;
-            var diagnostic = new BatchDiagnostic(w.Info.Id, i, start.TrialGeneration, epoch, r.Epoch,
-                $"0x{seed:x16}", $"0x{NonceFor(seed, start.TrialGeneration, epoch):x16}", FaultNames.Of(f),
-                r.Status.ToString(), r.Launches, r.WorkUnits, r.CheckedElements, r.TotalElements, r.Scope,
-                r.Mismatches, r.NonFinite, r.StaleOrMissing, r.MaxAbsErr, r.MaxRelErr, r.Detail, r.FirstFailure,
-                r.HostSubmitQpc, r.HostCompleteQpc, r.GpuElapsedNs, r.MaxLaunchNs, r.Metrics);
-            coverage?.Observe(diagnostic);
-            onDiagnostic?.Invoke(diagnostic);
             onBatch?.Invoke(r);
             launches += r.Launches; work += r.WorkUnits; checkedEl += r.CheckedElements; totalEl += r.TotalElements;
             mism += r.Mismatches; nonFinite += r.NonFinite; stale += r.StaleOrMissing;
@@ -83,13 +74,6 @@ public static class BatchRunner
             var s = r.Clean ? BatchStatus.Ok : r.Status == BatchStatus.Ok ? BatchStatus.Mismatch : r.Status;
             worst = Max(worst, s);
             if (r.Detail != null) detail ??= r.Detail;
-            long now = Mono.NowNs();
-            if (progress != null && (now - lastProgress) >= start.ProgressIntervalMs * 1_000_000L)
-            {
-                lastProgress = now;
-                progress(new WorkerProgress(now, w.Info.Id, i + 1, completedEpochs, launches, work, checkedEl, mism + nonFinite + stale,
-                    Mono.TicksToNs(r.HostSubmitQpc), Mono.TicksToNs(r.HostCompleteQpc)));
-            }
             if (s is BatchStatus.DeviceLost or BatchStatus.Unsupported or BatchStatus.InfrastructureError) break;
             if (s == BatchStatus.Mismatch && start.StopOnFirstMismatch) break;
         }
@@ -128,12 +112,6 @@ public static class BatchRunner
             BatchStatus.Cancelled => Outcome.Cancelled,
             _ => launches > 0 && checkedEl > 0 && work > 0 ? Outcome.Pass : Outcome.Inconclusive,
         };
-        if (coverage != null)
-        {
-            var check = coverage.Finish();
-            if (outcome == Outcome.Pass) outcome = check.Outcome;
-            detail = (detail == null ? "" : detail + " | ") + check.Detail;
-        }
         return new RunResult(w.Info.Id, outcome, exec, val, batches, fault == FaultKind.None ? null : FaultNames.Of(fault), detail, artifacts);
     }
 

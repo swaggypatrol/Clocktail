@@ -1,4 +1,3 @@
-using System.Globalization;
 using Clocktail.Hw;
 
 namespace Clocktail.Lab;
@@ -25,23 +24,16 @@ public sealed class NvmlSampler : ISampler, ITemperatureSensor
     public NvmlSampler(string cudaPciBusId)
     {
         _nvml = NvmlApi.Load();
-        var want = Clocktail.Hw.PciAddress.Parse(cudaPciBusId) ?? throw new NotSupportedException("invalid target PCI address");
-        for (uint i = 0; i < _nvml.DeviceCount(); i++)
+        try
         {
-            var h = _nvml.HandleByIndex(i);
-            if (Clocktail.Hw.PciAddress.Parse(_nvml.Pci(h).BusId) == want) { _h = h; return; }
+            var handles = Enumerable.Range(0, checked((int)_nvml.DeviceCount())).Select(i => _nvml.HandleByIndex((uint)i));
+            _h = GpuSelection.Select(handles, "NVML", cudaPciBusId, h => _nvml.Pci(h).BusId);
         }
-        _nvml.Dispose();
-        throw new InvalidOperationException($"NVML has no GPU at PCI {cudaPciBusId}");
-    }
-
-    /// <summary>(domain, bus, device) from "dddd:bb:dd.f" or "dddddddd:bb:dd.f"; null when it does not parse.</summary>
-    public static (uint, uint, uint)? Pci(string busId)
-    {
-        var p = busId.Trim().Split(':', '.');
-        return p.Length >= 3 && uint.TryParse(p[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var d)
-            && uint.TryParse(p[1], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var b)
-            && uint.TryParse(p[2], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var dev) ? (d, b, dev) : null;
+        catch
+        {
+            _nvml.Dispose();
+            throw;
+        }
     }
 
     public LabSample Read(double t, int phase)

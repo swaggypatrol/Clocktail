@@ -9,12 +9,16 @@ public readonly record struct PciAddress(uint Domain, uint Bus, uint Device, uin
     public override string ToString() => $"{Domain:x4}:{Bus:x2}:{Device:x2}.{Function:x}";
     public static PciAddress? Parse(string? text)
     {
-        var p = (text ?? "").Trim().Split(':', '.');
-        var n = new uint[4];
-        if (p.Length != 4) return null;
-        for (int i = 0; i < 4; i++)
-            if (!uint.TryParse(p[i], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out n[i])) return null;
-        return n[0] == 0 && n[1] <= 255 && n[2] <= 31 && n[3] == 0 ? new(n[0], n[1], n[2], n[3]) : null;
+        var p = (text ?? "").Trim().Split(':');
+        if (p.Length != 3) return null;
+        var slot = p[2].Split('.');
+        if (slot.Length != 2) return null;
+        static bool Hex(string value, out uint number) =>
+            uint.TryParse(value, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out number)
+            && value.All(Uri.IsHexDigit);
+        return Hex(p[0], out uint domain) && domain == 0 && Hex(p[1], out uint bus) && bus <= 255
+            && Hex(slot[0], out uint device) && device <= 31 && Hex(slot[1], out uint function) && function == 0
+            ? new(domain, bus, device, function) : null;
     }
 }
 
