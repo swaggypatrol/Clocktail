@@ -376,6 +376,7 @@ public sealed partial class BrokerDispatcher
         var path = WriteRegistry.Find(req.Kind);
         if (path == null) return Fail($"'{req.Kind}' is not a write path (one of: {string.Join(", ", WriteRegistry.Kinds)})", BrokerCode.NotAPath);
         if (req.Key == null || req.Value == null) return Fail("a write names a kind, a key and a value", BrokerCode.BadRequest);
+        if (path.Kind == ClockOffsets.Kind && req.P0Curve != P0CurvePolicy.Ordinary) return WriteP0WithCurve(target, req);
         string key = WriteKeys.Canonicalize(path.Kind, req.Key);
         var hw = Client(req.EnableSlots);
         var writer = new OwnedWriter(hw, target.Journal, target.Sentinel, _host);
@@ -384,10 +385,14 @@ public sealed partial class BrokerDispatcher
         // held before this program first touched the cell (a lowered stock value may be put back, even above the
         // ceiling). Asked before planning, with the same adoption rule the write itself applies.
         var original = writer.AdoptedOriginal(path.Kind, key);
-        var p = path.Prepare(hw, target.Session, key, req.Value, new WriteOptions(req.AllowCreate, Original: original));
+        var p = path.Prepare(hw, target.Session, key, req.Value, new WriteOptions(req.AllowCreate, Original: original, CurveFollows: path.Kind == ClockOffsets.Kind));
         if (p.Plan == null) return Fail(p.CannotWrite ?? $"{p.Cell.Id} cannot be written from '{req.Value}'", BrokerCode.CannotWrite);
 
-        var r = writer.Apply(target.Session, p.Cell, p.Plan, req.TakeOver, req.Value);
+        // Both public P0 routes capture native side effects through the same ownership path.
+        var r = path.Kind == ClockOffsets.Kind
+            ? new ClockOffsets(hw, target.Journal, target.Sentinel, _host).ApplyOwned(target.Session,
+                Enum.Parse<ClockDomain>(key, true), int.Parse(req.Value, System.Globalization.CultureInfo.InvariantCulture), req.TakeOver)
+            : writer.Apply(target.Session, p.Cell, p.Plan, req.TakeOver, req.Value);
         return new BrokerResponse(r.Tx.Succeeded, Result: Element(new
         {
             success = r.Tx.Succeeded,
@@ -402,6 +407,7 @@ public sealed partial class BrokerDispatcher
                     // The journal's view, as values a program can switch on; `ownership` is the same for a person.
                     hold = r.Hold.ToString(), original = r.Original, state_known = r.StateKnown,
                     checked_after_write = p.Cell.Spec.CheckAfterWrite != null,
+                    effective_curve_verified = path.Kind == ClockOffsets.Kind ? (bool?)false : null,
                     origin = original,
                     enabled_slots = req.EnableSlots,
                 },
@@ -463,6 +469,7 @@ public sealed partial class BrokerDispatcher
                 {
                     domain = domain.ToString().ToLowerInvariant(), requested_khz = req.Khz,
                     before_khz = r.BeforeKhz, after_khz = r.AfterKhz, freq_before_khz = r.FreqBeforeKhz, freq_after_khz = r.FreqAfterKhz,
+                    effective_curve_verified = false,
                     outcome = r.Tx.Outcome.ToString(), restore = r.Tx.Restore.ToString(), detail = r.Tx.Detail, veto = r.Tx.Veto,
                     driver = r.Tx.Driver?.ToString(), ownership = r.Ownership, sentinel_cleared = r.SentinelCleared, log = r.Tx.Log,
                 },

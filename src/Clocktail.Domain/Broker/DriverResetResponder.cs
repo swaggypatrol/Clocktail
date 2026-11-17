@@ -284,6 +284,7 @@ public sealed class DriverResetResponder(
         && res.TryGetProperty("experiment", out var e) && e.ValueKind == System.Text.Json.JsonValueKind.Object
         && e.TryGetProperty("Trial", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.Object;
 
+    /// <summary>Describe how much of the daily profile the broker applied after a lifecycle event.</summary>
     public static string ProfileSummary(BrokerResponse r)
     {
         if (r.Result is { } skip && skip.TryGetProperty("skipped", out var why) && why.ValueKind == System.Text.Json.JsonValueKind.String)
@@ -293,8 +294,12 @@ public sealed class DriverResetResponder(
         if (p.GetProperty("Suspended").GetBoolean()) return "suspended, the card stays at stock";
         int n = res.TryGetProperty("applied", out var a) ? a.GetArrayLength() : 0;
         string last = p.TryGetProperty("History", out var h) && h.ValueKind == System.Text.Json.JsonValueKind.Array && h.GetArrayLength() > 0 ? h[h.GetArrayLength() - 1].GetString()! : "";
-        bool partial = res.TryGetProperty("partial", out var pa) && pa.ValueKind == System.Text.Json.JsonValueKind.True;
-        return r.Ok ? $"{n} write(s) applied; {last}" : partial ? $"partly applied, {n} write(s): {r.Error}; {last}" : $"not applied: {r.Error}; {last}";
+        if (r.Ok) return $"{n} write(s) applied; {last}";
+        if (res.TryGetProperty("partial", out var partial))
+            return partial.ValueKind == System.Text.Json.JsonValueKind.True
+                ? $"partly applied, {n} write(s): {r.Error}; {last}"
+                : $"application incomplete: {r.Error}; {last}";
+        return $"not applied: {r.Error}; {last}";
     }
 
     private static string Summary(BrokerResponse r)

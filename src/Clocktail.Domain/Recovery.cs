@@ -134,6 +134,9 @@ public sealed class Recovery(NvClient hw, OwnershipJournal journal, ApplySentine
         var current = writer.Look(gpu, cell);
         if (current == null)
             return (Item(null, RecoveryAction.Refused, $"{cell.Id} could not be read; nothing written", null, false), false);
+        // A failed P0 give-back can still change the curve on its next attempt. Keep its captured original.
+        if (writer.CoupledHeld(cell))
+            return (Item(current, RecoveryAction.Refused, "a coupled control still needs to be restored first", null, true), false);
         if (current == item.Original)
         {
             // No driver write is needed, but dropping a dead owner's debt still mutates its journal.

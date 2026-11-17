@@ -241,6 +241,11 @@ public static class VfParser
     }
 }
 
+/// <summary>Validated Core control topology and offsets, independent of effective-frequency Status.
+/// This snapshot can record and restore controls for a P0 failure; it cannot plan or verify a new V/F tune.</summary>
+public sealed record VfControlSnapshot(VfLayoutId Layout, byte[] Info, byte[] Control, byte[] Mask,
+    IReadOnlyList<(int Index, int OffsetKhz)> Points);
+
 /// <summary>
 /// The read order the driver requires: Info first (it answers with the point mask), then Status and Control,
 /// each asked about exactly that mask. Status and Control are queries: with a zero mask the driver answers with
@@ -263,6 +268,21 @@ public static class VfReader
         var info = Get(hw, gpu, Slot.ClockClientClkVfPointsGetInfo, null, "V/F point information read");
         var control = Get(hw, gpu, Slot.ClockClientClkVfPointsGetControl, VfLayout.ReadMask(info), "V/F point control read");
         return VfParser.CoreOffsets(info, control);
+    }
+
+    /// <summary>Read budget offsets and, when their topology is supported, an ownership snapshot from the same
+    /// Info/Control query. Unsupported ownership topology does not discard readable budget data. No Status query.</summary>
+    public static (IReadOnlyList<(int Index, int OffsetKhz)> Offsets, VfControlSnapshot? Original) ReadControls(NvClient hw, GpuSession gpu)
+    {
+        var info = Get(hw, gpu, Slot.ClockClientClkVfPointsGetInfo, null, "V/F point information read");
+        var mask = VfLayout.ReadMask(info);
+        var control = Get(hw, gpu, Slot.ClockClientClkVfPointsGetControl, mask, "V/F point control read");
+        var points = VfParser.CoreOffsets(info, control);
+        // The supported masks identify distinct topologies without interpreting a derived frequency baseline.
+        var layout = VfLayout.Identify(VfMode.Regional, mask) ?? VfLayout.Identify(VfMode.Legacy, mask);
+        if (layout == null || points.Count != layout.Value.Editable || points.Where((p, i) => p.Index != i).Any())
+            return (points, null);
+        return (points, new(layout.Value.Id, info, control, mask, points));
     }
 
     private static byte[] Get(NvClient hw, GpuSession gpu, Slot slot, byte[]? mask, string what)
