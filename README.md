@@ -1,6 +1,6 @@
 # Clocktail
 
-English | [简体中文](README.zh-CN.md)
+English | [简体中文](README.zh-CN.md) · [Changes since v0.9.9 and rollback instructions](docs/releases/v0.10.0.md)
 
 Clocktail lets an MCP client measure and tune the voltage–frequency curve of an NVIDIA GeForce RTX 50 GPU on Windows x64. It reads the effective curve from the driver, runs repeatable workloads, and records the voltages and clocks the GPU actually reached. The supported hardware path requires compute capability 12.0. B100, B200 and GB200 systems are outside that path.
 
