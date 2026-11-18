@@ -1,6 +1,6 @@
 # Clocktail
 
-[English](README.md) | 简体中文
+[English](README.md) | 简体中文 · [v0.9.9 之后的改动和回滚步骤（英文）](docs/releases/v0.10.0.md)
 
 Clocktail 通过 MCP 在 Windows x64 上测量和调校 NVIDIA GeForce RTX 50 系列显卡的电压／频率曲线。它读取驱动实际生效的曲线，用可重复的负载校验计算结果，同时记录显卡在负载下到达的电压和频率。硬件调校路径要求 CUDA 计算能力 12.0。B100、B200 和 GB200 不在这条路径的支持范围内。
 
